@@ -21,7 +21,7 @@
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: #2b6ca3;
+  color: var(--brand);
 }
 
 .title {
@@ -56,7 +56,7 @@
 }
 
 .input:focus-visible {
-  outline: 2px solid #2b6ca3;
+  outline: 2px solid var(--brand);
   outline-offset: 1px;
   border-color: transparent;
 }
@@ -67,14 +67,14 @@
   font-family: inherit;
   font-weight: 600;
   color: #ffffff;
-  background: #2b6ca3;
+  background: var(--brand);
   border: none;
   border-radius: 8px;
   cursor: pointer;
 }
 
 .button:hover:not(:disabled) {
-  background: #235a89;
+  background: var(--brand-hover);
 }
 
 .button:disabled {
@@ -226,9 +226,8 @@
 /* ---------- Dark mode ---------- */
 
 @media (prefers-color-scheme: dark) {
-  .brand {
-    color: #74aedd;
-  }
+  /* .brand, .button and focus rings follow --brand / --brand-hover,
+     which globals.css already redefines for dark mode. */
 
   .subtitle,
   .checkedAt,
@@ -239,14 +238,6 @@
 
   .input {
     border-color: #35415a;
-  }
-
-  .button {
-    background: #2f7ab8;
-  }
-
-  .button:hover:not(:disabled) {
-    background: #3a89c9;
   }
 
   .button:focus-visible {

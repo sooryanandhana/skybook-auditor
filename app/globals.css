@@ -1,12 +1,29 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /* Skybook brand colours — sampled from the official logo file.
+     Used across the app and the client-facing PDF report. */
+  --skybook-deep: #264a9a; /* icon body, deepest blue */
+  --skybook-mid: #147ac3; /* icon lower section */
+  --skybook-bright: #05a2e4; /* arrow tip, brightest accent */
+
+  /* The blue used for buttons, links, and headings in light mode.
+     --skybook-mid is chosen over --skybook-bright for readable contrast
+     against white. */
+  --brand: var(--skybook-mid);
+  --brand-hover: var(--skybook-deep);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+
+    /* On dark backgrounds the deep blue is too dim to read, so the
+       brighter end of the brand palette takes over. */
+    --brand: #3f9fdc;
+    --brand-hover: var(--skybook-bright);
   }
 }
 

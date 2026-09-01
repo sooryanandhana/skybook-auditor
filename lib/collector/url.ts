@@ -7,7 +7,19 @@
 
 /** A cleaned-up address, or an explanation of why it can't be used. */
 export type NormalizeResult =
-  | { ok: true; url: URL }
+  | {
+      ok: true;
+      url: URL;
+      /**
+       * True when the user typed a bare domain and we added https:// ourselves.
+       *
+       * This matters: if we guessed https and the site only supports http, we
+       * may retry over http. But if the user explicitly typed https://, a
+       * failure must stay a failure — silently downgrading someone's explicit
+       * security choice would be wrong.
+       */
+      schemeWasAssumed: boolean;
+    }
   | { ok: false; reason: string };
 
 /**
@@ -31,9 +43,8 @@ export function normalizeUrl(input: string): NormalizeResult {
   }
 
   // If there's no "scheme" (the http:// part), assume https.
-  const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)
-    ? trimmed
-    : `https://${trimmed}`;
+  const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed);
+  const withScheme = hasScheme ? trimmed : `https://${trimmed}`;
 
   let url: URL;
   try {
@@ -59,5 +70,5 @@ export function normalizeUrl(input: string): NormalizeResult {
   // never sent to the server, so keeping it would be misleading.
   url.hash = "";
 
-  return { ok: true, url };
+  return { ok: true, url, schemeWasAssumed: !hasScheme };
 }

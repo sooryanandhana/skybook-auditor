@@ -4,21 +4,24 @@
 //   things (state) — all of which are browser-side behaviour.
 
 import { useState } from "react";
-import type { AuditData, AuditResponse, Severity } from "@/lib/types";
+import type { AuditData, AuditResponse, Severity, UptimeCheck } from "@/lib/types";
 import styles from "./page.module.css";
 
 export default function HomePage() {
-  // Three pieces of "state" — values the page remembers and re-renders when changed.
+  // Pieces of "state" — values the page remembers and re-renders when changed.
   const [url, setUrl] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState<AuditData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A failed audit can still have measured something — see AuditResponse.
+  const [errorUptime, setErrorUptime] = useState<UptimeCheck | null>(null);
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault(); // stop the browser reloading the page
 
     setIsLoading(true);
     setError(null);
+    setErrorUptime(null);
     setResult(null);
 
     try {
@@ -35,6 +38,7 @@ export default function HomePage() {
         setResult(payload.data);
       } else {
         setError(payload.error);
+        setErrorUptime(payload.uptime ?? null);
       }
     } catch {
       setError("Could not reach the audit service. Is the server running?");
@@ -86,7 +90,19 @@ export default function HomePage() {
         checks are still to come.
       </p>
 
-      {error && <p className={styles.error}>{error}</p>}
+      {error && (
+        <div className={styles.error}>
+          <p>{error}</p>
+          {/* We couldn't audit the page, but we did reach the server —
+              show what was genuinely measured rather than discarding it. */}
+          {errorUptime && (
+            <p className={styles.errorDetail}>
+              The server did respond ({errorUptime.statusCode}) in{" "}
+              {errorUptime.serverResponseTimeMs} ms, so the site itself is reachable.
+            </p>
+          )}
+        </div>
+      )}
 
       {result && <Results data={result} />}
     </main>

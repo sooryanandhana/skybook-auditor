@@ -70,9 +70,14 @@ export interface AuditData {
 /**
  * What the /api/audit endpoint sends back.
  *
- * Either the audit succeeded and `data` is present,
- * or it failed and `error` explains why. Never both.
+ * Either the audit succeeded and `data` is present, or it failed and `error`
+ * explains why.
+ *
+ * A failure can still carry `uptime`: if a site answers with a 404, we could
+ * not audit its content, but we genuinely did learn that the server is up and
+ * how fast it replied. Throwing that away would discard a real measurement.
+ * It is absent when we never reached the site at all.
  */
 export type AuditResponse =
   | { ok: true; data: AuditData }
-  | { ok: false; error: string };
+  | { ok: false; error: string; uptime?: UptimeCheck };

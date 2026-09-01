@@ -16,6 +16,38 @@
   gap: 0.35rem;
 }
 
+.brandRow {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+/*
+  Crops the Skybook logo file down to just its icon.
+
+  The source image is 3240x3240 with the icon occupying a 1109x953 region
+  starting at (1232, 875). To show only that region, the image is scaled up
+  inside a fixed box and shifted so the icon lands in view. Percentages are
+  relative to this box, so the crop holds at any size.
+*/
+.logoMark {
+  position: relative;
+  display: block;
+  flex-shrink: 0;
+  height: 32px;
+  aspect-ratio: 1109 / 953; /* the icon's true proportions */
+  overflow: hidden;
+}
+
+.logoImg {
+  position: absolute;
+  width: 292.16%; /* 3240 / 1109 */
+  height: 339.98%; /* 3240 / 953  */
+  left: -111.09%; /* -1232 / 1109 */
+  top: -91.82%; /*  -875 / 953  */
+  max-width: none; /* overrides any global img { max-width: 100% } */
+}
+
 .brand {
   font-size: 0.8rem;
   font-weight: 700;

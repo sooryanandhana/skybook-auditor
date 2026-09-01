@@ -46,7 +46,19 @@ export default function HomePage() {
   return (
     <main className={styles.main}>
       <header className={styles.header}>
-        <p className={styles.brand}>Skybook</p>
+        <div className={styles.brandRow}>
+          {/*
+            The logo file has ~77% empty padding around it, and stacks the icon
+            above the wordmark and tagline. We show only the icon here by
+            scaling the image up inside a fixed-size box that hides the overflow.
+            The crop values come from measuring the file's actual content bounds.
+          */}
+          <span className={styles.logoMark} aria-hidden="true">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/skybook-digital-logo-white.png" alt="" className={styles.logoImg} />
+          </span>
+          <p className={styles.brand}>Skybook</p>
+        </div>
         <h1 className={styles.title}>Website Audit</h1>
         <p className={styles.subtitle}>
           Enter a website address to check its speed, SEO, security, and technical health.

@@ -35,7 +35,7 @@ export type FetchPageResult =
 const NO_RESPONSE: UptimeCheck = {
   isOnline: false,
   statusCode: null,
-  responseTimeMs: null,
+  serverResponseTimeMs: null,
 };
 
 /**
@@ -85,7 +85,7 @@ export async function fetchPage(rawUrl: string): Promise<FetchPageResult> {
       };
     }
 
-    const responseTimeMs = Date.now() - startedAt;
+    const serverResponseTimeMs = Date.now() - startedAt;
 
     // A 3xx status with a Location header means "the page moved here".
     if (response.status >= 300 && response.status < 400) {
@@ -94,7 +94,7 @@ export async function fetchPage(rawUrl: string): Promise<FetchPageResult> {
         return {
           ok: false,
           reason: "The website sent an incomplete redirect.",
-          uptime: { isOnline: true, statusCode: response.status, responseTimeMs },
+          uptime: { isOnline: true, statusCode: response.status, serverResponseTimeMs },
         };
       }
 
@@ -106,7 +106,7 @@ export async function fetchPage(rawUrl: string): Promise<FetchPageResult> {
         return {
           ok: false,
           reason: "The website redirected to an address we couldn't read.",
-          uptime: { isOnline: true, statusCode: response.status, responseTimeMs },
+          uptime: { isOnline: true, statusCode: response.status, serverResponseTimeMs },
         };
       }
 
@@ -118,7 +118,7 @@ export async function fetchPage(rawUrl: string): Promise<FetchPageResult> {
     const uptime: UptimeCheck = {
       isOnline: response.ok,
       statusCode: response.status,
-      responseTimeMs,
+      serverResponseTimeMs,
     };
 
     if (!response.ok) {

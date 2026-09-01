@@ -40,8 +40,21 @@ export interface UptimeCheck {
   isOnline: boolean;
   /** HTTP status code, e.g. 200 = OK, 404 = not found. Null if we got no response at all. */
   statusCode: number | null;
-  /** How long the request took, in milliseconds. Null if it never responded. */
-  responseTimeMs: number | null;
+  /**
+   * Milliseconds until the server STARTED responding — the moment its reply
+   * headers arrived. Commonly called "time to first byte".
+   *
+   * This is NOT how long the page took to load. It excludes downloading the
+   * page content, and excludes the browser work of rendering it. A large page
+   * on a fast server has a low value here and can still feel slow to a visitor.
+   *
+   * It measures server responsiveness only. Actual page-load speed comes from
+   * the PageSpeed Insights data collected separately.
+   *
+   * Includes DNS lookup, connection setup, and any redirects along the way.
+   * Null if the site never responded.
+   */
+  serverResponseTimeMs: number | null;
 }
 
 /** One complete audit of one website. */

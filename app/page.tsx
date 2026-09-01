@@ -112,11 +112,14 @@ function Results({ data }: { data: AuditData }) {
             <dd>{data.uptime.statusCode ?? "—"}</dd>
           </div>
           <div>
-            <dt>Response time</dt>
+            {/* Deliberately not "response time" or "load time" — this measures
+                only how quickly the server began replying, not how long the
+                page took to load. */}
+            <dt>Server response</dt>
             <dd>
-              {data.uptime.responseTimeMs === null
+              {data.uptime.serverResponseTimeMs === null
                 ? "—"
-                : `${data.uptime.responseTimeMs} ms`}
+                : `${data.uptime.serverResponseTimeMs} ms`}
             </dd>
           </div>
         </dl>

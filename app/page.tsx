@@ -1,69 +1,143 @@
-import Image from "next/image";
+"use client";
+// ^ This tells Next.js the file runs in the BROWSER, not on the server.
+//   We need that because this page has a button, a text box, and remembers
+//   things (state) — all of which are browser-side behaviour.
+
+import { useState } from "react";
+import type { AuditData, AuditResponse, Severity } from "@/lib/types";
 import styles from "./page.module.css";
 
-export default function Home() {
+export default function HomePage() {
+  // Three pieces of "state" — values the page remembers and re-renders when changed.
+  const [url, setUrl] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [result, setResult] = useState<AuditData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault(); // stop the browser reloading the page
+
+    setIsLoading(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      // Send the URL to our own backend at /api/audit and wait for its answer.
+      const response = await fetch("/api/audit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+
+      const payload: AuditResponse = await response.json();
+
+      if (payload.ok) {
+        setResult(payload.data);
+      } else {
+        setError(payload.error);
+      }
+    } catch {
+      setError("Could not reach the audit service. Is the server running?");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   return (
-    <div className={styles.page}>
-      <main className={styles.main}>
-        <Image
-          className={styles.logo}
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main className={styles.main}>
+      <header className={styles.header}>
+        <p className={styles.brand}>Skybook</p>
+        <h1 className={styles.title}>Website Audit</h1>
+        <p className={styles.subtitle}>
+          Enter a website address to check its speed, SEO, security, and technical health.
+        </p>
+      </header>
+
+      <form className={styles.form} onSubmit={handleSubmit}>
+        <input
+          className={styles.input}
+          type="text"
+          value={url}
+          onChange={(event) => setUrl(event.target.value)}
+          placeholder="example.com"
+          aria-label="Website address"
+          disabled={isLoading}
         />
-        <div className={styles.intro}>
-          <h1>
-            To get started, edit the{" "}
-            <code className={styles.code}>page.tsx</code> file.
-          </h1>
-          <p>
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className={styles.ctas}>
-          <a
-            className={styles.primary}
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className={styles.logo}
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className={styles.secondary}
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+        <button className={styles.button} type="submit" disabled={isLoading || !url.trim()}>
+          {isLoading ? "Checking…" : "Run Audit"}
+        </button>
+      </form>
+
+      {/* Phase 2 reminder — removed in Phase 3 when real checks arrive. */}
+      <p className={styles.placeholderNotice}>
+        Showing placeholder data. Real website checks arrive in Phase 3.
+      </p>
+
+      {error && <p className={styles.error}>{error}</p>}
+
+      {result && <Results data={result} />}
+    </main>
   );
+}
+
+/** Displays one completed audit. */
+function Results({ data }: { data: AuditData }) {
+  return (
+    <section className={styles.results}>
+      <div className={styles.summary}>
+        <h2 className={styles.resultsUrl}>{data.url}</h2>
+        <p className={styles.checkedAt}>
+          Checked {new Date(data.checkedAt).toLocaleString()}
+        </p>
+        <dl className={styles.uptime}>
+          <div>
+            <dt>Status</dt>
+            <dd>{data.uptime.isOnline ? "Online" : "Offline"}</dd>
+          </div>
+          <div>
+            <dt>Status code</dt>
+            <dd>{data.uptime.statusCode ?? "—"}</dd>
+          </div>
+          <div>
+            <dt>Response time</dt>
+            <dd>
+              {data.uptime.responseTimeMs === null
+                ? "—"
+                : `${data.uptime.responseTimeMs} ms`}
+            </dd>
+          </div>
+        </dl>
+      </div>
+
+      <h3 className={styles.findingsHeading}>
+        Findings ({data.findings.length})
+      </h3>
+      <ul className={styles.findings}>
+        {data.findings.map((finding) => (
+          <li key={finding.id} className={styles.finding}>
+            <span className={`${styles.badge} ${styles[finding.severity]}`}>
+              {severityLabel(finding.severity)}
+            </span>
+            <div>
+              <p className={styles.findingTitle}>{finding.title}</p>
+              <p className={styles.evidence}>{finding.evidence}</p>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function severityLabel(severity: Severity): string {
+  switch (severity) {
+    case "critical":
+      return "Critical";
+    case "high":
+      return "High";
+    case "medium":
+      return "Medium";
+    case "good":
+      return "Good";
+  }
 }

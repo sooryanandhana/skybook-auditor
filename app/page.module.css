@@ -193,6 +193,14 @@
   font-weight: 600;
 }
 
+.emptyFindings {
+  font-size: 0.9rem;
+  color: #5b6779;
+  border: 1px dashed #d8e0ea;
+  border-radius: 8px;
+  padding: 0.8rem 0.9rem;
+}
+
 .findings {
   list-style: none;
   display: flex;
@@ -264,11 +272,13 @@
   .subtitle,
   .checkedAt,
   .evidence,
+  .emptyFindings,
   .uptime dt {
     color: #9aa7be;
   }
 
-  .input {
+  .input,
+  .emptyFindings {
     border-color: #35415a;
   }
 

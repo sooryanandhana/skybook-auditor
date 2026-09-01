@@ -80,9 +80,10 @@ export default function HomePage() {
         </button>
       </form>
 
-      {/* Phase 2 reminder — removed in Phase 3 when real checks arrive. */}
+      {/* Removed once all six Phase 3 checks are in place. */}
       <p className={styles.placeholderNotice}>
-        Showing placeholder data. Real website checks arrive in Phase 3.
+        Step 1 of 6: the page is really fetched. SEO, security, SSL/DNS and speed
+        checks are still to come.
       </p>
 
       {error && <p className={styles.error}>{error}</p>}
@@ -124,6 +125,11 @@ function Results({ data }: { data: AuditData }) {
       <h3 className={styles.findingsHeading}>
         Findings ({data.findings.length})
       </h3>
+      {data.findings.length === 0 && (
+        <p className={styles.emptyFindings}>
+          No checks have run yet — they arrive in steps 2 to 6.
+        </p>
+      )}
       <ul className={styles.findings}>
         {data.findings.map((finding) => (
           <li key={finding.id} className={styles.finding}>

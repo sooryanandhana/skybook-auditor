@@ -7,9 +7,13 @@
  *
  * Run with:  npm test
  */
-import { test } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { blocksEveryCrawler, findSitemapDirective } from "./technicalChecks.ts";
+import {
+  blocksEveryCrawler,
+  findSitemapDirective,
+  runTechnicalChecks,
+} from "./technicalChecks.ts";
 
 test("detects a site blocking all crawlers", () => {
   assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /"), true);
@@ -70,4 +74,208 @@ test("finds a Sitemap directive regardless of case", () => {
 
 test("returns null when there is no Sitemap line", () => {
   assert.equal(findSitemapDirective("User-agent: *\nDisallow:"), null);
+});
+
+// ---------------------------------------------------------------------------
+// The shared time budget
+//
+// Every request the technical checks make shares ONE clock. Before this, each
+// got its own timeout, so a slow sitemap could spend a full timeout on HEAD
+// and another on the GET fallback, on top of whatever robots.txt had used —
+// which is how a single audit reached twenty seconds on a real site.
+//
+// `fetch` is replaced with a stand-in and the host is a public IP literal, so
+// these tests contact nothing and need no DNS.
+// ---------------------------------------------------------------------------
+
+const PAGE = "https://93.184.216.34/";
+const realFetch = globalThis.fetch;
+
+/** Every request made, in order: "METHOD url". */
+let requests: string[] = [];
+
+beforeEach(() => {
+  requests = [];
+});
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+/** Installs a stand-in fetch that records requests and answers via `reply`. */
+function mockFetch(
+  reply: (method: string, url: string, init?: RequestInit) => Promise<Response>,
+): void {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    const url = input.toString();
+    requests.push(`${method} ${url}`);
+    return reply(method, url, init);
+  }) as typeof fetch;
+}
+
+/** A request that never answers until the shared deadline aborts it. */
+function hangUntilAborted(init?: RequestInit): Promise<Response> {
+  return new Promise((_, reject) => {
+    const signal = init?.signal;
+    const fail = () => {
+      const error = new Error("timed out");
+      error.name = "TimeoutError";
+      reject(error);
+    };
+    if (!signal) return;
+    if (signal.aborted) return fail();
+    signal.addEventListener("abort", fail);
+  });
+}
+
+const notFound = async () => new Response("", { status: 404 });
+const xml = (status = 200) =>
+  new Response("<urlset/>", { status, headers: { "content-type": "application/xml" } });
+
+function sitemapRequests(): string[] {
+  return requests.filter((r) => r.includes("/sitemap.xml"));
+}
+
+test("all requests together stay inside ONE shared budget", async () => {
+  // Both robots.txt and sitemap.xml hang. With a per-request timeout this
+  // would take two full budgets; with a shared one it takes a little over one.
+  mockFetch((_method, _url, init) => hangUntilAborted(init));
+
+  const budget = 300;
+  const startedAt = Date.now();
+  const result = await runTechnicalChecks(PAGE, budget);
+  const elapsed = Date.now() - startedAt;
+
+  assert.ok(
+    elapsed < budget * 1.8,
+    `two hanging requests took ${elapsed}ms; a shared ${budget}ms budget should not be spent twice`,
+  );
+  // Nothing was learned, and nothing is invented.
+  assert.equal(result.robotsTxtFound, false);
+  assert.equal(result.sitemapUrl, null);
+});
+
+test("a timed-out HEAD does NOT trigger the GET fallback", async () => {
+  // This doubling is what made a single audit take twenty seconds.
+  mockFetch(async (_method, url, init) => {
+    if (url.endsWith("/robots.txt")) return notFound();
+    return hangUntilAborted(init);
+  });
+
+  await runTechnicalChecks(PAGE, 200);
+
+  const made = sitemapRequests();
+  assert.equal(made.length, 1, `expected only the HEAD, got: ${made.join(", ")}`);
+  assert.ok(made[0].startsWith("HEAD"), "the single request should be the HEAD");
+});
+
+test("a 405 from the server DOES still trigger the GET fallback", async () => {
+  // 405 means the server answered and said it does not support HEAD, which is
+  // a real reason to ask again properly.
+  mockFetch(async (method, url) => {
+    if (url.endsWith("/robots.txt")) return notFound();
+    return method === "HEAD" ? new Response("", { status: 405 }) : xml();
+  });
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.deepEqual(sitemapRequests(), [
+    `HEAD ${PAGE}sitemap.xml`,
+    `GET ${PAGE}sitemap.xml`,
+  ]);
+  assert.equal(result.sitemapUrl, `${PAGE}sitemap.xml`);
+});
+
+test("a 501 from the server also triggers the GET fallback", async () => {
+  mockFetch(async (method, url) => {
+    if (url.endsWith("/robots.txt")) return notFound();
+    return method === "HEAD" ? new Response("", { status: 501 }) : xml();
+  });
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(sitemapRequests().length, 2);
+  assert.equal(result.sitemapUrl, `${PAGE}sitemap.xml`);
+});
+
+test("an ordinary 404 on HEAD does not trigger a pointless GET", async () => {
+  mockFetch(notFound);
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(sitemapRequests().length, 1);
+  assert.equal(result.sitemapUrl, null);
+});
+
+test("a successful HEAD does not trigger a GET either", async () => {
+  mockFetch(async (_method, url) => (url.endsWith("/robots.txt") ? notFound() : xml()));
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(sitemapRequests().length, 1);
+  assert.equal(result.sitemapUrl, `${PAGE}sitemap.xml`);
+});
+
+test("normal robots.txt and sitemap checks still work", async () => {
+  mockFetch(async (_method, url) => {
+    if (url.endsWith("/robots.txt")) {
+      return new Response(
+        "User-agent: *\nDisallow: /admin/\nSitemap: https://93.184.216.34/sm.xml",
+        { status: 200, headers: { "content-type": "text/plain" } },
+      );
+    }
+    return notFound();
+  });
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(result.robotsTxtFound, true);
+  assert.equal(result.robotsBlocksEverything, false);
+  assert.equal(result.sitemapUrl, "https://93.184.216.34/sm.xml");
+  // A sitemap named in robots.txt means the conventional location is not tried.
+  assert.equal(sitemapRequests().length, 0);
+});
+
+test("a site blocking all crawlers is still detected", async () => {
+  mockFetch(async (_method, url) => {
+    if (url.endsWith("/robots.txt")) {
+      return new Response("User-agent: *\nDisallow: /", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+    }
+    return notFound();
+  });
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+  assert.equal(result.robotsBlocksEverything, true);
+});
+
+test("a slow robots.txt leaves less time for the sitemap, not a fresh budget", async () => {
+  // The point of a shared clock: time spent early is time no longer available.
+  mockFetch(async (_method, url, init) => {
+    if (url.endsWith("/robots.txt")) return hangUntilAborted(init);
+    return xml();
+  });
+
+  const budget = 250;
+  const startedAt = Date.now();
+  await runTechnicalChecks(PAGE, budget);
+  const elapsed = Date.now() - startedAt;
+
+  assert.ok(
+    elapsed < budget * 1.8,
+    `robots.txt consumed the budget, so the run should end near ${budget}ms; took ${elapsed}ms`,
+  );
+});
+
+test("no request is made at all once the budget is already gone", async () => {
+  mockFetch(async () => xml());
+  // A budget of zero is already expired before the first request.
+  const result = await runTechnicalChecks(PAGE, 0);
+
+  assert.equal(requests.length, 0, "nothing should have been requested");
+  assert.equal(result.robotsTxtFound, false);
+  assert.equal(result.sitemapUrl, null);
 });

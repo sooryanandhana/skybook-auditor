@@ -3,11 +3,44 @@
 import { safeFetch } from "./safety.ts";
 import type { TechnicalData } from "@/lib/types";
 
-const TIMEOUT_MS = 8_000;
+/**
+ * The total time ALL technical checks may take together.
+ *
+ * This is one budget shared across every request, not a limit per request.
+ * Giving each request its own timeout let a single audit run for 20 seconds:
+ * a slow sitemap could consume a full timeout on HEAD and another on the GET
+ * fallback, on top of whatever robots.txt had already used. Multi-page
+ * crawling would multiply that by the page count.
+ */
+const TOTAL_BUDGET_MS = 10_000;
+
 const USER_AGENT = "SkybookAuditBot/1.0 (+website audit tool)";
 
 /** robots.txt files are small; anything larger is not worth reading. */
 const MAX_ROBOTS_BYTES = 512_000;
+
+/**
+ * A shared countdown for a group of requests.
+ *
+ * Every request asks it for a signal, so they all share one clock rather than
+ * each starting a fresh timer.
+ */
+interface Deadline {
+  /** Whether the budget is already used up. */
+  expired(): boolean;
+  /** An abort signal that fires when the SHARED budget runs out. */
+  signal(): AbortSignal;
+}
+
+function createDeadline(budgetMs: number): Deadline {
+  const endsAt = Date.now() + budgetMs;
+  return {
+    expired: () => Date.now() >= endsAt,
+    // Never zero: a zero-length timeout aborts before the request is even sent,
+    // which would look like a network failure rather than a timeout.
+    signal: () => AbortSignal.timeout(Math.max(1, endsAt - Date.now())),
+  };
+}
 
 /**
  * Checks the site-level files search engines look for.
@@ -19,16 +52,23 @@ const MAX_ROBOTS_BYTES = 512_000;
  * and we only build URLs on that same origin — so no new address is being
  * reached that wasn't already approved.
  */
-export async function runTechnicalChecks(pageUrl: string): Promise<TechnicalData> {
+export async function runTechnicalChecks(
+  pageUrl: string,
+  budgetMs: number = TOTAL_BUDGET_MS,
+): Promise<TechnicalData> {
   const origin = new URL(pageUrl).origin;
 
-  const robots = await fetchRobotsTxt(`${origin}/robots.txt`);
+  // One clock for every request below. Whatever robots.txt spends is time the
+  // sitemap check no longer has.
+  const deadline = createDeadline(budgetMs);
+
+  const robots = await fetchRobotsTxt(`${origin}/robots.txt`, deadline);
 
   // A sitemap can be declared inside robots.txt. If it isn't, check the
   // conventional location before concluding there isn't one.
   const sitemapFromRobots = robots.text ? findSitemapDirective(robots.text) : null;
   const sitemapUrl =
-    sitemapFromRobots ?? (await findDefaultSitemap(`${origin}/sitemap.xml`));
+    sitemapFromRobots ?? (await findDefaultSitemap(`${origin}/sitemap.xml`, deadline));
 
   return {
     robotsTxtFound: robots.found,
@@ -37,13 +77,18 @@ export async function runTechnicalChecks(pageUrl: string): Promise<TechnicalData
   };
 }
 
-async function fetchRobotsTxt(url: string): Promise<{ found: boolean; text: string | null }> {
+async function fetchRobotsTxt(
+  url: string,
+  deadline: Deadline,
+): Promise<{ found: boolean; text: string | null }> {
+  if (deadline.expired()) return { found: false, text: null };
+
   try {
     // safeFetch, not fetch: a site can redirect /robots.txt anywhere it likes,
     // including at a private address. Every hop is safety-checked.
     const response = await safeFetch(url, {
       headers: { "User-Agent": USER_AGENT },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: deadline.signal(),
     });
 
     // Many sites answer 404 here, which simply means "no robots.txt".
@@ -135,22 +180,35 @@ export function findSitemapDirective(robotsTxt: string): string | null {
 }
 
 /** Checks whether the conventional /sitemap.xml exists. */
-async function findDefaultSitemap(url: string): Promise<string | null> {
+async function findDefaultSitemap(url: string, deadline: Deadline): Promise<string | null> {
+  if (deadline.expired()) return null;
+
   try {
     // HEAD asks only "does this exist?" without downloading the file, which
-    // can be large. Not every server supports it, so fall back to GET.
+    // can be large.
     let response = await safeFetch(url, {
       method: "HEAD",
       headers: { "User-Agent": USER_AGENT },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: deadline.signal(),
     });
 
-    // 405 Method Not Allowed / 501 Not Implemented mean "we don't do HEAD",
-    // not "no sitemap" — ask again properly before concluding it's absent.
-    if (!response || response.status === 405 || response.status === 501) {
+    /*
+     * The GET fallback is ONLY for a server that answered and said it does not
+     * do HEAD. 405 Method Not Allowed and 501 Not Implemented are exactly that.
+     *
+     * A null response means the request never completed — a timeout, a network
+     * failure, or an address the safety check refused. Retrying with GET there
+     * would repeat a request we already know does not work, and on a slow
+     * server it would burn a second full timeout for nothing. That doubling was
+     * how a single audit reached twenty seconds.
+     */
+    const serverRejectedHead =
+      response !== null && (response.status === 405 || response.status === 501);
+
+    if (serverRejectedHead && !deadline.expired()) {
       response = await safeFetch(url, {
         headers: { "User-Agent": USER_AGENT },
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        signal: deadline.signal(),
       });
     }
 

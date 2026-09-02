@@ -2,6 +2,7 @@
 // Next.js resolves it the same way.
 import { normalizeUrl } from "./url.ts";
 import { checkHostnameIsPublic } from "./safety.ts";
+import { createDeadline, type Deadline } from "./deadline.ts";
 import type { CertificateProblem, UptimeCheck } from "@/lib/types";
 
 export type { CertificateProblem };
@@ -140,6 +141,31 @@ export function classifyConnectionError(error: unknown): {
 }
 
 /**
+ * Puts an unsuccessful HTTP status into words.
+ *
+ * The distinction that matters: a site REFUSING our scanner is not a site that
+ * is broken. 401, 403 and 429 all mean the server understood us perfectly and
+ * declined — usually a firewall or bot protection. Calling that "an error"
+ * would tell a salesperson their prospect's website is failing when visitors
+ * can use it perfectly well.
+ */
+export function describeErrorStatus(status: number): string {
+  if (status === 401) {
+    return `The website requires a login (${status}), so its pages could not be checked. This is not a fault with the site.`;
+  }
+  if (status === 403) {
+    return `The website refused our request (${status}). This usually means it blocks automated checks — it does not mean the site is broken for visitors.`;
+  }
+  if (status === 429) {
+    return `The website asked us to slow down (${status}). It is limiting automated requests, not failing.`;
+  }
+  if (status >= 500) {
+    return `The website's server reported a problem (${status}).`;
+  }
+  return `The website responded with an error (${status}).`;
+}
+
+/**
  * Downloads a web page, safely.
  *
  * Redirects are followed one at a time rather than automatically, because
@@ -147,13 +173,20 @@ export function classifyConnectionError(error: unknown): {
  * allowed to redirect to a private one, and that's exactly the trick the
  * safety check exists to stop.
  */
-export async function fetchPage(rawUrl: string): Promise<FetchPageResult> {
+export async function fetchPage(
+  rawUrl: string,
+  /**
+   * The audit's shared clock. When omitted, one is created just for this
+   * fetch — so calling fetchPage on its own still cannot run forever.
+   */
+  deadline: Deadline = createDeadline(TOTAL_TIMEOUT_MS),
+): Promise<FetchPageResult> {
   const normalized = normalizeUrl(rawUrl);
   if (!normalized.ok) {
     return { ok: false, reason: normalized.reason, uptime: null };
   }
 
-  const first = await attemptFetch(normalized.url, false);
+  const first = await attemptFetch(normalized.url, deadline, false);
 
   // If we *guessed* https and simply couldn't connect, the site may only
   // support plain http. Retrying tells us something worth knowing, rather
@@ -165,14 +198,18 @@ export async function fetchPage(rawUrl: string): Promise<FetchPageResult> {
     !first.ok &&
     first.uptime === null &&
     normalized.schemeWasAssumed &&
-    normalized.url.protocol === "https:";
+    normalized.url.protocol === "https:" &&
+    // The retry shares the same clock, so there is no point starting one with
+    // nothing left. Previously the second attempt got a fresh 20 seconds,
+    // which is how a single fetch could take forty.
+    !deadline.expired();
 
   if (shouldRetryOverHttp) {
     const httpUrl = new URL(normalized.url.toString());
     httpUrl.protocol = "http:";
     // Pass along why HTTPS failed, so a broken certificate is still reported
     // even though we ended up reading the page over plain HTTP.
-    const second = await attemptFetch(httpUrl, true, first.certificateProblem);
+    const second = await attemptFetch(httpUrl, deadline, true, first.certificateProblem);
     // Only prefer the http result if it actually worked.
     if (second.ok) return second;
   }
@@ -183,6 +220,7 @@ export async function fetchPage(rawUrl: string): Promise<FetchPageResult> {
 /** One attempt at fetching, following redirects from a given starting address. */
 async function attemptFetch(
   startUrl: URL,
+  deadline: Deadline,
   httpsUnavailable: boolean,
   certificateProblem?: CertificateProblem,
 ): Promise<FetchPageResult> {
@@ -191,8 +229,7 @@ async function attemptFetch(
   const startedAt = Date.now();
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const elapsed = Date.now() - startedAt;
-    if (elapsed > TOTAL_TIMEOUT_MS) {
+    if (deadline.expired()) {
       return { ok: false, reason: "The website took too long to respond.", uptime: null };
     }
 
@@ -201,10 +238,6 @@ async function attemptFetch(
     if (!safety.safe) {
       return { ok: false, reason: safety.reason, uptime: null };
     }
-
-    // Whichever is shorter: the per-request limit, or what's left of the budget.
-    const remaining = Math.max(1, TOTAL_TIMEOUT_MS - (Date.now() - startedAt));
-    const timeout = Math.min(REQUEST_TIMEOUT_MS, remaining);
 
     let response: Response;
     try {
@@ -215,7 +248,9 @@ async function attemptFetch(
           "User-Agent": USER_AGENT,
           Accept: "text/html,application/xhtml+xml",
         },
-        signal: AbortSignal.timeout(timeout),
+        // Whichever is shorter: this request's own cap, or what is left of
+        // the audit's shared budget.
+        signal: deadline.signal(REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
       const classified = classifyConnectionError(error);
@@ -277,11 +312,7 @@ async function attemptFetch(
     }
 
     if (!response.ok) {
-      return {
-        ok: false,
-        reason: `The website responded with an error (${response.status}).`,
-        uptime,
-      };
+      return { ok: false, reason: describeErrorStatus(response.status), uptime };
     }
 
     // Make sure we got a web page, not a PDF or an image.

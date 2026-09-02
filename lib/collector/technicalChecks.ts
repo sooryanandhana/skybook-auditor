@@ -1,6 +1,7 @@
 // The .ts extension is required so Node can run the unit tests directly;
 // Next.js resolves it the same way.
 import { safeFetch } from "./safety.ts";
+import { capDeadline, createDeadline, type Deadline } from "./deadline.ts";
 import type { TechnicalData } from "@/lib/types";
 
 /**
@@ -20,27 +21,10 @@ const USER_AGENT = "SkybookAuditBot/1.0 (+website audit tool)";
 const MAX_ROBOTS_BYTES = 512_000;
 
 /**
- * A shared countdown for a group of requests.
- *
- * Every request asks it for a signal, so they all share one clock rather than
- * each starting a fresh timer.
+ * The shared countdown now lives in its own module, because the page fetch
+ * uses the same one — that is what keeps a whole audit inside one budget
+ * rather than each part keeping its own clock.
  */
-interface Deadline {
-  /** Whether the budget is already used up. */
-  expired(): boolean;
-  /** An abort signal that fires when the SHARED budget runs out. */
-  signal(): AbortSignal;
-}
-
-function createDeadline(budgetMs: number): Deadline {
-  const endsAt = Date.now() + budgetMs;
-  return {
-    expired: () => Date.now() >= endsAt,
-    // Never zero: a zero-length timeout aborts before the request is even sent,
-    // which would look like a network failure rather than a timeout.
-    signal: () => AbortSignal.timeout(Math.max(1, endsAt - Date.now())),
-  };
-}
 
 /**
  * Checks the site-level files search engines look for.
@@ -54,13 +38,28 @@ function createDeadline(budgetMs: number): Deadline {
  */
 export async function runTechnicalChecks(
   pageUrl: string,
-  budgetMs: number = TOTAL_BUDGET_MS,
+  /**
+   * The audit's clock, or a number of milliseconds to run on its own.
+   * Sharing the audit's clock is what keeps the whole audit inside one budget.
+   */
+  budget: number | Deadline = TOTAL_BUDGET_MS,
 ): Promise<TechnicalData> {
   const origin = new URL(pageUrl).origin;
 
-  // One clock for every request below. Whatever robots.txt spends is time the
-  // sitemap check no longer has.
-  const deadline = createDeadline(budgetMs);
+  /*
+   * One clock for every request below, so whatever robots.txt spends is time
+   * the sitemap check no longer has.
+   *
+   * When given the audit's own deadline, these checks are ALSO capped at their
+   * own budget. Using the audit's remaining time directly would let them
+   * consume every second the page fetch did not — turning a ten-second limit
+   * back into "whatever is left", which is the problem this budget exists to
+   * prevent.
+   */
+  const deadline =
+    typeof budget === "number"
+      ? createDeadline(budget)
+      : capDeadline(budget, TOTAL_BUDGET_MS);
 
   const robots = await fetchRobotsTxt(`${origin}/robots.txt`, deadline);
 

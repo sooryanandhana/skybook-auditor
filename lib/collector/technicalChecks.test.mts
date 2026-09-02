@@ -14,6 +14,7 @@ import {
   findSitemapDirective,
   runTechnicalChecks,
 } from "./technicalChecks.ts";
+import { createDeadline } from "./deadline.ts";
 
 test("detects a site blocking all crawlers", () => {
   assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /"), true);
@@ -267,6 +268,37 @@ test("a slow robots.txt leaves less time for the sitemap, not a fresh budget", a
   assert.ok(
     elapsed < budget * 1.8,
     `robots.txt consumed the budget, so the run should end near ${budget}ms; took ${elapsed}ms`,
+  );
+});
+
+test("given the audit's clock, the checks still keep their OWN budget", async () => {
+  // Handing these checks the audit's deadline must not let them use all the
+  // time the page fetch did not. Their ten-second limit still applies.
+  mockFetch(async (_method, _url, init) => hangUntilAborted(init));
+
+  // An audit deadline far larger than the technical checks' own budget.
+  const auditDeadline = createDeadline(30_000);
+  const startedAt = Date.now();
+  await runTechnicalChecks(PAGE, auditDeadline);
+  const elapsed = Date.now() - startedAt;
+
+  assert.ok(
+    elapsed < 12_000,
+    `the checks should stop at their own ~10s budget, not run for the audit's 30s; took ${elapsed}ms`,
+  );
+  assert.ok(auditDeadline.remainingMs() > 15_000, "the audit should still have time left");
+});
+
+test("the checks stop early when the audit's clock runs out first", async () => {
+  mockFetch(async (_method, _url, init) => hangUntilAborted(init));
+
+  const nearlySpent = createDeadline(150);
+  const startedAt = Date.now();
+  await runTechnicalChecks(PAGE, nearlySpent);
+
+  assert.ok(
+    Date.now() - startedAt < 600,
+    "should follow the audit's shorter clock, not its own longer one",
   );
 });
 

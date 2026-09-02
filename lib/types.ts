@@ -432,7 +432,13 @@ export interface AuditData {
   fetch: FetchData;
   uptime: UptimeCheck;
   seo: SeoData;
-  technical: TechnicalData;
+  /**
+   * robots.txt and sitemap findings.
+   *
+   * Null when the audit ran out of time before these checks could run — which
+   * is NOT the same as "this site has no robots.txt". `timedOut` says why.
+   */
+  technical: TechnicalData | null;
 
   /** Speed / Core Web Vitals. Module not built yet. */
   performance: NotYetImplemented;
@@ -450,6 +456,15 @@ export interface AuditData {
    * Empty until the severity-rules module is built.
    */
   findings: Finding[];
+
+  /**
+   * True when the audit's overall time budget ran out before every check
+   * finished. The checks that did run are still reported; the ones that did
+   * not are null.
+   *
+   * This exists so a partial audit is never mistaken for a complete one.
+   */
+  timedOut: boolean;
 }
 
 /**
@@ -465,4 +480,18 @@ export interface AuditData {
  */
 export type AuditResponse =
   | { ok: true; data: AuditData }
-  | { ok: false; error: string; uptime?: UptimeCheck };
+  | {
+      ok: false;
+      error: string;
+      uptime?: UptimeCheck;
+      /**
+       * Why an HTTPS connection failed, when that is what stopped the audit.
+       *
+       * The `error` message already says this in English, but a sentence is
+       * not something the severity rules or Claude should have to parse. This
+       * is the same value that reaches `fetch.certificateProblem` when the
+       * page can still be read over plain HTTP — kept here for the case where
+       * it cannot, so the finding is not lost with the failure.
+       */
+      certificateProblem?: CertificateProblem;
+    };

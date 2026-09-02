@@ -261,12 +261,27 @@ function MeasuredFacts({ data }: { data: AuditData }) {
         <Fact label="Language" value={seo.langAttribute ?? "— not set —"} />
         <Fact label="Canonical URL" value={seo.canonicalUrl ?? "— not set —"} />
         <Fact label="Mobile viewport tag" value={seo.hasViewportMeta ? "Present" : "Missing"} />
+        {/* technical is null when the audit ran out of time. Saying "Not
+            found" there would claim we looked when we did not. */}
         <Fact
           label="robots.txt"
-          value={technical.robotsTxtFound ? "Found" : "Not found"}
-          note={technical.robotsBlocksEverything ? "Blocks all crawlers" : undefined}
+          value={
+            technical === null
+              ? "Not checked — the audit ran out of time"
+              : technical.robotsTxtFound
+                ? "Found"
+                : "Not found"
+          }
+          note={technical?.robotsBlocksEverything ? "Blocks all crawlers" : undefined}
         />
-        <Fact label="Sitemap" value={technical.sitemapUrl ?? "— not found —"} />
+        <Fact
+          label="Sitemap"
+          value={
+            technical === null
+              ? "Not checked — the audit ran out of time"
+              : (technical.sitemapUrl ?? "— not found —")
+          }
+        />
       </dl>
 
       <h3 className={styles.findingsHeading}>Security</h3>

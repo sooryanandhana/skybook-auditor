@@ -4,7 +4,18 @@ import { runSeoChecks } from "@/lib/collector/seoChecks";
 import { runSecurityChecks } from "@/lib/collector/securityChecks";
 import { runTechnicalChecks } from "@/lib/collector/technicalChecks";
 import { normalizeUrl } from "@/lib/collector/url";
-import type { AuditData, AuditResponse, Finding } from "@/lib/types";
+import { createDeadline } from "@/lib/collector/deadline";
+import { callerKey, checkRateLimit } from "@/lib/rateLimit";
+import type { AuditData, AuditResponse, Finding, TechnicalData } from "@/lib/types";
+
+/**
+ * The longest one audit may take, covering every request it makes.
+ *
+ * Each part used to keep its own timer — the page fetch allowed 20 seconds and
+ * could run twice, the technical checks another 10 — so nothing capped the
+ * total and a slow site could hold a request open for around fifty seconds.
+ */
+const AUDIT_BUDGET_MS = 30_000;
 
 /**
  * POST /api/audit
@@ -19,6 +30,26 @@ import type { AuditData, AuditResponse, Finding } from "@/lib/types";
  * Never claim a measurement we didn't take.
  */
 export async function POST(request: Request): Promise<NextResponse<AuditResponse>> {
+  // Checked before any work is done, so a caller over the limit costs us
+  // nothing — not a page fetch, and from the next step on, not a paid API call.
+  const limit = checkRateLimit(callerKey(request));
+  if (!limit.allowed) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `Too many audits in a short time. Please wait ${limit.retryAfterSeconds} seconds and try again.`,
+      },
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(limit.retryAfterSeconds),
+          "X-RateLimit-Limit": String(limit.limit),
+          "X-RateLimit-Remaining": "0",
+        },
+      },
+    );
+  }
+
   let url: string;
 
   try {
@@ -38,7 +69,11 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
     );
   }
 
-  const result = await fetchPage(url);
+  // One clock for the whole audit. Every check below shares it, so time spent
+  // fetching the page is time the later checks no longer have.
+  const deadline = createDeadline(AUDIT_BUDGET_MS);
+
+  const result = await fetchPage(url, deadline);
 
   if (!result.ok) {
     return NextResponse.json(
@@ -48,6 +83,11 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
         // Present only when the site actually answered. Keeping it means a
         // 404 or 500 still reports the server as reachable, with its timing.
         ...(result.uptime ? { uptime: result.uptime } : {}),
+        // The message says this in English too, but nothing later should have
+        // to read English to find out the certificate expired.
+        ...(result.certificateProblem
+          ? { certificateProblem: result.certificateProblem }
+          : {}),
       },
       { status: 422 },
     );
@@ -55,6 +95,7 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
 
   const { page } = result;
 
+  // These two read data we already hold, so they cost no time and always run.
   const seo = runSeoChecks(page.html, page.finalUrl);
   const security = runSecurityChecks(
     page.headers,
@@ -62,7 +103,17 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
     page.servedOverHttps,
     page.setCookieHeaders,
   );
-  const technical = await runTechnicalChecks(page.finalUrl);
+
+  /*
+   * The technical checks make their own requests, so they are the part that
+   * can be cut short. When the budget is gone we report null rather than
+   * running them with no time — null means "not checked", and is very
+   * different from "this site has no robots.txt".
+   */
+  let technical: TechnicalData | null = null;
+  if (!deadline.expired()) {
+    technical = await runTechnicalChecks(page.finalUrl, deadline);
+  }
 
   // The address as we requested it, before any redirects. normalizeUrl already
   // succeeded inside fetchPage, so this cannot fail here; the fallback keeps
@@ -97,6 +148,9 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
 
     // Populated once the severity-rules module exists.
     findings: [] as Finding[],
+
+    // So a partial audit is never mistaken for a complete one.
+    timedOut: technical === null,
   };
 
   return NextResponse.json({ ok: true, data });

@@ -10,7 +10,13 @@
  */
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { fetchPage, classifyConnectionError, decodeHtml } from "./fetchPage.ts";
+import {
+  fetchPage,
+  classifyConnectionError,
+  decodeHtml,
+  describeErrorStatus,
+} from "./fetchPage.ts";
+import { createDeadline } from "./deadline.ts";
 
 /** A public IP, so the safety check passes without contacting a DNS server. */
 const HOST = "93.184.216.34";
@@ -304,6 +310,110 @@ test("recognises a timeout", () => {
 test("falls back to a general message for an unknown failure", () => {
   assert.match(classifyConnectionError(networkError("SOMETHING_NEW")).reason, /could not connect/i);
   assert.match(classifyConnectionError(new Error("plain")).reason, /could not connect/i);
+});
+
+// ---------------------------------------------------------------------------
+// A site refusing us is not a site that is broken
+// ---------------------------------------------------------------------------
+
+test("says a 403 is a refusal, not a fault with the website", () => {
+  // A salesperson reading "error" would tell a prospect their site is broken.
+  // It is not — visitors can use it fine; we were blocked.
+  const message = describeErrorStatus(403);
+  assert.match(message, /refused/i);
+  assert.match(message, /does not mean the site is broken/i);
+  assert.doesNotMatch(message, /responded with an error/i);
+});
+
+test("says a 401 means a login is needed, not a fault", () => {
+  const message = describeErrorStatus(401);
+  assert.match(message, /requires a login/i);
+  assert.match(message, /not a fault/i);
+});
+
+test("says a 429 means slow down, not failure", () => {
+  const message = describeErrorStatus(429);
+  assert.match(message, /slow down|limiting/i);
+  assert.doesNotMatch(message, /responded with an error/i);
+});
+
+test("still calls a 500 a problem with the server", () => {
+  // This one really is the website failing.
+  assert.match(describeErrorStatus(500), /server reported a problem/i);
+  assert.match(describeErrorStatus(503), /server reported a problem/i);
+});
+
+test("keeps the plain wording for other error statuses", () => {
+  assert.match(describeErrorStatus(404), /responded with an error \(404\)/i);
+  assert.match(describeErrorStatus(410), /responded with an error \(410\)/i);
+});
+
+test("a refused page still reports the server as reachable", async () => {
+  queued = [htmlResponse("Forbidden", 403)];
+  const result = await fetchPage(`https://${HOST}/`);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /refused/i);
+  assert.equal(result.uptime?.isOnline, true, "the server answered, so it is up");
+  assert.equal(result.uptime?.statusCode, 403);
+});
+
+// ---------------------------------------------------------------------------
+// The shared audit deadline
+// ---------------------------------------------------------------------------
+
+test("stops immediately when the shared budget is already gone", async () => {
+  // fetchPage no longer gets its own fresh clock — it uses the audit's.
+  const spent = createDeadline(0);
+  const result = await fetchPage(`https://${HOST}/`, spent);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /too long to respond/i);
+  assert.equal(requested.length, 0, "nothing should have been requested");
+});
+
+test("does NOT retry over HTTP once the shared budget is gone", async () => {
+  // The retry used to get a fresh 20 seconds, which is how one fetch could
+  // take forty. It now shares the same clock.
+  const deadline = createDeadline(80);
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requested.push(input.toString());
+    // Spend the whole budget, then fail as a connection error would.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const error = new TypeError("fetch failed");
+    (error as unknown as { cause: unknown }).cause = { code: "ECONNREFUSED" };
+    throw error;
+  }) as typeof fetch;
+
+  const result = await fetchPage(HOST, deadline); // bare host, so https is a guess
+
+  assert.equal(result.ok, false);
+  assert.equal(requested.length, 1, "the http retry should not have been attempted");
+  assert.ok(requested[0].startsWith("https://"), "only the https attempt was made");
+});
+
+test("still retries over HTTP when the budget allows it", async () => {
+  queued = [
+    networkError("ECONNREFUSED"),
+    htmlResponse("<html><body>Plain</body></html>"),
+  ];
+  const result = await fetchPage(HOST, createDeadline(5_000));
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.page.httpsUnavailable, true);
+  assert.equal(requested.length, 2);
+});
+
+test("a generous shared budget does not change ordinary behaviour", async () => {
+  queued = [htmlResponse("<html><head><title>Hi</title></head><body></body></html>")];
+  const result = await fetchPage(`https://${HOST}/`, createDeadline(10_000));
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.page.uptime.statusCode, 200);
 });
 
 // ---------------------------------------------------------------------------

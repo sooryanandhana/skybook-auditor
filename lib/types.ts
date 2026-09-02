@@ -204,6 +204,123 @@ export interface TechnicalData {
 }
 
 // ---------------------------------------------------------------------------
+// security — protective settings the server sent, and insecure page resources
+// ---------------------------------------------------------------------------
+
+/** One security header: was it sent, and what did it say? */
+export interface SecurityHeader {
+  /** Whether the server sent this header at all. */
+  present: boolean;
+  /**
+   * Exactly what the server sent, or null when absent.
+   *
+   * Kept verbatim so a human can check our reading of it. This is text from
+   * someone else's server — display it as plain text, never as markup.
+   */
+  value: string | null;
+}
+
+/**
+ * Strict-Transport-Security, read in detail.
+ *
+ * Worth parsing rather than just checking presence: `max-age=0` is a header
+ * that is technically there and deliberately does nothing. Counting it as
+ * "protected" would be wrong.
+ */
+export interface HstsData {
+  /**
+   * Whether HSTS can do anything here. It is only meaningful on an HTTPS
+   * page — on a plain HTTP page the header is ignored by browsers, so
+   * reporting it as "missing" would be noise on top of the far bigger
+   * problem that the site has no HTTPS.
+   */
+  applicable: boolean;
+  /** How long browsers are told to stay on HTTPS. Null if absent or unreadable. */
+  maxAgeSeconds: number | null;
+  /** True when max-age is explicitly 0, which switches HSTS off. */
+  disabledByZeroMaxAge: boolean;
+  /** Whether subdomains are covered too. */
+  includesSubdomains: boolean;
+  /** Whether the site asks to be in browsers' built-in preload list. */
+  preload: boolean;
+}
+
+/** One resource the page loads over plain HTTP. */
+export interface MixedContentItem {
+  /** The insecure address, exactly as written in the page. */
+  url: string;
+  /** Which element referred to it, e.g. "img", "script". */
+  element: string;
+  /**
+   * "active" resources (scripts, stylesheets, iframes) can change the page,
+   * so browsers usually BLOCK them outright — the page may visibly break.
+   * "passive" resources (images, audio, video) are usually allowed but
+   * downgrade the padlock and show a warning.
+   */
+  kind: "active" | "passive";
+}
+
+export interface MixedContentData {
+  /**
+   * Whether mixed content is possible here. Only an HTTPS page can have it;
+   * on an HTTP page every resource is insecure by definition, which is the
+   * same single finding, not dozens.
+   */
+  applicable: boolean;
+  /** How many insecure resources were found in total. */
+  total: number;
+  /** How many of those are the blocking kind. */
+  activeCount: number;
+  /**
+   * The insecure resources found, capped at MIXED_CONTENT_LIMIT.
+   * `total` is the true count even when this list is shorter.
+   */
+  items: MixedContentItem[];
+  /** True when more were found than this list holds. */
+  truncated: boolean;
+}
+
+export interface SecurityData {
+  /** Whether the page itself was served over HTTPS. Everything else depends on this. */
+  servedOverHttps: boolean;
+
+  strictTransportSecurity: SecurityHeader;
+  contentSecurityPolicy: SecurityHeader;
+  xFrameOptions: SecurityHeader;
+  xContentTypeOptions: SecurityHeader;
+  referrerPolicy: SecurityHeader;
+  permissionsPolicy: SecurityHeader;
+
+  hsts: HstsData;
+  mixedContent: MixedContentData;
+
+  /**
+   * Forms that submit to a plain HTTP address.
+   *
+   * Kept separate from mixed content on purpose: mixed content is about
+   * resources the page LOADS, whereas this is about data the visitor SENDS.
+   * Anything typed into such a form — a password, a phone number, a message —
+   * travels unencrypted, and browsers mark the form "Not secure".
+   *
+   * Reported even on an HTTP page, where it is one more consequence of having
+   * no HTTPS at all.
+   */
+  insecureFormActions: string[];
+
+  /**
+   * Headers that announce the server software, often including its version.
+   *
+   * Telling the world exactly which version you run makes it easier for
+   * someone to look up its known weaknesses, so hiding these is common
+   * advice. Note this is an information-disclosure check, NOT hosting
+   * detection — the hosting module will read the same headers later for a
+   * different purpose.
+   */
+  serverHeader: SecurityHeader;
+  poweredByHeader: SecurityHeader;
+}
+
+// ---------------------------------------------------------------------------
 // One complete audit
 // ---------------------------------------------------------------------------
 
@@ -223,8 +340,8 @@ export interface AuditData {
 
   /** Speed / Core Web Vitals. Module not built yet. */
   performance: NotYetImplemented;
-  /** Security headers and mixed content. Module not built yet. */
-  security: NotYetImplemented;
+  /** Security headers and mixed content. */
+  security: SecurityData;
   /** Certificate inspection. Module not built yet — see fetch.certificateProblem. */
   ssl: NotYetImplemented;
   /** Domain record lookups. Module not built yet. */

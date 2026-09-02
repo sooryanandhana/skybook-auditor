@@ -92,8 +92,9 @@ export default function HomePage() {
 
       {/* Removed once all six Phase 3 checks are in place. */}
       <p className={styles.placeholderNotice}>
-        Steps 1–2 of 6 are live: the page is fetched and its SEO checked.
-        Security, SSL/DNS, speed and the severity rules are still to come.
+        Steps 1–3 of 6 are live: the page is fetched, its SEO checked and its
+        security settings read. SSL/DNS, speed and the severity rules are still
+        to come.
       </p>
 
       {error && (
@@ -267,8 +268,95 @@ function MeasuredFacts({ data }: { data: AuditData }) {
         />
         <Fact label="Sitemap" value={technical.sitemapUrl ?? "— not found —"} />
       </dl>
+
+      <h3 className={styles.findingsHeading}>Security</h3>
+      <dl className={styles.factList}>
+        <Fact
+          label="HTTPS protection (HSTS)"
+          value={hstsSummary(data.security.hsts, data.security.strictTransportSecurity.present)}
+          note={data.security.strictTransportSecurity.value ?? undefined}
+        />
+        <Fact
+          label="Content-Security-Policy"
+          value={data.security.contentSecurityPolicy.present ? "Present" : "Missing"}
+        />
+        <Fact
+          label="X-Frame-Options"
+          value={data.security.xFrameOptions.value ?? "Missing"}
+        />
+        <Fact
+          label="X-Content-Type-Options"
+          value={data.security.xContentTypeOptions.value ?? "Missing"}
+        />
+        <Fact
+          label="Referrer-Policy"
+          value={data.security.referrerPolicy.value ?? "Missing"}
+        />
+        <Fact
+          label="Permissions-Policy"
+          value={data.security.permissionsPolicy.present ? "Present" : "Missing"}
+        />
+        <Fact
+          label="Insecure resources"
+          value={mixedContentSummary(data.security.mixedContent)}
+          note={
+            data.security.mixedContent.items.length > 0
+              ? data.security.mixedContent.items
+                  .slice(0, 5)
+                  .map((item) => `${item.element}: ${item.url}`)
+                  .join("  ·  ")
+              : undefined
+          }
+        />
+        <Fact
+          label="Insecure form submission"
+          value={
+            data.security.insecureFormActions.length === 0
+              ? "None found"
+              : `${data.security.insecureFormActions.length} form${data.security.insecureFormActions.length === 1 ? "" : "s"} sends data over plain HTTP`
+          }
+          note={
+            data.security.insecureFormActions.length > 0
+              ? data.security.insecureFormActions.slice(0, 3).join("  ·  ")
+              : undefined
+          }
+        />
+        <Fact
+          label="Server software announced"
+          value={
+            [data.security.serverHeader.value, data.security.poweredByHeader.value]
+              .filter(Boolean)
+              .join(" · ") || "— not announced —"
+          }
+        />
+      </dl>
     </section>
   );
+}
+
+/** Turns the HSTS measurements into one readable line. */
+function hstsSummary(hsts: AuditData["security"]["hsts"], headerPresent: boolean): string {
+  if (!hsts.applicable) return "Not applicable — the page is not served over HTTPS";
+  if (!headerPresent) return "No HSTS header sent";
+  if (hsts.disabledByZeroMaxAge) return "Header present but switched off (max-age=0)";
+  if (hsts.maxAgeSeconds === null) return "Header present, but its max-age could not be read";
+
+  const days = Math.round(hsts.maxAgeSeconds / 86400);
+  const extras = [
+    hsts.includesSubdomains ? "includes subdomains" : null,
+    hsts.preload ? "preload" : null,
+  ].filter(Boolean);
+
+  return `${days} day${days === 1 ? "" : "s"}${extras.length ? ` · ${extras.join(" · ")}` : ""}`;
+}
+
+/** Turns the mixed-content measurements into one readable line. */
+function mixedContentSummary(mixed: AuditData["security"]["mixedContent"]): string {
+  if (!mixed.applicable) return "Not applicable — the page is not served over HTTPS";
+  if (mixed.total === 0) return "None found";
+
+  const blocking = mixed.activeCount > 0 ? `, ${mixed.activeCount} likely blocked by browsers` : "";
+  return `${mixed.total} loaded over plain HTTP${blocking}`;
 }
 
 function Fact({ label, value, note }: { label: string; value: string; note?: string }) {

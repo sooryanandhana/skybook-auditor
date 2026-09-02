@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { fetchPage } from "@/lib/collector/fetchPage";
 import { runSeoChecks } from "@/lib/collector/seoChecks";
+import { runSecurityChecks } from "@/lib/collector/securityChecks";
 import { runTechnicalChecks } from "@/lib/collector/technicalChecks";
 import { normalizeUrl } from "@/lib/collector/url";
 import type { AuditData, AuditResponse, Finding } from "@/lib/types";
@@ -55,6 +56,7 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
   const { page } = result;
 
   const seo = runSeoChecks(page.html, page.finalUrl);
+  const security = runSecurityChecks(page.headers, page.html, page.servedOverHttps);
   const technical = await runTechnicalChecks(page.finalUrl);
 
   // The address as we requested it, before any redirects. normalizeUrl already
@@ -79,11 +81,11 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
     },
     uptime: page.uptime,
     seo,
+    security,
     technical,
 
     // Modules not built yet. null means "not measured".
     performance: null,
-    security: null,
     ssl: null,
     dns: null,
     hosting: null,

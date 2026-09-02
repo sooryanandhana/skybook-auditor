@@ -1,5 +1,7 @@
 import * as cheerio from "cheerio";
 import type {
+  CookieData,
+  CookieInfo,
   HstsData,
   MixedContentData,
   MixedContentItem,
@@ -51,6 +53,36 @@ const RESOURCE_SOURCES: Array<{
   { selector: "video[src]", element: "video", attribute: "src", kind: "passive" },
   { selector: "video[poster]", element: "video", attribute: "poster", kind: "passive" },
   { selector: "track[src]", element: "track", attribute: "src", kind: "passive" },
+  // An image button really does fetch an image.
+  { selector: 'input[type="image"][src]', element: "input", attribute: "src", kind: "passive" },
+];
+
+/**
+ * Elements whose name we must read from the page rather than the selector,
+ * because the same attribute appears on several different elements.
+ */
+const GENERIC_SOURCES: Array<{
+  selector: string;
+  attribute: string;
+  kind: MixedContentKind;
+  isSrcset?: boolean;
+}> = [
+  // The `background` attribute is long deprecated, but browsers still fetch
+  // it — and it turns up on exactly the older sites this tool is aimed at.
+  { selector: "[background]", attribute: "background", kind: "passive" },
+  // <link rel="preload" as="image" imagesrcset="..."> preloads a responsive set.
+  { selector: "link[imagesrcset]", attribute: "imagesrcset", kind: "passive", isSrcset: true },
+];
+
+/**
+ * SVG elements that load something.
+ *
+ * SVG uses `href`, and older documents use the namespaced `xlink:href`. Both
+ * are read, because both still work in browsers.
+ */
+const SVG_SOURCES: Array<{ selector: string; kind: MixedContentKind }> = [
+  { selector: "image", kind: "passive" },
+  { selector: "use", kind: "unknown" },
 ];
 
 /**
@@ -64,13 +96,15 @@ const LINK_REL_KINDS: Record<string, MixedContentKind> = {
   stylesheet: "active",
   modulepreload: "active",
   icon: "passive",
-  "shortcut": "passive", // from the legacy rel="shortcut icon" pair
   "apple-touch-icon": "passive",
   "apple-touch-icon-precomposed": "passive",
   "mask-icon": "passive",
   manifest: "passive",
   prefetch: "passive",
 };
+// Note: the legacy rel="shortcut icon" needs no entry of its own — its "icon"
+// token matches above. "shortcut" on its own loads nothing, so listing it
+// would wrongly count a link that fetches no resource.
 
 /**
  * What `<link rel="preload" as="...">` is fetching.
@@ -107,6 +141,7 @@ export function runSecurityChecks(
   headers: Record<string, string>,
   html: string,
   servedOverHttps: boolean,
+  setCookieHeaders: string[] = [],
 ): SecurityData {
   const strictTransportSecurity = readHeader(headers, "strict-transport-security");
 
@@ -115,6 +150,7 @@ export function runSecurityChecks(
 
     strictTransportSecurity,
     contentSecurityPolicy: readHeader(headers, "content-security-policy"),
+    contentSecurityPolicyReportOnly: readHeader(headers, "content-security-policy-report-only"),
     xFrameOptions: readHeader(headers, "x-frame-options"),
     xContentTypeOptions: readHeader(headers, "x-content-type-options"),
     referrerPolicy: readHeader(headers, "referrer-policy"),
@@ -122,11 +158,57 @@ export function runSecurityChecks(
 
     hsts: parseHsts(strictTransportSecurity.value, servedOverHttps),
     mixedContent: findMixedContent(html, servedOverHttps),
+    cookies: parseCookies(setCookieHeaders),
     insecureFormActions: findInsecureFormActions(html),
 
     serverHeader: readHeader(headers, "server"),
     poweredByHeader: readHeader(headers, "x-powered-by"),
   };
+}
+
+/** What a cookie check cannot see. */
+const COOKIES_NOT_INSPECTED = [
+  "Cookies created later by JavaScript, since the page is not run",
+  "Cookies set on other pages of the site",
+];
+
+/**
+ * Reads the protective flags off each Set-Cookie header.
+ *
+ * Three flags matter:
+ *   Secure    — the cookie is only ever sent over HTTPS
+ *   HttpOnly  — scripts on the page cannot read it
+ *   SameSite  — limits sending it when another site makes the request
+ *
+ * The cookie's VALUE is deliberately discarded. It is frequently a live
+ * session token, and an audit has no reason to hold one — let alone put it in
+ * a report emailed to a client.
+ */
+export function parseCookies(setCookieHeaders: string[]): CookieData {
+  const cookies: CookieInfo[] = [];
+
+  for (const header of setCookieHeaders) {
+    // "name=value; Path=/; Secure; HttpOnly; SameSite=Lax"
+    const parts = header.split(";");
+    const nameAndValue = parts[0] ?? "";
+    const equals = nameAndValue.indexOf("=");
+    // Everything after the first "=" is the value, and is not read.
+    const name = (equals === -1 ? nameAndValue : nameAndValue.slice(0, equals)).trim();
+    if (!name) continue;
+
+    // Attribute names are case-insensitive, so compare in lower case.
+    const attributes = parts.slice(1).map((part) => part.trim().toLowerCase());
+    const sameSiteAttribute = attributes.find((part) => part.startsWith("samesite="));
+
+    cookies.push({
+      name,
+      secure: attributes.includes("secure"),
+      httpOnly: attributes.includes("httponly"),
+      sameSite: sameSiteAttribute ? sameSiteAttribute.slice("samesite=".length).trim() || null : null,
+    });
+  }
+
+  return { total: cookies.length, cookies, notInspected: COOKIES_NOT_INSPECTED };
 }
 
 /**
@@ -213,6 +295,23 @@ export function findMixedContent(html: string, servedOverHttps: boolean): MixedC
     };
   }
 
+  const found = collectInsecureResources(html, 0);
+
+  return {
+    applicable: true,
+    total: found.length,
+    activeCount: found.filter((item) => item.kind === "active").length,
+    items: found.slice(0, MIXED_CONTENT_LIMIT),
+    truncated: found.length > MIXED_CONTENT_LIMIT,
+    notInspected: NOT_INSPECTED,
+  };
+}
+
+/** How deep to follow HTML embedded inside an iframe's srcdoc attribute. */
+const MAX_SRCDOC_DEPTH = 2;
+
+/** Walks one document's markup for insecure resources. */
+function collectInsecureResources(html: string, depth: number): MixedContentItem[] {
   const $ = cheerio.load(html);
   const found: MixedContentItem[] = [];
 
@@ -269,14 +368,64 @@ export function findMixedContent(html: string, servedOverHttps: boolean): MixedC
     }
   });
 
-  return {
-    applicable: true,
-    total: found.length,
-    activeCount: found.filter((item) => item.kind === "active").length,
-    items: found.slice(0, MIXED_CONTENT_LIMIT),
-    truncated: found.length > MIXED_CONTENT_LIMIT,
-    notInspected: NOT_INSPECTED,
-  };
+  // --- Attributes shared across several elements ----------------------------
+  for (const source of GENERIC_SOURCES) {
+    $(source.selector).each((_, element) => {
+      const raw = $(element).attr(source.attribute);
+      if (!raw) return;
+
+      const urls = source.isSrcset ? splitSrcset(raw) : [raw.trim()];
+      for (const url of urls) {
+        if (isInsecureUrl(url)) {
+          found.push({
+            url,
+            element: tagNameOf(element),
+            via: source.attribute,
+            kind: source.kind,
+          });
+        }
+      }
+    });
+  }
+
+  // --- SVG, which uses href and the older xlink:href -------------------------
+  for (const source of SVG_SOURCES) {
+    $(source.selector).each((_, element) => {
+      for (const attribute of ["href", "xlink:href"]) {
+        const raw = $(element).attr(attribute)?.trim();
+        if (raw && isInsecureUrl(raw)) {
+          found.push({
+            url: raw,
+            element: tagNameOf(element),
+            via: attribute,
+            kind: source.kind,
+          });
+        }
+      }
+    });
+  }
+
+  // --- HTML written inside an iframe's srcdoc --------------------------------
+  // srcdoc holds a whole document, and its resources are fetched just like the
+  // outer page's. Depth is capped so nested srcdocs cannot loop.
+  if (depth < MAX_SRCDOC_DEPTH) {
+    $("iframe[srcdoc]").each((_, element) => {
+      const inner = $(element).attr("srcdoc");
+      if (!inner) return;
+      for (const item of collectInsecureResources(inner, depth + 1)) {
+        found.push({ ...item, via: `iframe srcdoc — ${item.via}` });
+      }
+    });
+  }
+
+  return found;
+}
+
+/** The element's own tag name, lowercased, for elements found by attribute. */
+function tagNameOf(node: unknown): string {
+  return node && typeof node === "object" && "tagName" in node
+    ? String((node as { tagName: unknown }).tagName).toLowerCase()
+    : "element";
 }
 
 /**
@@ -303,6 +452,11 @@ export function classifyLink(
     return PRELOAD_AS_KINDS[(as ?? "").toLowerCase()] ?? "unknown";
   }
 
+  // An ALTERNATE stylesheet is an optional theme the visitor can switch to.
+  // Browsers do not fetch it unless it is chosen, so it is not loaded on an
+  // ordinary visit and must not be counted as one.
+  if (tokens.includes("alternate") && tokens.includes("stylesheet")) return null;
+
   for (const token of tokens) {
     const kind = LINK_REL_KINDS[token];
     if (kind) return kind;
@@ -325,25 +479,43 @@ export function classifyLink(
  * reported as "unknown".
  */
 export function findCssResources(css: string): Array<Omit<MixedContentItem, "element">> {
-  const results: Array<Omit<MixedContentItem, "element">> = [];
-  const seen = new Set<string>();
+  // Comments must go first. A commented-out rule is never loaded, so counting
+  // one would report a problem the site does not have — and a false alarm in a
+  // client's report is worse than a missed finding, because they check, find
+  // nothing, and stop trusting the rest of it.
+  const live = stripCssComments(css);
 
-  // @import first, so its address is not also counted as a plain url().
-  for (const url of matchAll(css, IMPORT_PATTERN)) {
-    if (isInsecureUrl(url) && !seen.has(url)) {
-      seen.add(url);
-      results.push({ url, via: "CSS @import", kind: "active" });
+  const results: Array<Omit<MixedContentItem, "element">> = [];
+
+  // @import is extracted first, then removed from the text, so the same
+  // address is not counted again by the url() pass. Removing it (rather than
+  // de-duplicating by address) means a genuinely repeated url() still counts
+  // once per occurrence, matching how repeated elements are counted.
+  let remaining = live;
+  for (const match of matchAllWithText(live, IMPORT_PATTERN)) {
+    remaining = remaining.replace(match.text, " ");
+    if (isInsecureUrl(match.url)) {
+      results.push({ url: match.url, via: "CSS @import", kind: "active" });
     }
   }
 
-  for (const url of matchAll(css, URL_PATTERN)) {
-    if (isInsecureUrl(url) && !seen.has(url)) {
-      seen.add(url);
+  for (const url of matchAll(remaining, URL_PATTERN)) {
+    if (isInsecureUrl(url)) {
       results.push({ url, via: "CSS url()", kind: "unknown" });
     }
   }
 
   return results;
+}
+
+/**
+ * Removes /* … *\/ comments from CSS.
+ *
+ * An unterminated comment runs to the end of the stylesheet, which is what
+ * browsers do too, so the trailing text is dropped rather than kept.
+ */
+export function stripCssComments(css: string): string {
+  return css.replace(/\/\*[\s\S]*?(?:\*\/|$)/g, " ");
 }
 
 /** Matches url(...) with double quotes, single quotes, or none. */
@@ -355,13 +527,18 @@ const IMPORT_PATTERN =
 
 /** Runs a pattern over some text and returns whichever capture group matched. */
 function matchAll(text: string, pattern: RegExp): string[] {
-  const found: string[] = [];
+  return matchAllWithText(text, pattern).map((match) => match.url);
+}
+
+/** As matchAll, but also returns the whole matched text so it can be removed. */
+function matchAllWithText(text: string, pattern: RegExp): Array<{ url: string; text: string }> {
+  const found: Array<{ url: string; text: string }> = [];
   // The pattern is shared, so reset its position before each use.
   pattern.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
     const url = match.slice(1).find((group) => group !== undefined);
-    if (url && url.trim().length > 0) found.push(url.trim());
+    if (url && url.trim().length > 0) found.push({ url: url.trim(), text: match[0] });
   }
   return found;
 }

@@ -315,12 +315,54 @@ export interface MixedContentData {
   notInspected: string[];
 }
 
+/**
+ * The protective flags on one cookie.
+ *
+ * IMPORTANT — the cookie's VALUE is deliberately never stored. A cookie value
+ * is often a live session token: capturing it would put a working key to
+ * someone's account into our audit data, our logs, and the report we send a
+ * client. Only the name and the flags are recorded, which is all an audit
+ * needs.
+ */
+export interface CookieInfo {
+  /** The cookie's name. Its value is intentionally not captured. */
+  name: string;
+  /** Secure — the browser will only send this cookie over HTTPS. */
+  secure: boolean;
+  /** HttpOnly — JavaScript on the page cannot read this cookie. */
+  httpOnly: boolean;
+  /** The SameSite setting, lowercased, or null when the server did not set one. */
+  sameSite: string | null;
+}
+
+export interface CookieData {
+  /** How many cookies the response set. */
+  total: number;
+  /** The cookies, with names and flags only — never values. */
+  cookies: CookieInfo[];
+  /**
+   * What this check cannot see: cookies created later by JavaScript, and
+   * cookies set on other pages of the site. Recorded so an empty list is not
+   * read as "this site sets no cookies".
+   */
+  notInspected: string[];
+}
+
 export interface SecurityData {
   /** Whether the page itself was served over HTTPS. Everything else depends on this. */
   servedOverHttps: boolean;
 
   strictTransportSecurity: SecurityHeader;
   contentSecurityPolicy: SecurityHeader;
+  /**
+   * Content-Security-Policy-Report-Only.
+   *
+   * A report-only policy is monitored but NOT enforced, so it protects
+   * nobody. Recorded separately so "no policy at all" and "a policy being
+   * trialled" are distinguishable — they are different conversations to have
+   * with a client, and folding them together loses that.
+   */
+  contentSecurityPolicyReportOnly: SecurityHeader;
   xFrameOptions: SecurityHeader;
   xContentTypeOptions: SecurityHeader;
   referrerPolicy: SecurityHeader;
@@ -328,6 +370,7 @@ export interface SecurityData {
 
   hsts: HstsData;
   mixedContent: MixedContentData;
+  cookies: CookieData;
 
   /**
    * Forms that submit to a plain HTTP address.

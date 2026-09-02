@@ -56,7 +56,12 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
   const { page } = result;
 
   const seo = runSeoChecks(page.html, page.finalUrl);
-  const security = runSecurityChecks(page.headers, page.html, page.servedOverHttps);
+  const security = runSecurityChecks(
+    page.headers,
+    page.html,
+    page.servedOverHttps,
+    page.setCookieHeaders,
+  );
   const technical = await runTechnicalChecks(page.finalUrl);
 
   // The address as we requested it, before any redirects. normalizeUrl already

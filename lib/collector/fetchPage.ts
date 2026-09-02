@@ -32,8 +32,22 @@ export interface FetchedPage {
   redirectChain: string[];
   /** The page's HTML source. */
   html: string;
-  /** Response headers, lowercased. Used later for the security checks. */
+  /**
+   * Response headers, lowercased.
+   *
+   * Set-Cookie is NOT usable from here: when a server sends several, this
+   * record keeps only one of them. Use `setCookieHeaders` instead.
+   */
   headers: Record<string, string>;
+  /**
+   * Every Set-Cookie header, kept separately and in full.
+   *
+   * A response commonly sets several cookies, but flattening headers into a
+   * plain object keeps only one — and not reliably the first. Since a cookie
+   * missing its Secure or HttpOnly flag is exactly the kind of thing an audit
+   * should report, they are collected properly here rather than being lost.
+   */
+  setCookieHeaders: string[];
   /**
    * Whether the page we ended up reading was served over HTTPS.
    * Step 6's severity rules use this — a site with no HTTPS is a critical finding.
@@ -286,6 +300,14 @@ async function attemptFetch(
       headers[key.toLowerCase()] = value;
     });
 
+    // getSetCookie() returns every Set-Cookie header individually. The
+    // forEach above cannot: it collapses them into one entry, silently
+    // discarding the rest. Guarded because older runtimes lack the method.
+    const setCookieHeaders =
+      typeof response.headers.getSetCookie === "function"
+        ? response.headers.getSetCookie()
+        : [];
+
     return {
       ok: true,
       page: {
@@ -293,6 +315,7 @@ async function attemptFetch(
         redirectChain,
         html: decodeHtml(body, contentType),
         headers,
+        setCookieHeaders,
         servedOverHttps: currentUrl.protocol === "https:",
         httpsUnavailable,
         certificateProblem,

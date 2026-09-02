@@ -278,7 +278,12 @@ function MeasuredFacts({ data }: { data: AuditData }) {
         />
         <Fact
           label="Content-Security-Policy"
-          value={data.security.contentSecurityPolicy.present ? "Present" : "Missing"}
+          value={cspSummary(data.security)}
+          note={
+            data.security.contentSecurityPolicy.value ??
+            data.security.contentSecurityPolicyReportOnly.value ??
+            undefined
+          }
         />
         <Fact
           label="X-Frame-Options"
@@ -295,6 +300,24 @@ function MeasuredFacts({ data }: { data: AuditData }) {
         <Fact
           label="Permissions-Policy"
           value={data.security.permissionsPolicy.present ? "Present" : "Missing"}
+          note={data.security.permissionsPolicy.value ?? undefined}
+        />
+        <Fact
+          label="Cookies set by this page"
+          value={cookieSummary(data.security.cookies)}
+          note={
+            data.security.cookies.cookies.length > 0
+              ? data.security.cookies.cookies
+                  .slice(0, 6)
+                  .map(
+                    (c) =>
+                      `${c.name}: ${c.secure ? "Secure" : "no Secure"}, ${
+                        c.httpOnly ? "HttpOnly" : "no HttpOnly"
+                      }, SameSite=${c.sameSite ?? "not set"}`,
+                  )
+                  .join("  ·  ")
+              : undefined
+          }
         />
         <Fact
           label="Insecure resources"
@@ -356,6 +379,40 @@ function hstsSummary(hsts: AuditData["security"]["hsts"], headerPresent: boolean
   ].filter(Boolean);
 
   return `${days} day${days === 1 ? "" : "s"}${extras.length ? ` · ${extras.join(" · ")}` : ""}`;
+}
+
+/**
+ * Describes the Content-Security-Policy situation in one line.
+ *
+ * A report-only policy is monitored but not enforced, so saying "Present"
+ * for one would imply protection the site does not actually have.
+ */
+function cspSummary(security: AuditData["security"]): string {
+  if (security.contentSecurityPolicy.present) return "Present";
+  if (security.contentSecurityPolicyReportOnly.present) {
+    return "Report-only — monitored but not enforced";
+  }
+  return "Missing";
+}
+
+/** Summarises the cookies, saying how many lack each protective flag. */
+function cookieSummary(cookies: AuditData["security"]["cookies"]): string {
+  if (cookies.total === 0) return "None set by this page";
+
+  const missingSecure = cookies.cookies.filter((c) => !c.secure).length;
+  const missingHttpOnly = cookies.cookies.filter((c) => !c.httpOnly).length;
+  const missingSameSite = cookies.cookies.filter((c) => c.sameSite === null).length;
+
+  const gaps = [
+    missingSecure > 0 ? `${missingSecure} without Secure` : null,
+    missingHttpOnly > 0 ? `${missingHttpOnly} without HttpOnly` : null,
+    missingSameSite > 0 ? `${missingSameSite} without SameSite` : null,
+  ].filter(Boolean);
+
+  const plural = cookies.total === 1 ? "" : "s";
+  return gaps.length === 0
+    ? `${cookies.total} cookie${plural}, all flags set`
+    : `${cookies.total} cookie${plural} — ${gaps.join(", ")}`;
 }
 
 /**

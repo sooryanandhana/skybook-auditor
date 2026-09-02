@@ -19,6 +19,8 @@ import {
   findInsecureFormActions,
   classifyLink,
   findCssResources,
+  stripCssComments,
+  parseCookies,
 } from "./securityChecks.ts";
 
 const HTTPS = true;
@@ -467,6 +469,265 @@ test("counts CSS resources alongside ordinary ones", () => {
   );
   assert.equal(result.total, 4);
   assert.equal(result.activeCount, 1, "only the script is definitely blocked");
+});
+
+// ---------------------------------------------------------------------------
+// CSS comments — a commented-out rule is not loaded, so it is not a finding
+// ---------------------------------------------------------------------------
+
+test("ignores a url() that is commented out", () => {
+  // Reporting this would invent a problem the site does not have. A false
+  // alarm in a client's report costs more than a missed finding: they check,
+  // find nothing, and stop trusting the rest.
+  assert.deepEqual(findCssResources("/* url(http://x.com/dead.png) */"), []);
+});
+
+test("ignores a commented-out rule inside a block", () => {
+  assert.deepEqual(
+    findCssResources("a{/*background:url(http://x.com/dead.png)*/ color:red}"),
+    [],
+  );
+});
+
+test("keeps a live url() while ignoring a commented one beside it", () => {
+  const found = findCssResources(
+    "a{background:url(http://x.com/real.png)} /* url(http://x.com/dead.png) */",
+  );
+  assert.equal(found.length, 1);
+  assert.equal(found[0].url, "http://x.com/real.png");
+});
+
+test("ignores a commented-out @import", () => {
+  assert.deepEqual(findCssResources('/* @import "http://x.com/dead.css"; */'), []);
+});
+
+test("treats an unterminated comment as running to the end", () => {
+  // A browser does the same, so everything after it is not live CSS.
+  assert.deepEqual(findCssResources("a{color:red} /* url(http://x.com/dead.png)"), []);
+});
+
+test("strips comments without joining the text either side", () => {
+  // Replacing a comment with nothing could weld two tokens together.
+  assert.match(stripCssComments("a/*x*/b"), /a\s+b/);
+});
+
+test("ignores commented-out CSS through the full scan", () => {
+  const result = findMixedContent(
+    `<html><head><style>/* url(http://x.com/dead.png) */</style></head>
+     <body><div style="/* url(http://x.com/also-dead.png) */"></div></body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 0);
+});
+
+test("counts a repeated url() once per occurrence", () => {
+  // Repeats are no longer de-duplicated, matching how repeated elements are
+  // counted — two <img> tags with the same address count twice.
+  const found = findCssResources(
+    "a{background:url(http://x.com/s.png)} b{background:url(http://x.com/s.png)}",
+  );
+  assert.equal(found.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Link rel values that load nothing
+// ---------------------------------------------------------------------------
+
+test('rel="shortcut" on its own loads nothing', () => {
+  // Only the legacy pair rel="shortcut icon" is a favicon; "shortcut" alone
+  // is not a resource-loading type.
+  assert.equal(classifyLink("shortcut", undefined), null);
+  // The legacy pair still works, via its "icon" token.
+  assert.equal(classifyLink("shortcut icon", undefined), "passive");
+});
+
+test("an alternate stylesheet is not fetched, so is not counted", () => {
+  // Alternate stylesheets are optional themes a visitor can switch to.
+  // Browsers do not load them on an ordinary visit.
+  assert.equal(classifyLink("alternate stylesheet", undefined), null);
+  assert.equal(classifyLink("stylesheet alternate", undefined), null);
+  // A plain stylesheet is still active.
+  assert.equal(classifyLink("stylesheet", undefined), "active");
+});
+
+// ---------------------------------------------------------------------------
+// Resource types that were previously missed
+// ---------------------------------------------------------------------------
+
+test("finds an insecure image button", () => {
+  const result = findMixedContent(
+    '<html><body><input type="image" src="http://x.com/btn.png"></body></html>',
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+  assert.equal(result.items[0].element, "input");
+});
+
+test("does not treat an ordinary text input as a resource", () => {
+  const result = findMixedContent(
+    '<html><body><input type="text" src="http://x.com/nope.png"></body></html>',
+    HTTPS,
+  );
+  assert.equal(result.total, 0);
+});
+
+test("finds the deprecated background attribute", () => {
+  // Long deprecated, still fetched by browsers, and common on exactly the
+  // older sites this tool is aimed at.
+  const result = findMixedContent(
+    `<html><body background="http://x.com/page.png">
+       <table background="http://x.com/table.png"></table>
+     </body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 2);
+  assert.deepEqual(
+    result.items.map((i) => i.element).sort(),
+    ["body", "table"],
+  );
+});
+
+test("finds insecure SVG images using href and the older xlink:href", () => {
+  const result = findMixedContent(
+    `<html><body><svg>
+       <image href="http://x.com/a.png"/>
+       <image xlink:href="http://x.com/b.png"/>
+     </svg></body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 2);
+});
+
+test("finds an insecure SVG use reference", () => {
+  const result = findMixedContent(
+    '<html><body><svg><use href="http://x.com/sprite.svg#icon"/></svg></body></html>',
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+});
+
+test("finds an insecure preload imagesrcset", () => {
+  const result = findMixedContent(
+    `<html><head><link rel="preload" as="image"
+       imagesrcset="http://x.com/small.png 480w, https://x.com/large.png 1024w"></head>
+     <body></body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+  assert.equal(result.items[0].url, "http://x.com/small.png");
+});
+
+test("finds insecure resources inside an iframe srcdoc", () => {
+  // srcdoc holds a whole document, and its resources are fetched too.
+  const result = findMixedContent(
+    `<html><body><iframe srcdoc='<img src="http://x.com/inner.png">'></iframe></body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+  assert.match(result.items[0].via, /srcdoc/);
+});
+
+test("stops rather than following srcdoc forever", () => {
+  // Deeply nested srcdocs must not loop; the scan simply stops descending.
+  const deep = `<html><body><iframe srcdoc='<iframe srcdoc="<iframe srcdoc=&quot;&quot;></iframe>"></iframe>'></iframe></body></html>`;
+  assert.doesNotThrow(() => findMixedContent(deep, HTTPS));
+});
+
+// ---------------------------------------------------------------------------
+// Cookies — flags only, never values
+// ---------------------------------------------------------------------------
+
+test("reads the protective flags off a cookie", () => {
+  const result = parseCookies(["session=abc123; Path=/; Secure; HttpOnly; SameSite=Lax"]);
+  assert.equal(result.total, 1);
+  assert.equal(result.cookies[0].name, "session");
+  assert.equal(result.cookies[0].secure, true);
+  assert.equal(result.cookies[0].httpOnly, true);
+  assert.equal(result.cookies[0].sameSite, "lax");
+});
+
+test("NEVER stores a cookie's value", () => {
+  // A cookie value is often a live session token. Capturing one would put a
+  // working key to someone's account into our data and into client reports.
+  const result = parseCookies(["session=SUPER_SECRET_TOKEN; Path=/; Secure"]);
+  const serialised = JSON.stringify(result);
+  assert.ok(!serialised.includes("SUPER_SECRET_TOKEN"), "the value must not be kept anywhere");
+  assert.equal(result.cookies[0].name, "session");
+});
+
+test("reports a cookie with no protective flags", () => {
+  const result = parseCookies(["tracking=xyz; Path=/"]);
+  assert.equal(result.cookies[0].secure, false);
+  assert.equal(result.cookies[0].httpOnly, false);
+  assert.equal(result.cookies[0].sameSite, null);
+});
+
+test("reads EVERY cookie, not just one", () => {
+  // The whole reason cookies are collected separately: flattening headers
+  // into an object keeps only one, and the dropped one may be the insecure one.
+  const result = parseCookies([
+    "a=1; Path=/",
+    "b=2; Secure; HttpOnly",
+    "c=3; SameSite=Strict",
+  ]);
+  assert.equal(result.total, 3);
+  assert.deepEqual(result.cookies.map((c) => c.name), ["a", "b", "c"]);
+  assert.deepEqual(result.cookies.map((c) => c.secure), [false, true, false]);
+});
+
+test("reads cookie attributes whatever their capitalisation", () => {
+  const result = parseCookies(["x=1; secure; httponly; samesite=STRICT"]);
+  assert.equal(result.cookies[0].secure, true);
+  assert.equal(result.cookies[0].httpOnly, true);
+  assert.equal(result.cookies[0].sameSite, "strict");
+});
+
+test("handles a value that itself contains an equals sign", () => {
+  const result = parseCookies(["token=abc=def=ghi; Secure"]);
+  assert.equal(result.cookies[0].name, "token");
+  assert.equal(result.cookies[0].secure, true);
+});
+
+test("skips a malformed Set-Cookie without crashing", () => {
+  const result = parseCookies(["", "   ", "; Secure", "ok=1; Secure"]);
+  assert.equal(result.total, 1);
+  assert.equal(result.cookies[0].name, "ok");
+});
+
+test("records what the cookie check cannot see", () => {
+  const result = parseCookies([]);
+  assert.equal(result.total, 0);
+  assert.ok(result.notInspected.length > 0, "an empty list is not proof there are no cookies");
+});
+
+// ---------------------------------------------------------------------------
+// A report-only policy is monitored, not enforced
+// ---------------------------------------------------------------------------
+
+test("keeps a report-only CSP separate from an enforced one", () => {
+  const result = runSecurityChecks(
+    { "content-security-policy-report-only": "default-src 'self'" },
+    "<html></html>",
+    HTTPS,
+  );
+  // Report-only enforces nothing, so the enforced policy is genuinely absent.
+  assert.equal(result.contentSecurityPolicy.present, false);
+  // But "being trialled" is not the same as "none at all".
+  assert.equal(result.contentSecurityPolicyReportOnly.present, true);
+  assert.equal(result.contentSecurityPolicyReportOnly.value, "default-src 'self'");
+});
+
+test("a site can have both an enforced and a report-only policy", () => {
+  const result = runSecurityChecks(
+    {
+      "content-security-policy": "default-src 'self'",
+      "content-security-policy-report-only": "default-src 'none'",
+    },
+    "<html></html>",
+    HTTPS,
+  );
+  assert.equal(result.contentSecurityPolicy.value, "default-src 'self'");
+  assert.equal(result.contentSecurityPolicyReportOnly.value, "default-src 'none'");
 });
 
 // ---------------------------------------------------------------------------

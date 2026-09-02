@@ -1,5 +1,5 @@
 import { lookup } from "node:dns/promises";
-import { isIPv4 } from "node:net";
+import { isIP } from "node:net";
 
 /**
  * Stops the app being used to reach places it shouldn't.
@@ -70,9 +70,22 @@ function isPrivateIPv6(ip: string): boolean {
   );
 }
 
-/** True if this IP address belongs to the public internet. */
+/**
+ * True if this IP address belongs to the public internet.
+ *
+ * Anything that isn't a valid IP address at all is refused. That matters:
+ * treating an unrecognised value as "not private, therefore public" would
+ * mean any parsing gap becomes a way past the check. When in doubt, refuse.
+ */
 export function isPublicAddress(ip: string): boolean {
-  return isIPv4(ip) ? !isPrivateIPv4(ip) : !isPrivateIPv6(ip);
+  switch (isIP(ip)) {
+    case 4:
+      return !isPrivateIPv4(ip);
+    case 6:
+      return !isPrivateIPv6(ip);
+    default:
+      return false; // not an IP address we understand
+  }
 }
 
 /**
@@ -106,6 +119,60 @@ export async function checkHostnameIsPublic(hostname: string): Promise<SafetyRes
   }
 
   return { safe: true, addresses };
+}
+
+/**
+ * Fetches a URL, re-checking safety at every redirect.
+ *
+ * WHY THIS EXISTS: passing `redirect: "follow"` to fetch lets the server
+ * decide where we end up. A site can answer any request with "actually, go
+ * look at http://192.168.1.1" and fetch will quietly do it. Checking only the
+ * address we started with is therefore not enough — every hop needs checking.
+ *
+ * Use this for ANY request to an address influenced by the audited site.
+ * Never call fetch directly with `redirect: "follow"` on such a URL.
+ *
+ * Returns null if the address is unsafe or the request fails.
+ */
+export async function safeFetch(
+  url: string,
+  init: RequestInit & { maxRedirects?: number } = {},
+): Promise<Response | null> {
+  const { maxRedirects = 3, ...requestInit } = init;
+
+  let current: URL;
+  try {
+    current = new URL(url);
+  } catch {
+    return null;
+  }
+
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    if (current.protocol !== "https:" && current.protocol !== "http:") return null;
+
+    const safety = await checkHostnameIsPublic(current.hostname);
+    if (!safety.safe) return null;
+
+    let response: Response;
+    try {
+      response = await fetch(current, { ...requestInit, redirect: "manual" });
+    } catch {
+      return null;
+    }
+
+    if (response.status < 300 || response.status >= 400) return response;
+
+    const location = response.headers.get("location");
+    if (!location) return response;
+
+    try {
+      current = new URL(location, current);
+    } catch {
+      return null;
+    }
+  }
+
+  return null; // too many redirects
 }
 
 /*

@@ -1,3 +1,6 @@
+// The .ts extension is required so Node can run the unit tests directly;
+// Next.js resolves it the same way.
+import { safeFetch } from "./safety.ts";
 import type { TechnicalData } from "@/lib/types";
 
 const TIMEOUT_MS = 8_000;
@@ -36,14 +39,15 @@ export async function runTechnicalChecks(pageUrl: string): Promise<TechnicalData
 
 async function fetchRobotsTxt(url: string): Promise<{ found: boolean; text: string | null }> {
   try {
-    const response = await fetch(url, {
+    // safeFetch, not fetch: a site can redirect /robots.txt anywhere it likes,
+    // including at a private address. Every hop is safety-checked.
+    const response = await safeFetch(url, {
       headers: { "User-Agent": USER_AGENT },
       signal: AbortSignal.timeout(TIMEOUT_MS),
-      redirect: "follow",
     });
 
     // Many sites answer 404 here, which simply means "no robots.txt".
-    if (!response.ok) return { found: false, text: null };
+    if (!response || !response.ok) return { found: false, text: null };
 
     /*
      * Some sites serve their homepage for any unknown path, so a "robots.txt"
@@ -65,36 +69,63 @@ async function fetchRobotsTxt(url: string): Promise<{ found: boolean; text: stri
  * Whether robots.txt tells every crawler to stay off the whole site.
  *
  * We only look at the `User-agent: *` group, since a rule aimed at one
- * specific crawler doesn't block search engines generally. Within that group,
- * `Disallow: /` means the entire site.
+ * specific crawler doesn't block search engines generally.
+ *
+ * Two details the format requires:
+ *
+ * 1. Consecutive User-agent lines share the rules that follow them, so
+ *      User-agent: *
+ *      User-agent: Googlebot
+ *      Disallow: /
+ *    blocks everyone. Treating each line as starting a fresh group would
+ *    miss this.
+ *
+ * 2. An `Allow:` rule alongside `Disallow: /` carves out an exception, so the
+ *    site is not entirely blocked.
  */
-function blocksEveryCrawler(robotsTxt: string): boolean {
+export function blocksEveryCrawler(robotsTxt: string): boolean {
   let inWildcardGroup = false;
+  let lastLineWasUserAgent = false;
+  let sawDisallowAll = false;
+  let sawAllowInGroup = false;
 
   for (const rawLine of robotsTxt.split(/\r?\n/)) {
     // Strip comments and surrounding space.
     const line = rawLine.split("#")[0].trim();
     if (!line) continue;
 
-    const [rawField, ...rest] = line.split(":");
-    const field = rawField.trim().toLowerCase();
-    const value = rest.join(":").trim();
+    const separator = line.indexOf(":");
+    if (separator === -1) continue;
+    const field = line.slice(0, separator).trim().toLowerCase();
+    const value = line.slice(separator + 1).trim();
 
     if (field === "user-agent") {
-      inWildcardGroup = value === "*";
+      // A User-agent line directly after another one joins the same group
+      // rather than starting a new one.
+      inWildcardGroup = lastLineWasUserAgent
+        ? inWildcardGroup || value === "*"
+        : value === "*";
+      lastLineWasUserAgent = true;
+      if (!inWildcardGroup) {
+        sawDisallowAll = false;
+        sawAllowInGroup = false;
+      }
       continue;
     }
 
-    if (inWildcardGroup && field === "disallow" && value === "/") {
-      return true;
-    }
+    lastLineWasUserAgent = false;
+    if (!inWildcardGroup) continue;
+
+    if (field === "disallow" && value === "/") sawDisallowAll = true;
+    // "Allow:" with an empty value means nothing; any real path is an exception.
+    if (field === "allow" && value.length > 0) sawAllowInGroup = true;
   }
 
-  return false;
+  return sawDisallowAll && !sawAllowInGroup;
 }
 
 /** Reads a `Sitemap:` line from robots.txt, if there is one. */
-function findSitemapDirective(robotsTxt: string): string | null {
+export function findSitemapDirective(robotsTxt: string): string | null {
   for (const rawLine of robotsTxt.split(/\r?\n/)) {
     const line = rawLine.split("#")[0].trim();
     const match = line.match(/^sitemap\s*:\s*(\S+)/i);
@@ -106,13 +137,24 @@ function findSitemapDirective(robotsTxt: string): string | null {
 /** Checks whether the conventional /sitemap.xml exists. */
 async function findDefaultSitemap(url: string): Promise<string | null> {
   try {
-    const response = await fetch(url, {
-      method: "HEAD", // we only need to know it exists, not read it
+    // HEAD asks only "does this exist?" without downloading the file, which
+    // can be large. Not every server supports it, so fall back to GET.
+    let response = await safeFetch(url, {
+      method: "HEAD",
       headers: { "User-Agent": USER_AGENT },
       signal: AbortSignal.timeout(TIMEOUT_MS),
-      redirect: "follow",
     });
-    if (!response.ok) return null;
+
+    // 405 Method Not Allowed / 501 Not Implemented mean "we don't do HEAD",
+    // not "no sitemap" — ask again properly before concluding it's absent.
+    if (!response || response.status === 405 || response.status === 501) {
+      response = await safeFetch(url, {
+        headers: { "User-Agent": USER_AGENT },
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+    }
+
+    if (!response || !response.ok) return null;
 
     // Again, a site serving HTML here has no real sitemap.
     const contentType = response.headers.get("content-type") ?? "";

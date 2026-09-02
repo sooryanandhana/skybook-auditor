@@ -80,7 +80,14 @@ export interface SeoData {
 
   /** How many <h1> elements the page has. Ideally exactly one. */
   h1Count: number;
-  /** The text of each <h1>, in page order. */
+  /**
+   * The text of each <h1> that actually has text, in page order.
+   *
+   * This can be SHORTER than h1Count: an empty <h1></h1> is counted as an
+   * element but contributes no text. So "h1Count: 2, h1Texts: ['About us']"
+   * means one heading has text and one is empty — not that a heading is missing
+   * from this list.
+   */
   h1Texts: string[];
   /**
    * Places where heading levels skip a step, e.g. an <h2> followed by an <h4>.

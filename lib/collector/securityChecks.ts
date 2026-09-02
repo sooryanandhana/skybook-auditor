@@ -236,35 +236,74 @@ function readHeader(headers: Record<string, string>, name: string): SecurityHead
  * would put a false reassurance in a client's report.
  */
 export function parseHsts(value: string | null, servedOverHttps: boolean): HstsData {
-  const base: HstsData = {
+  // Everything false/null until a usable header proves otherwise. Returning
+  // this unchanged is how an absent or invalid header is reported.
+  const inactive: HstsData = {
     applicable: servedOverHttps,
+    valid: false,
     maxAgeSeconds: null,
     disabledByZeroMaxAge: false,
     includesSubdomains: false,
     preload: false,
   };
 
-  if (value === null) return base;
+  if (value === null) return inactive;
 
-  // The header is a list of directives separated by semicolons, e.g.
+  /*
+   * ONLY THE FIRST HEADER COUNTS.
+   *
+   * RFC 6797 section 8.1: if a response carries more than one
+   * Strict-Transport-Security header, a browser processes only the first and
+   * ignores the rest. Several headers reach us already joined into one
+   * comma-separated string, so anything after the first comma belongs to a
+   * later header.
+   *
+   * Merging them would be actively dangerous: a first header of "max-age=0"
+   * followed by "max-age=31536000" would look like a well-protected site,
+   * when a browser reads the first, switches HSTS off, and protects nothing.
+   * Commas have no other meaning inside this header, so splitting on one is
+   * unambiguous.
+   */
+  const firstHeader = value.split(",")[0];
+
+  // Within a header, directives are separated by semicolons, e.g.
   //   max-age=31536000; includeSubDomains; preload
-  const directives = value.split(";").map((part) => part.trim().toLowerCase());
+  const directives = firstHeader.split(";").map((part) => part.trim().toLowerCase());
 
+  let maxAgeSeconds: number | null = null;
   const maxAgeDirective = directives.find((part) => part.startsWith("max-age"));
   if (maxAgeDirective) {
     // Values may be quoted: max-age="31536000"
     const rawNumber = maxAgeDirective.split("=")[1]?.replace(/["']/g, "").trim();
     const parsed = Number(rawNumber);
     if (rawNumber !== undefined && rawNumber !== "" && Number.isFinite(parsed) && parsed >= 0) {
-      base.maxAgeSeconds = parsed;
-      base.disabledByZeroMaxAge = parsed === 0;
+      maxAgeSeconds = parsed;
     }
   }
 
-  base.includesSubdomains = directives.includes("includesubdomains");
-  base.preload = directives.includes("preload");
+  /*
+   * NO USABLE max-age MEANS THE WHOLE HEADER IS IGNORED.
+   *
+   * RFC 6797 makes max-age required. A header of just "includeSubDomains"
+   * is invalid, so a browser discards it entirely and the site gets no
+   * protection — not even the subdomain coverage it appears to ask for.
+   * Reporting includesSubdomains: true here would describe protection that
+   * does not exist.
+   *
+   * The text the server actually sent is still kept on the header itself,
+   * so "they wrote includeSubDomains but forgot max-age" is still a finding
+   * that can be made from this data.
+   */
+  if (maxAgeSeconds === null) return inactive;
 
-  return base;
+  return {
+    applicable: servedOverHttps,
+    valid: true,
+    maxAgeSeconds,
+    disabledByZeroMaxAge: maxAgeSeconds === 0,
+    includesSubdomains: directives.includes("includesubdomains"),
+    preload: directives.includes("preload"),
+  };
 }
 
 /**

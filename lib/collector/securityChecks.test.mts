@@ -123,6 +123,132 @@ test("does not claim subdomains or preload when they are absent", () => {
   assert.equal(hsts.preload, false);
 });
 
+// --- Duplicate headers: RFC 6797 says use only the first -------------------
+
+test("uses ONLY the first header when max-age=0 comes first", () => {
+  // The dangerous case. A browser reads the first header, switches HSTS off,
+  // and protects nothing. Merging the two would show a well-protected site.
+  const hsts = parseHsts("max-age=0, max-age=31536000", HTTPS);
+  assert.equal(hsts.maxAgeSeconds, 0);
+  assert.equal(hsts.disabledByZeroMaxAge, true);
+  assert.equal(hsts.valid, true, "the first header is readable, so it is valid");
+});
+
+test("uses ONLY the first header when a valid one comes first", () => {
+  const hsts = parseHsts("max-age=31536000; includeSubDomains, max-age=60", HTTPS);
+  assert.equal(hsts.maxAgeSeconds, 31536000);
+  assert.equal(hsts.includesSubdomains, true);
+});
+
+test("does not merge directives across duplicate headers", () => {
+  // preload appears only in the SECOND header, so it must not be reported.
+  const hsts = parseHsts("max-age=600, max-age=600; includeSubDomains; preload", HTTPS);
+  assert.equal(hsts.maxAgeSeconds, 600);
+  assert.equal(hsts.includesSubdomains, false, "second header's directives must not leak in");
+  assert.equal(hsts.preload, false, "second header's directives must not leak in");
+});
+
+test("handles several identical headers", () => {
+  const hsts = parseHsts("max-age=31536000, max-age=31536000, max-age=31536000", HTTPS);
+  assert.equal(hsts.maxAgeSeconds, 31536000);
+  assert.equal(hsts.valid, true);
+});
+
+test("an invalid first header is not rescued by a valid later one", () => {
+  const hsts = parseHsts("includeSubDomains, max-age=31536000", HTTPS);
+  assert.equal(hsts.valid, false, "the first header has no max-age, so it is ignored");
+  assert.equal(hsts.maxAgeSeconds, null);
+  assert.equal(hsts.includesSubdomains, false);
+});
+
+test("a single header is unaffected by the duplicate-header rule", () => {
+  const hsts = parseHsts("max-age=31536000; includeSubDomains; preload", HTTPS);
+  assert.equal(hsts.maxAgeSeconds, 31536000);
+  assert.equal(hsts.includesSubdomains, true);
+  assert.equal(hsts.preload, true);
+});
+
+// --- max-age is required: without it the header does nothing ---------------
+
+test("includeSubDomains on its own protects nothing", () => {
+  // RFC 6797 requires max-age. Without it the header is invalid and browsers
+  // discard it entirely — including the subdomain coverage it appears to ask
+  // for. Reporting that as protection would describe something that is not
+  // happening.
+  const hsts = parseHsts("includeSubDomains", HTTPS);
+  assert.equal(hsts.valid, false);
+  assert.equal(hsts.includesSubdomains, false, "nothing is protected by an invalid header");
+  assert.equal(hsts.maxAgeSeconds, null);
+});
+
+test("includeSubDomains with an unreadable max-age protects nothing", () => {
+  for (const value of [
+    "max-age=abc; includeSubDomains",
+    "max-age=; includeSubDomains",
+    "max-age; includeSubDomains",
+    "max-age=-1; includeSubDomains",
+  ]) {
+    const hsts = parseHsts(value, HTTPS);
+    assert.equal(hsts.valid, false, `for "${value}"`);
+    assert.equal(hsts.includesSubdomains, false, `for "${value}"`);
+    assert.equal(hsts.preload, false, `for "${value}"`);
+  }
+});
+
+test("includeSubDomains WITH a valid max-age is reported as protecting subdomains", () => {
+  const hsts = parseHsts("max-age=31536000; includeSubDomains", HTTPS);
+  assert.equal(hsts.valid, true);
+  assert.equal(hsts.includesSubdomains, true);
+  assert.equal(hsts.maxAgeSeconds, 31536000);
+});
+
+test("max-age=0 is still a VALID header, just one that switches HSTS off", () => {
+  // Invalid and disabled are different things: this header is well-formed
+  // and a browser acts on it — by forgetting the policy.
+  const hsts = parseHsts("max-age=0; includeSubDomains", HTTPS);
+  assert.equal(hsts.valid, true);
+  assert.equal(hsts.disabledByZeroMaxAge, true);
+  assert.equal(hsts.includesSubdomains, true);
+});
+
+test("an absent header is reported as invalid, not merely empty", () => {
+  const hsts = parseHsts(null, HTTPS);
+  assert.equal(hsts.valid, false);
+  assert.equal(hsts.maxAgeSeconds, null);
+  assert.equal(hsts.includesSubdomains, false);
+});
+
+test("preload alone, with no max-age, protects nothing", () => {
+  const hsts = parseHsts("preload; includeSubDomains", HTTPS);
+  assert.equal(hsts.valid, false);
+  assert.equal(hsts.preload, false);
+  assert.equal(hsts.includesSubdomains, false);
+});
+
+test("the raw header text is preserved even when the header is invalid", () => {
+  // So "they wrote includeSubDomains but forgot max-age" is still a finding
+  // that can be made, even though nothing is reported as protected.
+  const result = runSecurityChecks(
+    { "strict-transport-security": "includeSubDomains" },
+    "<html></html>",
+    HTTPS,
+  );
+  assert.equal(result.strictTransportSecurity.present, true);
+  assert.equal(result.strictTransportSecurity.value, "includeSubDomains");
+  assert.equal(result.hsts.valid, false);
+  assert.equal(result.hsts.includesSubdomains, false);
+});
+
+test("the raw text of duplicate headers is preserved in full", () => {
+  const result = runSecurityChecks(
+    { "strict-transport-security": "max-age=0, max-age=31536000" },
+    "<html></html>",
+    HTTPS,
+  );
+  assert.equal(result.strictTransportSecurity.value, "max-age=0, max-age=31536000");
+  assert.equal(result.hsts.maxAgeSeconds, 0, "but only the first is acted on");
+});
+
 test("marks HSTS as not applicable on a plain HTTP page", () => {
   // Browsers ignore HSTS on an insecure page, so reporting it as "missing"
   // would be noise on top of the real problem: the site has no HTTPS.

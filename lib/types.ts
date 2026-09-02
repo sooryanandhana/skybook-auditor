@@ -235,13 +235,31 @@ export interface HstsData {
    * problem that the site has no HTTPS.
    */
   applicable: boolean;
+  /**
+   * Whether the header is one a browser would actually act on.
+   *
+   * False when no header was sent, and also when a header WAS sent but
+   * carries no usable max-age. RFC 6797 requires max-age, so a header
+   * without it is invalid and browsers ignore it completely — writing
+   * `includeSubDomains` alone protects nothing at all.
+   *
+   * When this is false, every field below is false or null regardless of
+   * what the header said. The text that was actually sent is still available
+   * on the SecurityHeader for this header, so "they wrote includeSubDomains
+   * but forgot max-age" remains a finding that can be made — but nothing here
+   * will claim protection the site does not have.
+   */
+  valid: boolean;
   /** How long browsers are told to stay on HTTPS. Null if absent or unreadable. */
   maxAgeSeconds: number | null;
   /** True when max-age is explicitly 0, which switches HSTS off. */
   disabledByZeroMaxAge: boolean;
-  /** Whether subdomains are covered too. */
+  /** Whether subdomains are covered too. Only ever true on a valid header. */
   includesSubdomains: boolean;
-  /** Whether the site asks to be in browsers' built-in preload list. */
+  /**
+   * Whether the site asks to be in browsers' built-in preload list.
+   * Only ever true on a valid header.
+   */
   preload: boolean;
 }
 

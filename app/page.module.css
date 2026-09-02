@@ -201,6 +201,58 @@
   font-weight: 600;
 }
 
+/* ---------- Measured facts table ---------- */
+
+.facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.factList {
+  border: 1px solid #d8e0ea;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.fact {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 1rem;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid #e8edf4;
+  font-size: 0.9rem;
+}
+
+.fact:last-child {
+  border-bottom: none;
+}
+
+.fact dt {
+  color: #5b6779;
+}
+
+.fact dd {
+  margin: 0;
+  /* Page titles and descriptions can be long or unbroken; never let them
+     push the layout sideways. */
+  overflow-wrap: anywhere;
+}
+
+.factNote {
+  display: block;
+  font-size: 0.8rem;
+  color: #5b6779;
+  margin-top: 0.1rem;
+}
+
+@media (max-width: 520px) {
+  .fact {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+}
+
 .emptyFindings {
   font-size: 0.9rem;
   color: #5b6779;
@@ -281,6 +333,8 @@
   .checkedAt,
   .evidence,
   .emptyFindings,
+  .factNote,
+  .fact dt,
   .uptime dt {
     color: #9aa7be;
   }
@@ -288,6 +342,14 @@
   .input,
   .emptyFindings {
     border-color: #35415a;
+  }
+
+  .factList {
+    border-color: #2a3448;
+  }
+
+  .fact {
+    border-bottom-color: #232c3d;
   }
 
   .button:focus-visible {

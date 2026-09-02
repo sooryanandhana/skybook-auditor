@@ -86,8 +86,8 @@ export default function HomePage() {
 
       {/* Removed once all six Phase 3 checks are in place. */}
       <p className={styles.placeholderNotice}>
-        Step 1 of 6: the page is really fetched. SEO, security, SSL/DNS and speed
-        checks are still to come.
+        Steps 1–2 of 6 are live: the page is fetched and its SEO checked.
+        Security, SSL/DNS, speed and the severity rules are still to come.
       </p>
 
       {error && (
@@ -141,12 +141,15 @@ function Results({ data }: { data: AuditData }) {
         </dl>
       </div>
 
+      <MeasuredFacts data={data} />
+
       <h3 className={styles.findingsHeading}>
         Findings ({data.findings.length})
       </h3>
       {data.findings.length === 0 && (
         <p className={styles.emptyFindings}>
-          No checks have run yet — they arrive in steps 2 to 6.
+          The facts above are measured, but nothing has been graded yet. Step 6
+          adds the rules that turn them into Critical / High / Medium findings.
         </p>
       )}
       <ul className={styles.findings}>
@@ -163,6 +166,81 @@ function Results({ data }: { data: AuditData }) {
         ))}
       </ul>
     </section>
+  );
+}
+
+/**
+ * The raw measured facts, shown as a plain table.
+ *
+ * This panel stays in the finished app on purpose. Once Claude writes the
+ * report in Phase 5, a person needs to be able to check any sentence it wrote
+ * against the measurement it came from — this is where they do that.
+ *
+ * All values here are rendered as plain text. Some (page title, description)
+ * are copied from the audited website, and React escaping is what stops that
+ * third-party content being treated as markup.
+ */
+function MeasuredFacts({ data }: { data: AuditData }) {
+  const { seo, technical } = data;
+
+  return (
+    <section className={styles.facts}>
+      <h3 className={styles.findingsHeading}>Measured facts</h3>
+      <dl className={styles.factList}>
+        <Fact label="Served over HTTPS" value={data.servedOverHttps ? "Yes" : "No"} />
+        <Fact
+          label="Page title"
+          value={seo.titleText ?? "— none —"}
+          note={seo.titleText ? `${seo.titleLength} characters` : undefined}
+        />
+        <Fact
+          label="Meta description"
+          value={seo.metaDescriptionText ?? "— none —"}
+          note={
+            seo.metaDescriptionText ? `${seo.metaDescriptionLength} characters` : undefined
+          }
+        />
+        <Fact
+          label="Main heading (h1)"
+          value={seo.h1Count === 0 ? "— none —" : seo.h1Texts.join(" · ")}
+          note={`${seo.h1Count} found`}
+        />
+        <Fact
+          label="Heading order"
+          value={seo.headingSkips.length === 0 ? "No skipped levels" : seo.headingSkips.join("; ")}
+        />
+        <Fact
+          label="Images"
+          value={`${seo.imageCount} total`}
+          note={
+            seo.imageCount === 0
+              ? undefined
+              : `${seo.imagesMissingAlt} missing alt text`
+          }
+        />
+        <Fact label="Language" value={seo.langAttribute ?? "— not set —"} />
+        <Fact label="Canonical URL" value={seo.canonicalUrl ?? "— not set —"} />
+        <Fact label="Mobile viewport tag" value={seo.hasViewportMeta ? "Present" : "Missing"} />
+        <Fact
+          label="robots.txt"
+          value={technical.robotsTxtFound ? "Found" : "Not found"}
+          note={technical.robotsBlocksEverything ? "Blocks all crawlers" : undefined}
+        />
+        <Fact label="Sitemap" value={technical.sitemapUrl ?? "— not found —"} />
+      </dl>
+    </section>
+  );
+}
+
+function Fact({ label, value, note }: { label: string; value: string; note?: string }) {
+  return (
+    <div className={styles.fact}>
+      <dt>{label}</dt>
+      <dd>
+        {value}
+        {note && <span className={styles.factNote}>{note}</span>}
+      </dd>
+    </div>
   );
 }
 

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { fetchPage } from "@/lib/collector/fetchPage";
+import { runSeoChecks } from "@/lib/collector/seoChecks";
+import { runTechnicalChecks } from "@/lib/collector/technicalChecks";
 import type { AuditData, AuditResponse, Finding } from "@/lib/types";
 
 /**
@@ -51,14 +53,20 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
 
   const { page } = result;
 
-  // Findings arrive in steps 2-6. For now we report only what fetching told us,
-  // so there is nothing here that wasn't actually measured.
+  const seo = runSeoChecks(page.html);
+  const technical = await runTechnicalChecks(page.finalUrl);
+
+  // Findings arrive in step 6, where fixed rules turn these measurements into
+  // graded issues. Until then we show the raw facts only.
   const findings: Finding[] = [];
 
   const data: AuditData = {
     url: page.finalUrl,
     checkedAt: new Date().toISOString(),
     uptime: page.uptime,
+    servedOverHttps: page.servedOverHttps,
+    seo,
+    technical,
     findings,
   };
 

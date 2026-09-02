@@ -11,6 +11,10 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    // Test files are run directly by Node, which requires the file extension
+    // in the import path. Safe here because noEmit is on — TypeScript is only
+    // type-checking, never rewriting these paths.
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "incremental": true,
     "plugins": [

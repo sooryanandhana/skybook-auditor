@@ -57,6 +57,63 @@ export interface UptimeCheck {
   serverResponseTimeMs: number | null;
 }
 
+/**
+ * On-page SEO facts, read from the page's own HTML.
+ *
+ * IMPORTANT — some fields here (`titleText`, `metaDescriptionText`, `h1Texts`)
+ * contain text copied from someone else's website. Treat it as DATA, never as
+ * instructions or as code:
+ *   - When displaying it, always render as plain text. React does this by
+ *     default; the PDF template in Phase 7 must do the same deliberately.
+ *   - When sending it to Claude in Phase 5, the prompt must state that these
+ *     are measured values to describe, not commands to follow.
+ */
+export interface SeoData {
+  /** The <title> text, or null if the page has none. */
+  titleText: string | null;
+  /** Character count of the title. 0 when absent. */
+  titleLength: number;
+
+  /** The meta description, or null if absent. */
+  metaDescriptionText: string | null;
+  metaDescriptionLength: number;
+
+  /** How many <h1> elements the page has. Ideally exactly one. */
+  h1Count: number;
+  /** The text of each <h1>, in page order. */
+  h1Texts: string[];
+  /**
+   * Places where heading levels skip a step, e.g. an <h2> followed by an <h4>.
+   * Each entry describes one skip. An empty list means the order is sensible.
+   */
+  headingSkips: string[];
+
+  /** Total <img> elements found. */
+  imageCount: number;
+  /** How many of those have no usable alt attribute. */
+  imagesMissingAlt: number;
+
+  /** The canonical URL the page declares, if any. */
+  canonicalUrl: string | null;
+  /** The <html lang="..."> value, if set. */
+  langAttribute: string | null;
+  /** Whether a viewport meta tag is present — required for mobile display. */
+  hasViewportMeta: boolean;
+}
+
+/** Site-level files that search engines look for. Fetched separately. */
+export interface TechnicalData {
+  /** Whether /robots.txt exists and could be read. */
+  robotsTxtFound: boolean;
+  /**
+   * Whether robots.txt blocks all crawlers from the whole site.
+   * A common and costly misconfiguration.
+   */
+  robotsBlocksEverything: boolean;
+  /** A sitemap URL, from robots.txt or the usual /sitemap.xml location. */
+  sitemapUrl: string | null;
+}
+
 /** One complete audit of one website. */
 export interface AuditData {
   /** The URL we actually checked (after cleaning up what the user typed). */
@@ -64,6 +121,10 @@ export interface AuditData {
   /** When this audit ran, as an ISO date string. */
   checkedAt: string;
   uptime: UptimeCheck;
+  /** Whether the page we read was served over HTTPS. */
+  servedOverHttps: boolean;
+  seo: SeoData;
+  technical: TechnicalData;
   findings: Finding[];
 }
 

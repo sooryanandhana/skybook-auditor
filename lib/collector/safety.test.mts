@@ -10,9 +10,9 @@
  *
  * Run with:  npm test
  */
-import { test } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { isPublicAddress } from "./safety.ts";
+import { isPublicAddress, safeFetch } from "./safety.ts";
 
 test("allows ordinary public IPv4 addresses", () => {
   for (const ip of ["8.8.8.8", "1.1.1.1", "93.184.216.34", "151.101.1.140"]) {
@@ -91,4 +91,90 @@ test("treats anything unparseable as unsafe", () => {
   for (const ip of ["", "not-an-ip", "999.999.999.999", "1.2.3"]) {
     assert.equal(isPublicAddress(ip), false, `${ip} should be blocked`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// safeFetch — the redirect guard
+//
+// A site can answer any request with "go look over there instead". Checking
+// only the address we started with is not enough, because "over there" may be
+// inside a private network. These tests replace `fetch` with a stand-in and
+// use IP literals as hosts, so no network is contacted.
+// ---------------------------------------------------------------------------
+
+const realFetch = globalThis.fetch;
+let queued: Response[] = [];
+let requested: string[] = [];
+
+beforeEach(() => {
+  queued = [];
+  requested = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requested.push(input.toString());
+    const next = queued.shift();
+    if (!next) throw new Error("test asked for more requests than were queued");
+    return next;
+  }) as typeof fetch;
+});
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+/** A 3xx response pointing somewhere else. */
+function redirectTo(location: string) {
+  return new Response(null, { status: 302, headers: { location } });
+}
+
+test("safeFetch refuses a redirect that lands on loopback", async () => {
+  queued = [redirectTo("http://127.0.0.1/secret")];
+  const response = await safeFetch("https://93.184.216.34/");
+
+  assert.equal(response, null, "the redirect target must not be fetched");
+  assert.equal(requested.length, 1, "only the first address should be requested");
+});
+
+test("safeFetch refuses a redirect that lands on a private network", async () => {
+  queued = [redirectTo("http://192.168.1.1/")];
+  const response = await safeFetch("https://93.184.216.34/");
+
+  assert.equal(response, null);
+  assert.equal(requested.length, 1);
+});
+
+test("safeFetch refuses a redirect to the cloud metadata address", async () => {
+  queued = [redirectTo("http://169.254.169.254/latest/meta-data/")];
+  assert.equal(await safeFetch("https://93.184.216.34/"), null);
+});
+
+test("safeFetch follows a redirect to a public address", async () => {
+  queued = [redirectTo("https://1.1.1.1/moved"), new Response("done", { status: 200 })];
+  const response = await safeFetch("https://93.184.216.34/");
+
+  assert.notEqual(response, null);
+  assert.equal(response?.status, 200);
+  assert.deepEqual(requested, ["https://93.184.216.34/", "https://1.1.1.1/moved"]);
+});
+
+test("safeFetch refuses a redirect to a non-web protocol", async () => {
+  queued = [redirectTo("file:///C:/Windows/win.ini")];
+  assert.equal(await safeFetch("https://93.184.216.34/"), null);
+});
+
+test("safeFetch refuses an unsafe address given directly", async () => {
+  assert.equal(await safeFetch("http://127.0.0.1/"), null);
+  assert.equal(requested.length, 0, "nothing should have been requested");
+});
+
+test("safeFetch gives up rather than following redirects forever", async () => {
+  queued = Array.from({ length: 10 }, () => redirectTo("https://1.1.1.1/again"));
+  assert.equal(await safeFetch("https://93.184.216.34/"), null);
+});
+
+test("safeFetch returns an ordinary response unchanged", async () => {
+  queued = [new Response("hello", { status: 200 })];
+  const response = await safeFetch("https://93.184.216.34/");
+
+  assert.equal(response?.status, 200);
+  assert.equal(await response?.text(), "hello");
 });

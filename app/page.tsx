@@ -4,7 +4,13 @@
 //   things (state) — all of which are browser-side behaviour.
 
 import { useState } from "react";
-import type { AuditData, AuditResponse, Severity, UptimeCheck } from "@/lib/types";
+import type {
+  AuditData,
+  AuditResponse,
+  CertificateProblem,
+  Severity,
+  UptimeCheck,
+} from "@/lib/types";
 import styles from "./page.module.css";
 
 export default function HomePage() {
@@ -114,14 +120,21 @@ function Results({ data }: { data: AuditData }) {
   return (
     <section className={styles.results}>
       <div className={styles.summary}>
-        <h2 className={styles.resultsUrl}>{data.url}</h2>
+        <h2 className={styles.resultsUrl}>{data.fetch.finalUrl}</h2>
         <p className={styles.checkedAt}>
-          Checked {new Date(data.checkedAt).toLocaleString()}
+          Checked {new Date(data.website.checkedAt).toLocaleString()}
         </p>
+        {data.fetch.wasRedirected && (
+          <p className={styles.checkedAt}>
+            Redirected from {data.website.requestedUrl}
+          </p>
+        )}
         <dl className={styles.uptime}>
           <div>
-            <dt>Status</dt>
-            <dd>{data.uptime.isOnline ? "Online" : "Offline"}</dd>
+            {/* "Responded" rather than "Online": the server answering is the
+                fact we measured. A 404 site is answering, so it is not down. */}
+            <dt>Server</dt>
+            <dd>{data.uptime.isOnline ? "Responded" : "No response"}</dd>
           </div>
           <div>
             <dt>Status code</dt>
@@ -181,13 +194,35 @@ function Results({ data }: { data: AuditData }) {
  * third-party content being treated as markup.
  */
 function MeasuredFacts({ data }: { data: AuditData }) {
-  const { seo, technical } = data;
+  const { seo, technical, fetch } = data;
 
   return (
     <section className={styles.facts}>
       <h3 className={styles.findingsHeading}>Measured facts</h3>
       <dl className={styles.factList}>
-        <Fact label="Served over HTTPS" value={data.servedOverHttps ? "Yes" : "No"} />
+        <Fact
+          label="Served over HTTPS"
+          value={fetch.servedOverHttps ? "Yes" : "No"}
+          note={
+            fetch.httpsUnavailable
+              ? "HTTPS could not be reached; the page was read over plain HTTP"
+              : undefined
+          }
+        />
+        {fetch.certificateProblem && (
+          <Fact
+            label="Certificate problem"
+            value={certificateProblemLabel(fetch.certificateProblem)}
+            note="Observed while connecting. A full certificate check is not implemented yet."
+          />
+        )}
+        {fetch.wasRedirected && (
+          <Fact
+            label="Redirects"
+            value={`${fetch.redirectChain.length - 1} followed`}
+            note={fetch.redirectChain.join(" → ")}
+          />
+        )}
         <Fact
           label="Page title"
           value={seo.titleText ?? "— none —"}
@@ -204,6 +239,10 @@ function MeasuredFacts({ data }: { data: AuditData }) {
           label="Main heading (h1)"
           value={seo.h1Count === 0 ? "— none —" : seo.h1Texts.join(" · ")}
           note={`${seo.h1Count} found`}
+        />
+        <Fact
+          label="Subheadings"
+          value={`${seo.h2Count} h2 · ${seo.h3Count} h3`}
         />
         <Fact
           label="Heading order"
@@ -242,6 +281,19 @@ function Fact({ label, value, note }: { label: string; value: string; note?: str
       </dd>
     </div>
   );
+}
+
+function certificateProblemLabel(problem: CertificateProblem): string {
+  switch (problem) {
+    case "expired":
+      return "The certificate has expired";
+    case "self-signed":
+      return "The certificate is self-signed, so browsers will not trust it";
+    case "wrong-hostname":
+      return "The certificate was issued for a different address";
+    case "untrusted":
+      return "The certificate could not be verified";
+  }
 }
 
 function severityLabel(severity: Severity): string {

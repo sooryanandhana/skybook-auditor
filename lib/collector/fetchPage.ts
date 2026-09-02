@@ -1,6 +1,10 @@
-import { normalizeUrl } from "./url";
-import { checkHostnameIsPublic } from "./safety";
-import type { UptimeCheck } from "@/lib/types";
+// The .ts extension is required so Node can run the unit tests directly;
+// Next.js resolves it the same way.
+import { normalizeUrl } from "./url.ts";
+import { checkHostnameIsPublic } from "./safety.ts";
+import type { CertificateProblem, UptimeCheck } from "@/lib/types";
+
+export type { CertificateProblem };
 
 /** How long we'll wait for any single request. */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -47,17 +51,10 @@ export interface FetchedPage {
    * and never mention that its certificate is broken.
    */
   certificateProblem?: CertificateProblem;
+  /** The Content-Type header the server sent, if any. */
+  contentType: string | null;
   uptime: UptimeCheck;
 }
-
-/**
- * Why a certificate stopped us connecting.
- *
- * These are audit FINDINGS, not merely errors — an expired certificate is one
- * of the most important things this tool can tell a client. Step 4's SSL check
- * examines the certificate properly; this records what we learned in passing.
- */
-export type CertificateProblem = "expired" | "self-signed" | "wrong-hostname" | "untrusted";
 
 export type FetchPageResult =
   | { ok: true; page: FetchedPage }
@@ -79,7 +76,7 @@ export type FetchPageResult =
  * Without this, every failure reads "could not connect" — which is wrong and
  * unhelpful when the truth is "the certificate expired three weeks ago".
  */
-function classifyConnectionError(error: unknown): {
+export function classifyConnectionError(error: unknown): {
   reason: string;
   certificateProblem?: CertificateProblem;
 } {
@@ -299,6 +296,7 @@ async function attemptFetch(
         servedOverHttps: currentUrl.protocol === "https:",
         httpsUnavailable,
         certificateProblem,
+        contentType: contentType || null,
         uptime,
       },
     };
@@ -351,7 +349,7 @@ async function readCapped(response: Response): Promise<Uint8Array | null> {
  * say, ISO-8859-1 turns accented characters into nonsense — and that nonsense
  * would end up quoted in the audit report as if it were the real page title.
  */
-function decodeHtml(bytes: Uint8Array, contentType: string): string {
+export function decodeHtml(bytes: Uint8Array, contentType: string): string {
   const fromHeader = contentType.match(/charset=["']?([^;"'\s]+)/i)?.[1];
 
   // If the header doesn't say, look for <meta charset="..."> near the top of

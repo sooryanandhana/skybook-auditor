@@ -14,7 +14,7 @@ import type { SeoData } from "@/lib/types";
  * JavaScript-rendered site could show fewer headings or images than a visitor
  * would see. Nothing here is guessed; it reports exactly what was sent.
  */
-export function runSeoChecks(html: string): SeoData {
+export function runSeoChecks(html: string, pageUrl?: string): SeoData {
   const $ = cheerio.load(html);
 
   // --- Title ---------------------------------------------------------------
@@ -53,8 +53,11 @@ export function runSeoChecks(html: string): SeoData {
   });
 
   // --- Other head elements -------------------------------------------------
-  const canonicalUrl =
-    normalizeText($('link[rel="canonical"]').first().attr("href") ?? "") ?? null;
+  // A canonical tag may hold a relative address (href="/about"). Resolving it
+  // against the page URL gives the absolute address it actually means; without
+  // that, the report would show a fragment like "/about" as if it were a URL.
+  const rawCanonical = normalizeText($('link[rel="canonical"]').first().attr("href") ?? "");
+  const canonicalUrl = resolveUrl(rawCanonical, pageUrl);
 
   const langAttribute = normalizeText($("html").attr("lang") ?? "") ?? null;
 
@@ -69,6 +72,8 @@ export function runSeoChecks(html: string): SeoData {
     metaDescriptionText,
     metaDescriptionLength: metaDescriptionText?.length ?? 0,
     h1Count: h1Elements.length,
+    h2Count: $("h2").length,
+    h3Count: $("h3").length,
     h1Texts,
     headingSkips: findHeadingSkips($),
     imageCount: images.length,
@@ -115,4 +120,21 @@ function findHeadingSkips($: cheerio.CheerioAPI): string[] {
 function normalizeText(value: string): string | null {
   const cleaned = value.replace(/\s+/g, " ").trim();
   return cleaned.length > 0 ? cleaned : null;
+}
+
+/**
+ * Turns a possibly-relative address into an absolute one.
+ *
+ * Returns the original value unchanged if there is no page URL to resolve
+ * against, or if it cannot be parsed — reporting what the page actually said
+ * is better than reporting nothing.
+ */
+function resolveUrl(value: string | null, baseUrl?: string): string | null {
+  if (value === null) return null;
+  if (!baseUrl) return value;
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return value;
+  }
 }

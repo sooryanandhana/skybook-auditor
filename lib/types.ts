@@ -2,12 +2,25 @@
  * The shape of our audit data.
  *
  * This file is the contract between every part of the app:
- *   - The Collector (Phase 3) fills these fields with real, measured facts.
- *   - Claude (Phase 5) reads these fields and explains them. It never sees anything else.
- *   - The PDF report (Phase 7) displays these fields.
+ *   - The Collector fills these fields with real, measured facts.
+ *   - Claude (a later phase) reads these fields and explains them. It never
+ *     sees anything else.
+ *   - The PDF report displays these fields.
  *
- * Nothing here is invented at runtime. Every field is either measured or absent.
+ * Nothing here is invented at runtime. Every field is either measured or
+ * explicitly marked as not measured.
  */
+
+/**
+ * A section of the audit whose module has not been built yet.
+ *
+ * `null` here means "this check has not run". It does NOT mean "the check ran
+ * and found nothing wrong". Anything reading this data — including Claude —
+ * must treat null as an absence of information, never as a clean result.
+ *
+ * When a module is implemented, widen its field to `TheData | null`.
+ */
+export type NotYetImplemented = null;
 
 /**
  * How serious a problem is.
@@ -35,8 +48,63 @@ export interface Finding {
   evidence: string;
 }
 
-/** Whether the site responded, and how quickly. */
+/** Why a certificate stopped an HTTPS connection succeeding. */
+export type CertificateProblem = "expired" | "self-signed" | "wrong-hostname" | "untrusted";
+
+// ---------------------------------------------------------------------------
+// website — what was audited, and when
+// ---------------------------------------------------------------------------
+
+export interface WebsiteInfo {
+  /** The address after tidying up what the user typed, before any redirects. */
+  requestedUrl: string;
+  /** When this audit ran, as an ISO date string. */
+  checkedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// fetch — what happened while retrieving the page
+// ---------------------------------------------------------------------------
+
+export interface FetchData {
+  /** The address finally reached. Differs from requestedUrl if it redirected. */
+  finalUrl: string;
+  /** Every address passed through, starting with the one requested. */
+  redirectChain: string[];
+  /** True when the final address differs from the one requested. */
+  wasRedirected: boolean;
+  /** Whether the page finally read was served over HTTPS. */
+  servedOverHttps: boolean;
+  /**
+   * True when HTTPS could not be reached at all and the page was read over
+   * plain HTTP instead. Strong evidence the site has no working HTTPS.
+   */
+  httpsUnavailable: boolean;
+  /**
+   * A certificate problem observed while trying to connect over HTTPS.
+   *
+   * This is NOT a certificate inspection. It only records why an HTTPS
+   * connection failed. `null` means no such failure occurred — which is NOT
+   * the same as "the certificate was checked and found valid". A proper
+   * certificate inspection belongs to the (not yet built) ssl module.
+   */
+  certificateProblem: CertificateProblem | null;
+  /** The Content-Type header the server sent for the page. */
+  contentType: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// uptime — did it answer, and how quickly
+// ---------------------------------------------------------------------------
+
 export interface UptimeCheck {
+  /**
+   * Whether the server responded at all.
+   *
+   * True for ANY HTTP status, including 404 and 500 — a server that answers
+   * is online, even if it answers with an error. False only when nothing
+   * responded.
+   */
   isOnline: boolean;
   /** HTTP status code, e.g. 200 = OK, 404 = not found. Null if we got no response at all. */
   statusCode: number | null;
@@ -48,14 +116,18 @@ export interface UptimeCheck {
    * page content, and excludes the browser work of rendering it. A large page
    * on a fast server has a low value here and can still feel slow to a visitor.
    *
-   * It measures server responsiveness only. Actual page-load speed comes from
-   * the PageSpeed Insights data collected separately.
+   * It measures server responsiveness only. Actual page-load speed will come
+   * from the (not yet built) performance module.
    *
    * Includes DNS lookup, connection setup, and any redirects along the way.
    * Null if the site never responded.
    */
   serverResponseTimeMs: number | null;
 }
+
+// ---------------------------------------------------------------------------
+// seo — read from the page's own HTML
+// ---------------------------------------------------------------------------
 
 /**
  * On-page SEO facts, read from the page's own HTML.
@@ -64,9 +136,9 @@ export interface UptimeCheck {
  * contain text copied from someone else's website. Treat it as DATA, never as
  * instructions or as code:
  *   - When displaying it, always render as plain text. React does this by
- *     default; the PDF template in Phase 7 must do the same deliberately.
- *   - When sending it to Claude in Phase 5, the prompt must state that these
- *     are measured values to describe, not commands to follow.
+ *     default; the PDF template must do the same deliberately.
+ *   - When sending it to Claude, the prompt must state that these are measured
+ *     values to describe, not commands to follow.
  */
 export interface SeoData {
   /** The <title> text, or null if the page has none. */
@@ -80,6 +152,10 @@ export interface SeoData {
 
   /** How many <h1> elements the page has. Ideally exactly one. */
   h1Count: number;
+  /** How many <h2> elements the page has. */
+  h2Count: number;
+  /** How many <h3> elements the page has. */
+  h3Count: number;
   /**
    * The text of each <h1> that actually has text, in page order.
    *
@@ -100,7 +176,10 @@ export interface SeoData {
   /** How many of those have no usable alt attribute. */
   imagesMissingAlt: number;
 
-  /** The canonical URL the page declares, if any. */
+  /**
+   * The canonical URL the page declares, if any.
+   * Resolved to an absolute address, since the tag may hold a relative one.
+   */
   canonicalUrl: string | null;
   /** The <html lang="..."> value, if set. */
   langAttribute: string | null;
@@ -108,7 +187,10 @@ export interface SeoData {
   hasViewportMeta: boolean;
 }
 
-/** Site-level files that search engines look for. Fetched separately. */
+// ---------------------------------------------------------------------------
+// technical — site-level files search engines look for
+// ---------------------------------------------------------------------------
+
 export interface TechnicalData {
   /** Whether /robots.txt exists and could be read. */
   robotsTxtFound: boolean;
@@ -121,17 +203,39 @@ export interface TechnicalData {
   sitemapUrl: string | null;
 }
 
-/** One complete audit of one website. */
+// ---------------------------------------------------------------------------
+// One complete audit
+// ---------------------------------------------------------------------------
+
+/**
+ * One complete audit of one website.
+ *
+ * Sections are grouped so each future module owns exactly one of them. The
+ * sections typed `NotYetImplemented` are placeholders: their modules have not
+ * been built, and null means "not measured", never "measured and fine".
+ */
 export interface AuditData {
-  /** The URL we actually checked (after cleaning up what the user typed). */
-  url: string;
-  /** When this audit ran, as an ISO date string. */
-  checkedAt: string;
+  website: WebsiteInfo;
+  fetch: FetchData;
   uptime: UptimeCheck;
-  /** Whether the page we read was served over HTTPS. */
-  servedOverHttps: boolean;
   seo: SeoData;
   technical: TechnicalData;
+
+  /** Speed / Core Web Vitals. Module not built yet. */
+  performance: NotYetImplemented;
+  /** Security headers and mixed content. Module not built yet. */
+  security: NotYetImplemented;
+  /** Certificate inspection. Module not built yet — see fetch.certificateProblem. */
+  ssl: NotYetImplemented;
+  /** Domain record lookups. Module not built yet. */
+  dns: NotYetImplemented;
+  /** Hosting/CDN detection. Module not built yet. */
+  hosting: NotYetImplemented;
+
+  /**
+   * Graded issues derived from the measurements above by fixed rules.
+   * Empty until the severity-rules module is built.
+   */
   findings: Finding[];
 }
 

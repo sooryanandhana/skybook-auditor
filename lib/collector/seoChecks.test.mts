@@ -61,6 +61,40 @@ test("counts multiple h1 elements", () => {
   assert.deepEqual(seo.h1Texts, ["First", "Second"]);
 });
 
+test("reports a missing h1 as a count of zero", () => {
+  const seo = runSeoChecks(`<html><body><h2>Only a subheading</h2></body></html>`);
+  assert.equal(seo.h1Count, 0);
+  assert.deepEqual(seo.h1Texts, []);
+});
+
+test("counts h2 and h3 elements", () => {
+  const seo = runSeoChecks(`
+    <html><body>
+      <h1>Title</h1>
+      <h2>One</h2><h2>Two</h2><h2>Three</h2>
+      <h3>A</h3><h3>B</h3>
+      <h4>Ignored by these counts</h4>
+    </body></html>
+  `);
+  assert.equal(seo.h1Count, 1);
+  assert.equal(seo.h2Count, 3);
+  assert.equal(seo.h3Count, 2);
+});
+
+test("reports zero h2 and h3 when there are none", () => {
+  const seo = runSeoChecks(`<html><body><h1>Alone</h1></body></html>`);
+  assert.equal(seo.h2Count, 0);
+  assert.equal(seo.h3Count, 0);
+});
+
+test("counts an empty h1 as an element but not as text", () => {
+  // h1Count and h1Texts deliberately disagree here: one heading exists but
+  // says nothing. Both facts are true and both are worth reporting.
+  const seo = runSeoChecks(`<html><body><h1></h1><h1>Real one</h1></body></html>`);
+  assert.equal(seo.h1Count, 2);
+  assert.deepEqual(seo.h1Texts, ["Real one"]);
+});
+
 test("spots a skipped heading level", () => {
   const seo = runSeoChecks(`
     <html><body><h1>Title</h1><h2>Section</h2><h4>Too deep</h4></body></html>
@@ -87,6 +121,28 @@ test("reads lang, canonical and viewport", () => {
   assert.equal(seo.langAttribute, "en-GB");
   assert.equal(seo.canonicalUrl, "https://example.com/page");
   assert.equal(seo.hasViewportMeta, true);
+});
+
+test("resolves a relative canonical URL to an absolute one", () => {
+  // A canonical tag may legitimately hold a relative path. Reporting "/about"
+  // as if it were a URL would be showing a fragment of the truth.
+  const seo = runSeoChecks(
+    `<html><head><link rel="canonical" href="/about"></head><body></body></html>`,
+    "https://example.com/some/page",
+  );
+  assert.equal(seo.canonicalUrl, "https://example.com/about");
+});
+
+test("leaves the canonical alone when there is no page URL to resolve against", () => {
+  const seo = runSeoChecks(
+    `<html><head><link rel="canonical" href="/about"></head><body></body></html>`,
+  );
+  assert.equal(seo.canonicalUrl, "/about");
+});
+
+test("reports a missing canonical as null", () => {
+  const seo = runSeoChecks(`<html><head></head><body></body></html>`, "https://example.com/");
+  assert.equal(seo.canonicalUrl, null);
 });
 
 test("reports absent optional elements as null/false rather than guessing", () => {

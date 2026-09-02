@@ -2,14 +2,15 @@ import { NextResponse } from "next/server";
 import { fetchPage } from "@/lib/collector/fetchPage";
 import { runSeoChecks } from "@/lib/collector/seoChecks";
 import { runTechnicalChecks } from "@/lib/collector/technicalChecks";
+import { normalizeUrl } from "@/lib/collector/url";
 import type { AuditData, AuditResponse, Finding } from "@/lib/types";
 
 /**
  * POST /api/audit
  *
- * PHASE 3, STEP 1: really fetches the page and reports what came back.
- * The SEO, security, SSL/DNS and speed checks are still to come — the
- * findings list stays empty until then.
+ * Runs the deterministic audit checks that have been built so far and returns
+ * the measurements. Sections whose modules do not exist yet are returned as
+ * null — meaning "not measured", never "measured and fine".
  *
  * Note the deliberate difference between two kinds of failure:
  *   - the site answered with an error   -> we know its status code
@@ -53,21 +54,42 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
 
   const { page } = result;
 
-  const seo = runSeoChecks(page.html);
+  const seo = runSeoChecks(page.html, page.finalUrl);
   const technical = await runTechnicalChecks(page.finalUrl);
 
-  // Findings arrive in step 6, where fixed rules turn these measurements into
-  // graded issues. Until then we show the raw facts only.
-  const findings: Finding[] = [];
+  // The address as we requested it, before any redirects. normalizeUrl already
+  // succeeded inside fetchPage, so this cannot fail here; the fallback keeps
+  // the types honest rather than guarding against a real case.
+  const normalized = normalizeUrl(url);
+  const requestedUrl = normalized.ok ? normalized.url.toString() : url;
 
   const data: AuditData = {
-    url: page.finalUrl,
-    checkedAt: new Date().toISOString(),
+    website: {
+      requestedUrl,
+      checkedAt: new Date().toISOString(),
+    },
+    fetch: {
+      finalUrl: page.finalUrl,
+      redirectChain: page.redirectChain,
+      wasRedirected: page.redirectChain.length > 1,
+      servedOverHttps: page.servedOverHttps,
+      httpsUnavailable: page.httpsUnavailable,
+      certificateProblem: page.certificateProblem ?? null,
+      contentType: page.contentType,
+    },
     uptime: page.uptime,
-    servedOverHttps: page.servedOverHttps,
     seo,
     technical,
-    findings,
+
+    // Modules not built yet. null means "not measured".
+    performance: null,
+    security: null,
+    ssl: null,
+    dns: null,
+    hosting: null,
+
+    // Populated once the severity-rules module exists.
+    findings: [] as Finding[],
   };
 
   return NextResponse.json({ ok: true, data });

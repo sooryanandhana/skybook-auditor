@@ -303,11 +303,19 @@ function MeasuredFacts({ data }: { data: AuditData }) {
             data.security.mixedContent.items.length > 0
               ? data.security.mixedContent.items
                   .slice(0, 5)
-                  .map((item) => `${item.element}: ${item.url}`)
+                  .map((item) => `${item.element} (${item.via}): ${item.url}`)
                   .join("  ·  ")
               : undefined
           }
         />
+        {/* Shown next to the count so it is never read as a whole-site
+            all-clear. This scan reads the served markup and nothing more. */}
+        {data.security.mixedContent.applicable && (
+          <Fact
+            label="Not checked by this scan"
+            value={data.security.mixedContent.notInspected.join("  ·  ")}
+          />
+        )}
         <Fact
           label="Insecure form submission"
           value={
@@ -350,13 +358,19 @@ function hstsSummary(hsts: AuditData["security"]["hsts"], headerPresent: boolean
   return `${days} day${days === 1 ? "" : "s"}${extras.length ? ` · ${extras.join(" · ")}` : ""}`;
 }
 
-/** Turns the mixed-content measurements into one readable line. */
+/**
+ * Turns the mixed-content measurements into one readable line.
+ *
+ * The wording says "in the page HTML" deliberately. We read the markup the
+ * server sent; we do not run the page or download its stylesheets. A bare
+ * "None found" would claim more than we checked.
+ */
 function mixedContentSummary(mixed: AuditData["security"]["mixedContent"]): string {
   if (!mixed.applicable) return "Not applicable — the page is not served over HTTPS";
-  if (mixed.total === 0) return "None found";
+  if (mixed.total === 0) return "None found in the page HTML";
 
   const blocking = mixed.activeCount > 0 ? `, ${mixed.activeCount} likely blocked by browsers` : "";
-  return `${mixed.total} loaded over plain HTTP${blocking}`;
+  return `${mixed.total} found in the page HTML, loaded over plain HTTP${blocking}`;
 }
 
 function Fact({ label, value, note }: { label: string; value: string; note?: string }) {

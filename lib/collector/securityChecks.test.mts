@@ -17,6 +17,8 @@ import {
   parseHsts,
   findMixedContent,
   findInsecureFormActions,
+  classifyLink,
+  findCssResources,
 } from "./securityChecks.ts";
 
 const HTTPS = true;
@@ -227,6 +229,46 @@ test("reports mixed content as not applicable on an HTTP page", () => {
   assert.equal(result.total, 0);
 });
 
+test("does NOT count an http:// address written inside a script block", () => {
+  // A regex over the raw HTML would wrongly count this. Cheerio parses
+  // properly, so script contents are text, not markup.
+  const result = findMixedContent(
+    `<html><body><script>var s = '<img src="http://x.com/fake.png">';</script></body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 0);
+});
+
+test("covers the less common resource elements", () => {
+  const result = findMixedContent(
+    `<html><body>
+       <object data="http://x.com/a.swf"></object>
+       <embed src="http://x.com/b.swf">
+       <track src="http://x.com/c.vtt">
+       <video poster="http://x.com/p.jpg"></video>
+       <audio src="http://x.com/d.mp3"></audio>
+       <source src="http://x.com/e.mp4">
+     </body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 6);
+  assert.equal(result.activeCount, 2, "object and embed are blocked; media is not");
+});
+
+test("survives malformed HTML without crashing", () => {
+  const cases: Array<[string, number]> = [
+    ['<IMG SRC="HTTP://X.COM/A.PNG">', 1], // uppercase tag and address
+    ["<img src='http://x.com/a.png'>", 1], // single quotes
+    ["<img src=http://x.com/a.png>", 1], // no quotes at all
+    ['<body><img src="http://x.com/a.png"></body>', 1], // no <html> wrapper
+    ["", 0], // empty document
+    ["not html at all", 0], // plain text
+  ];
+  for (const [html, expected] of cases) {
+    assert.equal(findMixedContent(html, HTTPS).total, expected, `for ${JSON.stringify(html)}`);
+  }
+});
+
 test("caps the list but keeps the true total", () => {
   const images = Array.from({ length: 25 }, (_, i) => `<img src="http://x.com/${i}.png">`).join("");
   const result = findMixedContent(`<html><body>${images}</body></html>`, HTTPS);
@@ -244,6 +286,216 @@ test("reports a clean HTTPS page as having no mixed content", () => {
   assert.equal(result.applicable, true);
   assert.equal(result.total, 0);
   assert.equal(result.truncated, false);
+});
+
+// ---------------------------------------------------------------------------
+// <link> elements — not all of them load anything
+// ---------------------------------------------------------------------------
+
+test("finds an insecure favicon", () => {
+  const result = findMixedContent(
+    '<html><head><link rel="icon" href="http://x.com/f.ico"></head><body></body></html>',
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+  assert.equal(result.items[0].kind, "passive");
+  assert.equal(result.items[0].element, "link");
+});
+
+test("finds an insecure apple-touch-icon", () => {
+  const result = findMixedContent(
+    '<html><head><link rel="apple-touch-icon" href="http://x.com/t.png"></head><body></body></html>',
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+  assert.equal(result.items[0].kind, "passive");
+});
+
+test('handles the legacy rel="shortcut icon" pair', () => {
+  const result = findMixedContent(
+    '<html><head><link rel="shortcut icon" href="http://x.com/f.ico"></head><body></body></html>',
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+});
+
+test("finds an insecure web manifest", () => {
+  const result = findMixedContent(
+    '<html><head><link rel="manifest" href="http://x.com/m.json"></head><body></body></html>',
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+});
+
+test("classifies a preload by what it is preloading", () => {
+  // The `as` attribute is the only thing that says whether a browser blocks it.
+  assert.equal(classifyLink("preload", "script"), "active");
+  assert.equal(classifyLink("preload", "style"), "active");
+  assert.equal(classifyLink("preload", "font"), "active");
+  assert.equal(classifyLink("preload", "image"), "passive");
+});
+
+test("reports a preload with no `as` as undetermined rather than guessing", () => {
+  assert.equal(classifyLink("preload", undefined), "unknown");
+  assert.equal(classifyLink("preload", "something-new"), "unknown");
+});
+
+test("finds an insecure preload in a page", () => {
+  const result = findMixedContent(
+    '<html><head><link rel="preload" as="script" href="http://x.com/a.js"></head><body></body></html>',
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+  assert.equal(result.items[0].kind, "active");
+});
+
+test("ignores link types that fetch nothing", () => {
+  // preconnect only opens a connection; canonical and alternate are
+  // references, not loads. Counting them would invent problems.
+  for (const rel of ["preconnect", "dns-prefetch", "canonical", "alternate", "author"]) {
+    assert.equal(classifyLink(rel, undefined), null, `rel="${rel}" loads nothing`);
+  }
+
+  const result = findMixedContent(
+    `<html><head>
+       <link rel="preconnect" href="http://x.com">
+       <link rel="canonical" href="http://x.com/page">
+       <link rel="dns-prefetch" href="http://x.com">
+     </head><body></body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 0);
+});
+
+test("reads the rel value whatever its capitalisation", () => {
+  assert.equal(classifyLink("STYLESHEET", undefined), "active");
+  assert.equal(classifyLink("Icon", undefined), "passive");
+});
+
+test("treats a link with no rel as loading nothing", () => {
+  assert.equal(classifyLink(undefined, undefined), null);
+  assert.equal(classifyLink("", undefined), null);
+});
+
+// ---------------------------------------------------------------------------
+// CSS written inside the page
+// ---------------------------------------------------------------------------
+
+test("finds an insecure image named in a style attribute", () => {
+  const result = findMixedContent(
+    `<html><body><div style="background: url(http://x.com/bg.png)">x</div></body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+  assert.equal(result.items[0].element, "div", "the element carrying the style");
+  assert.match(result.items[0].via, /style attribute/);
+});
+
+test("finds an insecure image named in a <style> block", () => {
+  const result = findMixedContent(
+    `<html><head><style>body{background:url(http://x.com/bg.png)}</style></head><body></body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 1);
+  assert.equal(result.items[0].element, "style");
+});
+
+test("reads url() with any quoting style", () => {
+  for (const css of [
+    'url(http://x.com/a.png)',
+    'url("http://x.com/a.png")',
+    "url('http://x.com/a.png')",
+    'url(  http://x.com/a.png  )',
+    'URL(http://x.com/a.png)',
+  ]) {
+    const found = findCssResources(css);
+    assert.equal(found.length, 1, `for ${css}`);
+    assert.equal(found[0].url, "http://x.com/a.png", `for ${css}`);
+  }
+});
+
+test("reports a plain CSS url() as undetermined, not guessed", () => {
+  // A url() could be an image (browsers warn) or a font (browsers block).
+  // The CSS does not say, so neither do we.
+  const found = findCssResources("background:url(http://x.com/thing)");
+  assert.equal(found[0].kind, "unknown");
+});
+
+test("knows a CSS @import is a stylesheet, which browsers block", () => {
+  for (const css of ['@import "http://x.com/a.css";', "@import url(http://x.com/a.css);"]) {
+    const found = findCssResources(css);
+    assert.equal(found.length, 1, `for ${css}`);
+    assert.equal(found[0].kind, "active", `for ${css}`);
+    assert.match(found[0].via, /@import/);
+  }
+});
+
+test("does not count an @import twice when written as url()", () => {
+  // "@import url(...)" matches both patterns; it must be reported once.
+  const found = findCssResources("@import url(http://x.com/a.css);");
+  assert.equal(found.length, 1);
+  assert.equal(found[0].kind, "active");
+});
+
+test("ignores secure and relative addresses in CSS", () => {
+  const css = `
+    a{background:url(https://x.com/a.png)}
+    b{background:url(//x.com/b.png)}
+    c{background:url(/local.png)}
+    d{background:url(data:image/gif;base64,AAA)}
+  `;
+  assert.deepEqual(findCssResources(css), []);
+});
+
+test("finds several insecure addresses in one block of CSS", () => {
+  const found = findCssResources(
+    "a{background:url(http://x.com/1.png)} b{background:url(http://x.com/2.png)}",
+  );
+  assert.equal(found.length, 2);
+});
+
+test("counts CSS resources alongside ordinary ones", () => {
+  const result = findMixedContent(
+    `<html><head>
+       <style>body{background:url(http://x.com/bg.png)}</style>
+       <link rel="icon" href="http://x.com/f.ico">
+     </head><body>
+       <img src="http://x.com/a.png">
+       <script src="http://x.com/a.js"></script>
+     </body></html>`,
+    HTTPS,
+  );
+  assert.equal(result.total, 4);
+  assert.equal(result.activeCount, 1, "only the script is definitely blocked");
+});
+
+// ---------------------------------------------------------------------------
+// Being honest about what a static scan cannot see
+// ---------------------------------------------------------------------------
+
+test("always records what was not inspected, even on a clean page", () => {
+  // A count of zero must never be presented as "the whole site is clean".
+  const clean = findMixedContent('<html><body><img src="https://x.com/a.png"></body></html>', HTTPS);
+  assert.equal(clean.total, 0);
+  assert.ok(clean.notInspected.length > 0, "the limits must travel with the result");
+  assert.ok(
+    clean.notInspected.some((limit) => /CSS files/i.test(limit)),
+    "external stylesheets are not downloaded",
+  );
+  assert.ok(
+    clean.notInspected.some((limit) => /JavaScript/i.test(limit)),
+    "the page is not run",
+  );
+});
+
+test("records the same limits on an HTTP page and on a page with findings", () => {
+  const onHttp = findMixedContent("<html></html>", HTTP);
+  const withFindings = findMixedContent(
+    '<html><body><img src="http://x.com/a.png"></body></html>',
+    HTTPS,
+  );
+  assert.ok(onHttp.notInspected.length > 0);
+  assert.deepEqual(withFindings.notInspected, onHttp.notInspected);
 });
 
 // ---------------------------------------------------------------------------

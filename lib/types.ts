@@ -245,19 +245,36 @@ export interface HstsData {
   preload: boolean;
 }
 
+/**
+ * How a browser is expected to treat an insecure resource.
+ *
+ * - "active" — scripts, stylesheets, iframes, fonts. These can change the
+ *   page, so browsers usually BLOCK them and the page may visibly break.
+ * - "passive" — images, audio, video. Usually still loaded, but the padlock
+ *   is downgraded and the visitor sees a warning.
+ * - "unknown" — the markup does not say what kind of resource it is. A
+ *   `url(...)` inside CSS could be an image or a font, and guessing from the
+ *   file extension would be inference, not measurement. Reported honestly as
+ *   undetermined instead.
+ */
+export type MixedContentKind = "active" | "passive" | "unknown";
+
 /** One resource the page loads over plain HTTP. */
 export interface MixedContentItem {
   /** The insecure address, exactly as written in the page. */
   url: string;
-  /** Which element referred to it, e.g. "img", "script". */
+  /** Which element referred to it, e.g. "img", "script", "div". */
   element: string;
   /**
-   * "active" resources (scripts, stylesheets, iframes) can change the page,
-   * so browsers usually BLOCK them outright — the page may visibly break.
-   * "passive" resources (images, audio, video) are usually allowed but
-   * downgrade the padlock and show a warning.
+   * How the element referred to it — an attribute name such as "src", or a
+   * mechanism such as "style attribute" or "CSS url()".
+   *
+   * Present so a person can find the reference in the page source. Without
+   * it, a CSS background image would be reported against a "div" with no clue
+   * where in that div to look.
    */
-  kind: "active" | "passive";
+  via: string;
+  kind: MixedContentKind;
 }
 
 export interface MixedContentData {
@@ -267,9 +284,15 @@ export interface MixedContentData {
    * same single finding, not dozens.
    */
   applicable: boolean;
-  /** How many insecure resources were found in total. */
+  /**
+   * How many insecure resources were found IN THE PAGE'S OWN HTML.
+   *
+   * Read `notInspected` before treating 0 as "this site is clean" — see the
+   * note on that field. This is a count of what a static read of the served
+   * markup can see, not of everything a browser would end up loading.
+   */
   total: number;
-  /** How many of those are the blocking kind. */
+  /** How many of those a browser is expected to block outright. */
   activeCount: number;
   /**
    * The insecure resources found, capped at MIXED_CONTENT_LIMIT.
@@ -278,6 +301,18 @@ export interface MixedContentData {
   items: MixedContentItem[];
   /** True when more were found than this list holds. */
   truncated: boolean;
+  /**
+   * Places this scan could NOT look, in plain words.
+   *
+   * This exists so that `total: 0` is never presented as "the whole website
+   * is free of mixed content". We read the HTML the server sent; we do not
+   * run the page. Anything a browser fetches afterwards — resources named
+   * inside a separate .css file, or added by JavaScript once the page runs —
+   * is outside what we can honestly report on.
+   *
+   * Whatever displays this data must say so alongside the count.
+   */
+  notInspected: string[];
 }
 
 export interface SecurityData {

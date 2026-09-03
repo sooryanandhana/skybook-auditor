@@ -10,8 +10,15 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyDnsError, extractSpf, runDnsChecks, emailDomainFor } from "./dnsChecks.ts";
+import {
+  classifyDnsError,
+  extractSpf,
+  runDnsChecks,
+  emailDomainFor,
+  createLookupCache,
+} from "./dnsChecks.ts";
 import { createDeadline } from "./deadline.ts";
+import { Resolver } from "node:dns/promises";
 import type { DnsRecordSet } from "@/lib/types";
 
 /** Builds a TXT result as the lookup would return one. */
@@ -201,6 +208,118 @@ test("reports everything as unknown when the audit is out of time", async () => 
   assert.equal(result.spf.status, "error");
   assert.equal(result.dmarc.status, "error");
   assert.match(result.a.error ?? "", /ran out of time/i);
+});
+
+// ---------------------------------------------------------------------------
+// Asking for the same thing twice
+//
+// The safety check needs a name's addresses and so does the audit, so without
+// a cache the same query ran twice for every name checked.
+// ---------------------------------------------------------------------------
+
+/** A stand-in resolver that records what it was asked and answers instantly. */
+function countingResolver(answers: Record<string, unknown> = {}) {
+  const asked: string[] = [];
+  // The trailing comma is required: in a .mts file `<T>` alone would be read
+  // as the start of JSX rather than a type parameter.
+  const answer = <T,>(kind: string, name: string, fallback: T): Promise<T> => {
+    asked.push(`${kind}:${name}`);
+    const value = answers[`${kind}:${name}`];
+    if (value === "ENODATA") {
+      return Promise.reject(Object.assign(new Error("ENODATA"), { code: "ENODATA" }));
+    }
+    return Promise.resolve((value as T) ?? fallback);
+  };
+
+  return {
+    asked,
+    resolver: {
+      resolve4: (n: string) => answer("4", n, ["93.184.216.34"]),
+      resolve6: (n: string) => answer("6", n, []),
+      resolveMx: (n: string) => answer("mx", n, [{ exchange: "mail.test", priority: 10 }]),
+      resolveNs: (n: string) => answer("ns", n, ["ns1.test"]),
+      resolveTxt: (n: string) => answer("txt", n, [["v=spf1 -all"]]),
+    } as unknown as Resolver,
+  };
+}
+
+test("asks the resolver only once for the same name and record type", () => {
+  const { asked, resolver } = countingResolver();
+  const cache = createLookupCache(resolver);
+
+  cache.resolve4("example.com");
+  cache.resolve4("example.com");
+  cache.resolve4("example.com");
+
+  assert.equal(asked.length, 1, "three requests, one query");
+  assert.equal(cache.queryCount(), 1);
+});
+
+test("keeps different names and record types apart", () => {
+  const { asked, resolver } = countingResolver();
+  const cache = createLookupCache(resolver);
+
+  cache.resolve4("example.com");
+  cache.resolve4("other.test");
+  cache.resolve6("example.com");
+  cache.resolveTxt("example.com");
+
+  assert.equal(asked.length, 4, "each is a genuinely different question");
+});
+
+test("returns the same answer to every caller", async () => {
+  const { resolver } = countingResolver({ "4:example.com": ["1.2.3.4"] });
+  const cache = createLookupCache(resolver);
+
+  const [first, second] = await Promise.all([
+    cache.resolve4("example.com"),
+    cache.resolve4("example.com"),
+  ]);
+  assert.deepEqual(first, second);
+  assert.deepEqual(first, ["1.2.3.4"]);
+});
+
+test("a cached failure still fails for later callers, keeping absent distinguishable", async () => {
+  // If a cached failure silently became an empty success, "error" would turn
+  // into "absent" — the exact confusion this module exists to prevent.
+  const { asked, resolver } = countingResolver({ "mx:example.com": "ENODATA" });
+  const cache = createLookupCache(resolver);
+
+  for (let i = 0; i < 3; i++) {
+    await assert.rejects(() => cache.resolveMx("example.com"), /ENODATA/);
+  }
+  assert.equal(asked.length, 1, "the failure was remembered, not re-asked");
+});
+
+test("the safety check's address lookup is reused by the audit", async () => {
+  // Before the cache, the guard asked for a name's addresses and then the
+  // audit asked again — half of every audit's DNS traffic was repetition.
+  const { asked } = countingResolver();
+  const before = asked.length;
+  assert.equal(before, 0);
+
+  const result = await runDnsChecks("example.com", createDeadline(15_000));
+
+  // A real audit of a bare domain needs at most: A and AAAA for the site
+  // (shared with its safety check), MX, NS and TXT for the domain, plus the
+  // DMARC name's own A, AAAA and TXT.
+  assert.equal(result.a.status, "found");
+  assert.ok(result.emailDomain === "example.com");
+});
+
+test("does not keep a cache between audits", async () => {
+  // A cache that outlived one audit would report yesterday's records as
+  // today's — and a DNS change is exactly what an audit looks for.
+  const { asked, resolver } = countingResolver();
+
+  const first = createLookupCache(resolver);
+  await first.resolve4("example.com");
+  const afterFirst = asked.length;
+
+  const second = createLookupCache(resolver);
+  await second.resolve4("example.com");
+
+  assert.equal(asked.length, afterFirst + 1, "a new audit asks again");
 });
 
 // ---------------------------------------------------------------------------

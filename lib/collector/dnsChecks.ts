@@ -57,7 +57,10 @@ export async function runDnsChecks(hostname: string, deadline: Deadline): Promis
     return allUnknown(hostname, emailDomain, dmarcHostname, "The audit ran out of time.");
   }
 
-  const resolver = makeResolver();
+  // One cache for this audit only. The safety checks below and the record
+  // lookups after them ask for some of the same names, and this stops the
+  // second asker repeating the first one's query.
+  const lookups = createLookupCache(makeResolver());
 
   /*
    * The hostname came from whoever submitted the audit. It has already passed
@@ -65,7 +68,7 @@ export async function runDnsChecks(hostname: string, deadline: Deadline): Promis
    * here rather than assumed: this module can be called on its own, and Phase 4
    * will call it independently of any page fetch.
    */
-  const safety = await checkDnsNameIsSafe(hostname, resolver);
+  const safety = await checkDnsNameIsSafe(hostname, lookups);
   if (!safety.safe) {
     return allUnknown(hostname, emailDomain, dmarcHostname, safety.reason);
   }
@@ -75,33 +78,22 @@ export async function runDnsChecks(hostname: string, deadline: Deadline): Promis
    * its own safety check rather than inheriting the site hostname's result.
    */
   const emailSafety =
-    emailDomain === hostname ? safety : await checkDnsNameIsSafe(emailDomain, resolver);
+    emailDomain === hostname ? safety : await checkDnsNameIsSafe(emailDomain, lookups);
   if (!emailSafety.safe) {
     return allUnknown(hostname, emailDomain, dmarcHostname, emailSafety.reason);
   }
 
-  // Read TXT chunks back into whole records; a long record is split across
-  // several strings on the wire.
-  const readTxt = (name: string) => async () =>
-    (await resolver.resolveTxt(name)).map((chunks) => chunks.join(""));
-
   // Run the lookups together: they are independent, and doing them one after
-  // another would spend the budget several times over.
+  // another would spend the budget several times over. The address lookups
+  // reuse what the safety check already asked for.
   const [a, aaaa, mx, ns, txt] = await Promise.all([
     // Address records belong to the host actually serving the site.
-    lookup(() => resolver.resolve4(hostname), deadline),
-    lookup(() => resolver.resolve6(hostname), deadline),
+    lookup(() => lookups.resolve4(hostname), deadline),
+    lookup(() => lookups.resolve6(hostname), deadline),
     // Mail and zone records belong to the domain, not the www alias.
-    lookup<MxRecord>(
-      async () =>
-        (await resolver.resolveMx(emailDomain)).map((entry) => ({
-          exchange: entry.exchange,
-          priority: entry.priority,
-        })),
-      deadline,
-    ),
-    lookup(() => resolver.resolveNs(emailDomain), deadline),
-    lookup(readTxt(emailDomain), deadline),
+    lookup<MxRecord>(() => lookups.resolveMx(emailDomain), deadline),
+    lookup(() => lookups.resolveNs(emailDomain), deadline),
+    lookup(() => lookups.resolveTxt(emailDomain), deadline),
   ]);
 
   return {
@@ -113,13 +105,91 @@ export async function runDnsChecks(hostname: string, deadline: Deadline): Promis
     ns,
     txt,
     spf: extractSpf(txt),
-    dmarc: await checkDmarc(dmarcHostname, resolver, deadline),
+    dmarc: await checkDmarc(dmarcHostname, lookups, deadline),
   };
 }
 
 /** A resolver with its own timeout, so a silent DNS server cannot hang us. */
 function makeResolver(): Resolver {
   return new Resolver({ timeout: LOOKUP_TIMEOUT_MS, tries: 2 });
+}
+
+// ---------------------------------------------------------------------------
+// Asking for the same thing twice
+// ---------------------------------------------------------------------------
+
+/** A finished lookup, kept whole so a cached failure still fails for the next caller. */
+type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+/**
+ * Remembers each lookup for the length of ONE audit.
+ *
+ * The safety check needs a name's addresses, and so does the audit itself, so
+ * without this the same query runs twice. With three names to check — the
+ * site, its mail domain, and the derived DMARC name — half of every audit's
+ * DNS traffic was the guard repeating work the audit was about to do anyway.
+ *
+ * Deliberately per-call and thrown away afterwards. A cache that outlived the
+ * audit would report yesterday's records as today's, and DNS changes are
+ * exactly the kind of thing an audit is looking for.
+ *
+ * Failures are cached too, so a name that could not be resolved is not asked
+ * about repeatedly within the same audit — and the failure reaches every
+ * caller intact, keeping "absent" and "error" distinguishable.
+ */
+export interface LookupCache {
+  resolve4(name: string): Promise<string[]>;
+  resolve6(name: string): Promise<string[]>;
+  resolveMx(name: string): Promise<MxRecord[]>;
+  resolveNs(name: string): Promise<string[]>;
+  resolveTxt(name: string): Promise<string[]>;
+  /** How many queries actually reached the resolver. For tests. */
+  queryCount(): number;
+}
+
+export function createLookupCache(resolver: Resolver): LookupCache {
+  const entries = new Map<string, Promise<Settled<unknown>>>();
+  let queries = 0;
+
+  function remember<T>(key: string, run: () => Promise<T>): Promise<T> {
+    if (!entries.has(key)) {
+      queries += 1;
+      entries.set(
+        key,
+        run().then(
+          (value) => ({ ok: true, value }) as Settled<unknown>,
+          // Stored rather than thrown, so an unawaited entry never becomes an
+          // unhandled rejection. It is re-thrown below for each caller.
+          (error) => ({ ok: false, error }) as Settled<unknown>,
+        ),
+      );
+    }
+
+    return entries.get(key)!.then((settled) => {
+      if (settled.ok) return settled.value as T;
+      throw settled.error;
+    });
+  }
+
+  return {
+    resolve4: (name) => remember(`4:${name}`, () => resolver.resolve4(name)),
+    resolve6: (name) => remember(`6:${name}`, () => resolver.resolve6(name)),
+    resolveNs: (name) => remember(`ns:${name}`, () => resolver.resolveNs(name)),
+    resolveMx: (name) =>
+      remember(`mx:${name}`, async () =>
+        (await resolver.resolveMx(name)).map((entry) => ({
+          exchange: entry.exchange,
+          priority: entry.priority,
+        })),
+      ),
+    // TXT records arrive as arrays of chunks that must be joined back
+    // together; a long record is split across several strings on the wire.
+    resolveTxt: (name) =>
+      remember(`txt:${name}`, async () =>
+        (await resolver.resolveTxt(name)).map((chunks) => chunks.join("")),
+      ),
+    queryCount: () => queries,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +228,7 @@ const VALID_NAME = /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-
  */
 export async function checkDnsNameIsSafe(
   hostname: string,
-  resolver: Resolver,
+  lookups: LookupCache,
 ): Promise<{ safe: true } | { safe: false; reason: string }> {
   const name = hostname.trim();
 
@@ -180,10 +250,12 @@ export async function checkDnsNameIsSafe(
         };
   }
 
-  // Where the name does have addresses, every one must be public.
+  // Where the name does have addresses, every one must be public. These go
+  // through the cache, so the audit's own A/AAAA lookup reuses this answer
+  // rather than asking again.
   const addresses = [
-    ...(await resolver.resolve4(name).catch(() => [])),
-    ...(await resolver.resolve6(name).catch(() => [])),
+    ...(await lookups.resolve4(name).catch(() => [])),
+    ...(await lookups.resolve6(name).catch(() => [])),
   ];
 
   const privateAddress = addresses.find((address) => !isPublicAddress(address));
@@ -293,18 +365,15 @@ export function extractSpf(txt: DnsRecordSet<string>): EmailPolicyRecord {
  */
 async function checkDmarc(
   dmarcHostname: string,
-  resolver: Resolver,
+  lookups: LookupCache,
   deadline: Deadline,
 ): Promise<DnsData["dmarc"]> {
-  const safety = await checkDnsNameIsSafe(dmarcHostname, resolver);
+  const safety = await checkDnsNameIsSafe(dmarcHostname, lookups);
   if (!safety.safe) {
     return { hostname: dmarcHostname, status: "error", record: null, error: safety.reason };
   }
 
-  const txt = await lookup(
-    async () => (await resolver.resolveTxt(dmarcHostname)).map((chunks) => chunks.join("")),
-    deadline,
-  );
+  const txt = await lookup(() => lookups.resolveTxt(dmarcHostname), deadline);
 
   if (txt.status === "error") {
     return { hostname: dmarcHostname, status: "error", record: null, error: txt.error };

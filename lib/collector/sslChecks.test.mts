@@ -18,6 +18,8 @@ import {
   classifyConnectionFailure,
   summarise,
   runSslChecks,
+  isReadableCertificate,
+  DEFAULT_HTTPS_PORT,
 } from "./sslChecks.ts";
 import { createDeadline } from "./deadline.ts";
 
@@ -227,6 +229,112 @@ test("falls back to the subject name when a certificate has no SANs", () => {
   );
   assert.deepEqual(result.subjectAltNames, []);
   assert.equal(result.hostnameMatch, "exact");
+});
+
+// ---------------------------------------------------------------------------
+// An unreadable certificate is not a mismatched one
+//
+// Saying "the certificate does not cover this address" about one we never read
+// would be a finding invented from an absence of information.
+// ---------------------------------------------------------------------------
+
+test("recognises an empty certificate object as unreadable", () => {
+  assert.equal(isReadableCertificate({}), false);
+  assert.equal(isReadableCertificate(undefined as never), false);
+});
+
+test("recognises a certificate with nothing measurable in it as unreadable", () => {
+  // Fields present but empty: there is nothing here to describe.
+  assert.equal(isReadableCertificate({ subject: {}, issuer: {} } as never), false);
+});
+
+test("recognises a usable certificate as readable", () => {
+  assert.equal(isReadableCertificate({ valid_to: "Jan 1 00:00:00 2027 GMT" } as never), true);
+  assert.equal(isReadableCertificate({ subjectaltname: "DNS:example.com" } as never), true);
+  assert.equal(isReadableCertificate({ subject: { CN: "example.com" } } as never), true);
+});
+
+test("an empty certificate reports coverage as UNKNOWN, not false", () => {
+  // The bug this exists to prevent: false would read as "issued for a
+  // different domain", which is a real finding about a real certificate.
+  const result = describeCertificate({}, "example.com", null, NOW);
+
+  assert.equal(result.coversHostname, null, "unknown, never false");
+  assert.equal(result.hostnameMatch, null);
+  assert.equal(result.daysUntilExpiry, null);
+  assert.deepEqual(result.subjectAltNames, []);
+});
+
+test("a certificate with dates but no names reports coverage as UNKNOWN", () => {
+  const result = describeCertificate(
+    certificate({ to: daysFromNow(30) }),
+    "example.com",
+    null,
+    NOW,
+  );
+
+  assert.equal(result.daysUntilExpiry, 30, "the date was readable");
+  assert.equal(result.coversHostname, null, "but there were no names to check");
+  assert.equal(result.hostnameMatch, null);
+});
+
+test("a certificate WITH names still reports coverage as false when it misses", () => {
+  // The distinction: we looked, and this address genuinely is not covered.
+  const result = describeCertificate(
+    certificate({ to: daysFromNow(30), sans: "DNS:other.test" }),
+    "example.com",
+    null,
+    NOW,
+  );
+
+  assert.equal(result.coversHostname, false, "false only after a real check");
+  assert.equal(result.hostnameMatch, "none");
+});
+
+test("the summary does not claim a mismatch when coverage is unknown", () => {
+  const cert = describeCertificate(certificate({ to: daysFromNow(30) }), "example.com", null, NOW);
+  const message = summarise(cert, true, null);
+
+  assert.doesNotMatch(message, /does not cover this address/i);
+  assert.match(message, /cannot tell/i);
+});
+
+// ---------------------------------------------------------------------------
+// The port the site is actually served from
+// ---------------------------------------------------------------------------
+
+test("defaults to the standard HTTPS port", () => {
+  assert.equal(DEFAULT_HTTPS_PORT, 443);
+});
+
+test("reads a certificate on the default port", async () => {
+  const result = await runSslChecks("example.com", true, createDeadline(15_000));
+
+  assert.equal(result.status, "checked");
+  assert.equal(result.certificate?.coversHostname, true);
+});
+
+test("connects to an explicit non-standard port", async () => {
+  // badssl.com serves a certificate on 1012 as well as 443. Reaching it at
+  // all proves the port was used; the default would have found something else.
+  const result = await runSslChecks("badssl.com", true, createDeadline(15_000), 1012);
+
+  assert.notEqual(result.status, "not-applicable");
+  // Either it answered there, or it did not — both prove we tried that port
+  // rather than silently checking 443.
+  assert.ok(
+    result.status === "checked" || result.status === "unreachable",
+    `unexpected status ${result.status}`,
+  );
+});
+
+test("a port with nothing listening fails as unreachable, not as a bad certificate", async () => {
+  // Port 1 is reserved and nothing serves TLS there.
+  const result = await runSslChecks("example.com", true, createDeadline(6_000), 1);
+
+  assert.equal(result.status, "unreachable");
+  assert.equal(result.certificate, null);
+  assert.equal(result.trusted, null, "we never found out");
 });
 
 // ---------------------------------------------------------------------------

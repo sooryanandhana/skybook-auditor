@@ -26,12 +26,20 @@ import type {
 /** The longest a single TLS connection may take. */
 const CONNECT_TIMEOUT_MS = 8_000;
 
-const HTTPS_PORT = 443;
+/** Where HTTPS lives unless the address says otherwise. */
+export const DEFAULT_HTTPS_PORT = 443;
 
 export async function runSslChecks(
   hostname: string,
   servedOverHttps: boolean,
   deadline: Deadline,
+  /**
+   * The port the site is actually served from.
+   *
+   * A site on https://example.com:8443 presents its certificate there, not on
+   * 443 — checking the default would read a different service, or nothing.
+   */
+  port: number = DEFAULT_HTTPS_PORT,
 ): Promise<SslData> {
   const base = { hostname, certificate: null, trusted: null, problem: null } as const;
 
@@ -69,7 +77,7 @@ export async function runSslChecks(
     };
   }
 
-  const outcome = await connectAndRead(hostname, deadline);
+  const outcome = await connectAndRead(hostname, port, deadline);
 
   if (!outcome.ok) {
     return {
@@ -77,6 +85,20 @@ export async function runSslChecks(
       status: "unreachable",
       failure: outcome.failure,
       message: outcome.message,
+    };
+  }
+
+  /*
+   * A connection can succeed and still hand back nothing usable. Describing
+   * that as a certificate would report "it does not cover this address" about
+   * one we never read — a finding invented from an absence of information.
+   */
+  if (!isReadableCertificate(outcome.certificate)) {
+    return {
+      ...base,
+      status: "unreachable",
+      failure: "no-certificate",
+      message: "The server completed a secure connection but presented no readable certificate.",
     };
   }
 
@@ -109,7 +131,30 @@ type ConnectOutcome =
     }
   | { ok: false; failure: SslFailure; message: string };
 
-function connectAndRead(hostname: string, deadline: Deadline): Promise<ConnectOutcome> {
+/**
+ * Whether the platform handed back a certificate we can actually describe.
+ *
+ * `getPeerCertificate` returns an empty object when there is nothing to
+ * report. A certificate with no dates and no names is equally unusable —
+ * there is nothing in it to measure.
+ */
+export function isReadableCertificate(certificate: Partial<PeerCertificate>): boolean {
+  if (!certificate || Object.keys(certificate).length === 0) return false;
+
+  return Boolean(
+    certificate.valid_to ||
+      certificate.valid_from ||
+      certificate.subjectaltname ||
+      certificate.subject?.CN ||
+      certificate.issuer?.CN,
+  );
+}
+
+function connectAndRead(
+  hostname: string,
+  port: number,
+  deadline: Deadline,
+): Promise<ConnectOutcome> {
   // Whichever is shorter: this connection's own cap, or what is left of the
   // audit's shared budget. A dead server must never hold the audit open.
   const timeout = Math.max(1, Math.min(CONNECT_TIMEOUT_MS, deadline.remainingMs()));
@@ -125,7 +170,7 @@ function connectAndRead(hostname: string, deadline: Deadline): Promise<ConnectOu
 
     const socket = tls.connect({
       host: hostname,
-      port: HTTPS_PORT,
+      port,
       // Send the hostname so the server presents the right certificate.
       // Without this a shared host returns its default one.
       servername: hostname,
@@ -266,7 +311,12 @@ export function describeCertificate(
   const names =
     subjectAltNames.length > 0 ? subjectAltNames : toNameList(certificate.subject?.CN);
 
-  const match = matchHostname(hostname, names);
+  /*
+   * With no names on the certificate there is nothing to compare against, so
+   * coverage is UNKNOWN rather than false. Reporting "does not cover this
+   * address" would be a finding about a check we could not perform.
+   */
+  const match = names.length > 0 ? matchHostname(hostname, names) : null;
 
   return {
     validFrom: validFrom ? validFrom.toISOString() : null,
@@ -275,7 +325,7 @@ export function describeCertificate(
     issuer: describeName(certificate.issuer),
     subject: describeName(certificate.subject),
     subjectAltNames,
-    coversHostname: match !== "none",
+    coversHostname: match === null ? null : match !== "none",
     hostnameMatch: match,
     protocol,
   };
@@ -406,8 +456,12 @@ export function summarise(
     parts.push(`The certificate expires in ${days} day${days === 1 ? "" : "s"}.`);
   }
 
-  if (!certificate.coversHostname) {
+  // Only say this when we actually checked. `null` means the certificate
+  // carried no names, so coverage is unknown rather than absent.
+  if (certificate.coversHostname === false) {
     parts.push("It does not cover this address.");
+  } else if (certificate.coversHostname === null) {
+    parts.push("It lists no addresses, so we cannot tell whether it covers this one.");
   }
 
   if (!trusted && problem !== null) {

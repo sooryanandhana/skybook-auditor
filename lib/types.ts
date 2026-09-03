@@ -439,7 +439,15 @@ export type SslFailure =
   | "timeout"
   | "connection-refused"
   | "host-not-found"
-  | "handshake-failed";
+  | "handshake-failed"
+  /**
+   * The connection succeeded but no readable certificate came back.
+   *
+   * Distinct from the others because it is not a network problem — and
+   * distinct from a certificate that IS readable but covers a different
+   * address, which is a real finding rather than a failure to look.
+   */
+  | "no-certificate";
 
 export interface SslCertificate {
   /** When the certificate became valid, as an ISO date. Null if unreadable. */
@@ -459,10 +467,21 @@ export interface SslCertificate {
   subject: string | null;
   /** Every hostname the certificate covers, from its Subject Alternative Names. */
   subjectAltNames: string[];
-  /** Whether the audited hostname is one of them. */
-  coversHostname: boolean;
-  /** How it matched — an exact name, a wildcard, or not at all. */
-  hostnameMatch: HostnameMatch;
+  /**
+   * Whether the audited hostname is one of them.
+   *
+   * `false` means we read the certificate's names and this address was not
+   * among them — a real finding. `null` means the certificate carried no
+   * names we could check, so we do not know. Those must never be confused:
+   * saying "the certificate does not cover this address" about a certificate
+   * we could not read would be a claim we never measured.
+   */
+  coversHostname: boolean | null;
+  /**
+   * How it matched — an exact name, a wildcard, or not at all.
+   * Null when there were no names to check against.
+   */
+  hostnameMatch: HostnameMatch | null;
   /** The TLS version negotiated, e.g. "TLSv1.3". Null if not reported. */
   protocol: string | null;
 }

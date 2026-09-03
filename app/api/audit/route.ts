@@ -3,7 +3,7 @@ import { fetchPage } from "@/lib/collector/fetchPage";
 import { runSeoChecks } from "@/lib/collector/seoChecks";
 import { runSecurityChecks } from "@/lib/collector/securityChecks";
 import { runTechnicalChecks } from "@/lib/collector/technicalChecks";
-import { runSslChecks } from "@/lib/collector/sslChecks";
+import { runSslChecks, DEFAULT_HTTPS_PORT } from "@/lib/collector/sslChecks";
 import { runDnsChecks } from "@/lib/collector/dnsChecks";
 import { normalizeUrl } from "@/lib/collector/url";
 import { capDeadline, createDeadline } from "@/lib/collector/deadline";
@@ -135,10 +135,15 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
    * Both report their own "we could not find out" states rather than throwing,
    * so a refused or unreachable domain still produces an audit.
    */
-  const siteHostname = new URL(page.finalUrl).hostname;
+  const siteUrl = new URL(page.finalUrl);
+  const siteHostname = siteUrl.hostname;
+  // A site on a non-standard port presents its certificate there, not on 443.
+  // URL leaves `port` empty when the address uses the protocol's default.
+  const sitePort = siteUrl.port ? Number(siteUrl.port) : DEFAULT_HTTPS_PORT;
+
   const siteDeadline = capDeadline(deadline, SITE_CHECKS_BUDGET_MS);
   const [ssl, dns] = await Promise.all([
-    runSslChecks(siteHostname, page.servedOverHttps, siteDeadline),
+    runSslChecks(siteHostname, page.servedOverHttps, siteDeadline, sitePort),
     runDnsChecks(siteHostname, siteDeadline),
   ]);
 

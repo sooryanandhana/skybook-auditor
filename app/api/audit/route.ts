@@ -3,8 +3,10 @@ import { fetchPage } from "@/lib/collector/fetchPage";
 import { runSeoChecks } from "@/lib/collector/seoChecks";
 import { runSecurityChecks } from "@/lib/collector/securityChecks";
 import { runTechnicalChecks } from "@/lib/collector/technicalChecks";
+import { runSslChecks } from "@/lib/collector/sslChecks";
+import { runDnsChecks } from "@/lib/collector/dnsChecks";
 import { normalizeUrl } from "@/lib/collector/url";
-import { createDeadline } from "@/lib/collector/deadline";
+import { capDeadline, createDeadline } from "@/lib/collector/deadline";
 import { callerKey, checkRateLimit } from "@/lib/rateLimit";
 import type { AuditData, AuditResponse, Finding, TechnicalData } from "@/lib/types";
 
@@ -16,6 +18,16 @@ import type { AuditData, AuditResponse, Finding, TechnicalData } from "@/lib/typ
  * total and a slow site could hold a request open for around fifty seconds.
  */
 const AUDIT_BUDGET_MS = 30_000;
+
+/**
+ * The share of the audit's time the site-level checks may take together.
+ *
+ * SSL and DNS describe the site rather than the page, so Phase 4 will run them
+ * once and reuse the result across every page it crawls. They are capped as a
+ * group for the same reason the technical checks are: a component handed the
+ * audit's whole clock would use every second the earlier steps did not.
+ */
+const SITE_CHECKS_BUDGET_MS = 10_000;
 
 /**
  * POST /api/audit
@@ -115,6 +127,21 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
     technical = await runTechnicalChecks(page.finalUrl, deadline);
   }
 
+  /*
+   * Site-level checks: the certificate and the DNS records describe the whole
+   * site, not this one page. They share a capped slice of the audit's clock,
+   * and they run together because neither waits on the other.
+   *
+   * Both report their own "we could not find out" states rather than throwing,
+   * so a refused or unreachable domain still produces an audit.
+   */
+  const siteHostname = new URL(page.finalUrl).hostname;
+  const siteDeadline = capDeadline(deadline, SITE_CHECKS_BUDGET_MS);
+  const [ssl, dns] = await Promise.all([
+    runSslChecks(siteHostname, page.servedOverHttps, siteDeadline),
+    runDnsChecks(siteHostname, siteDeadline),
+  ]);
+
   // The address as we requested it, before any redirects. normalizeUrl already
   // succeeded inside fetchPage, so this cannot fail here; the fallback keeps
   // the types honest rather than guarding against a real case.
@@ -139,11 +166,11 @@ export async function POST(request: Request): Promise<NextResponse<AuditResponse
     seo,
     security,
     technical,
+    ssl,
+    dns,
 
     // Modules not built yet. null means "not measured".
     performance: null,
-    ssl: null,
-    dns: null,
     hosting: null,
 
     // Populated once the severity-rules module exists.

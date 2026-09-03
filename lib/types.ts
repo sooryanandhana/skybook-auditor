@@ -417,6 +417,160 @@ export interface SecurityData {
 }
 
 // ---------------------------------------------------------------------------
+// ssl — the certificate the site presents
+// ---------------------------------------------------------------------------
+
+/** How the audited hostname relates to the names on the certificate. */
+export type HostnameMatch = "exact" | "wildcard" | "none";
+
+/** What happened when we tried to read the certificate. */
+export type SslCheckStatus =
+  /** We connected and read the certificate. */
+  | "checked"
+  /** The page is not served over HTTPS, so there is no certificate to read. */
+  | "not-applicable"
+  /** The safety check refused the address, so no connection was attempted. */
+  | "blocked"
+  /** We could not complete a TLS connection. See `failure`. */
+  | "unreachable";
+
+/** Why a TLS connection could not be completed. */
+export type SslFailure =
+  | "timeout"
+  | "connection-refused"
+  | "host-not-found"
+  | "handshake-failed";
+
+export interface SslCertificate {
+  /** When the certificate became valid, as an ISO date. Null if unreadable. */
+  validFrom: string | null;
+  /** When it expires, as an ISO date. Null if unreadable. */
+  validTo: string | null;
+  /**
+   * Whole days until expiry — negative when it has already expired.
+   *
+   * The most useful number here: an expired certificate shows every visitor a
+   * full-page browser warning, and it is entirely preventable.
+   */
+  daysUntilExpiry: number | null;
+  /** The authority that issued it, e.g. "Let's Encrypt". Null if unreadable. */
+  issuer: string | null;
+  /** The certificate's subject name. Null if unreadable. */
+  subject: string | null;
+  /** Every hostname the certificate covers, from its Subject Alternative Names. */
+  subjectAltNames: string[];
+  /** Whether the audited hostname is one of them. */
+  coversHostname: boolean;
+  /** How it matched — an exact name, a wildcard, or not at all. */
+  hostnameMatch: HostnameMatch;
+  /** The TLS version negotiated, e.g. "TLSv1.3". Null if not reported. */
+  protocol: string | null;
+}
+
+export interface SslData {
+  status: SslCheckStatus;
+  /** The hostname whose certificate was checked. */
+  hostname: string;
+  /** Present only when status is "checked". */
+  certificate: SslCertificate | null;
+  /**
+   * Whether the certificate chain passed the platform's own validation.
+   *
+   * Null when we never got far enough to know — which is NOT the same as
+   * "untrusted". A null here means unknown, never a verdict.
+   */
+  trusted: boolean | null;
+  /**
+   * Why validation failed, as a value rather than a sentence.
+   * Null when validation passed, or when we could not determine it.
+   */
+  problem: CertificateProblem | null;
+  /** Why the check itself could not complete. Null when it did. */
+  failure: SslFailure | null;
+  /** A plain-language summary for a person reading the report. */
+  message: string;
+}
+
+// ---------------------------------------------------------------------------
+// dns — the domain's records
+// ---------------------------------------------------------------------------
+
+/**
+ * The outcome of one DNS lookup.
+ *
+ * The distinction between "absent" and "error" is the whole point: a lookup
+ * that failed is NOT evidence a record is missing. Reporting a timeout as
+ * "this domain has no SPF record" would invent a security finding.
+ */
+export type DnsStatus =
+  /** The lookup succeeded and returned at least one record. */
+  | "found"
+  /** The lookup succeeded and the domain genuinely has no such record. */
+  | "absent"
+  /** The lookup did not complete, so we do not know either way. */
+  | "error";
+
+export interface DnsRecordSet<T> {
+  status: DnsStatus;
+  /** The records found. Empty unless status is "found". */
+  records: T[];
+  /** Why the lookup failed, when status is "error". Null otherwise. */
+  error: string | null;
+}
+
+/** One mail server, with the priority the domain assigns it. */
+export interface MxRecord {
+  exchange: string;
+  priority: number;
+}
+
+/**
+ * An email anti-forgery record.
+ *
+ * Without SPF and DMARC, anyone can send email that appears to come from the
+ * domain — a fake invoice from the company's own address. Common, invisible
+ * until abused, and fixable.
+ */
+export interface EmailPolicyRecord {
+  status: DnsStatus;
+  /** The record's text when found. Null otherwise. */
+  record: string | null;
+  /** Why the lookup failed, when status is "error". Null otherwise. */
+  error: string | null;
+}
+
+export interface DnsData {
+  /** The host serving the website — where the address records were looked up. */
+  hostname: string;
+  /**
+   * The domain the mail and zone records were looked up on.
+   *
+   * Usually the same as `hostname`, but with a leading "www." removed. This
+   * matters: a site served from "www.example.com" is very often a CDN alias
+   * with no records of its own, while the mail policy lives on
+   * "example.com". Looking only at the www name would report "no SPF record"
+   * for a domain that has one — a false security finding in a client's report.
+   */
+  emailDomain: string;
+  a: DnsRecordSet<string>;
+  aaaa: DnsRecordSet<string>;
+  mx: DnsRecordSet<MxRecord>;
+  ns: DnsRecordSet<string>;
+  txt: DnsRecordSet<string>;
+  /** SPF, taken from the TXT records above — a record starting "v=spf1". */
+  spf: EmailPolicyRecord;
+  /**
+   * DMARC, which lives at its own hostname rather than in the domain's TXT.
+   * The hostname is derived from user input, so it is safety-checked in its
+   * own right before any lookup.
+   */
+  dmarc: EmailPolicyRecord & {
+    /** The derived hostname that was checked, e.g. "_dmarc.example.com". */
+    hostname: string;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // One complete audit
 // ---------------------------------------------------------------------------
 
@@ -444,10 +598,19 @@ export interface AuditData {
   performance: NotYetImplemented;
   /** Security headers and mixed content. */
   security: SecurityData;
-  /** Certificate inspection. Module not built yet — see fetch.certificateProblem. */
-  ssl: NotYetImplemented;
-  /** Domain record lookups. Module not built yet. */
-  dns: NotYetImplemented;
+  /**
+   * The certificate the site presents.
+   *
+   * Site-level: a certificate does not change between pages, so Phase 4 runs
+   * this once per site and shares the result across every page it crawls.
+   */
+  ssl: SslData;
+  /**
+   * The domain's DNS records.
+   *
+   * Site-level, for the same reason as ssl.
+   */
+  dns: DnsData;
   /** Hosting/CDN detection. Module not built yet. */
   hosting: NotYetImplemented;
 

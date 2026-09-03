@@ -7,14 +7,52 @@
  *
  * Run with:  npm test
  */
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { checkRateLimit, callerKey, resetRateLimits } from "./rateLimit.ts";
+import {
+  checkRateLimit,
+  callerKey,
+  resetRateLimits,
+  DEFAULT_LIMIT,
+  MAX_LIMIT,
+} from "./rateLimit.ts";
+
+/**
+ * NODE_ENV is typed read-only (the framework narrows it to known values), so
+ * a test that needs to pretend to be production writes through this view of
+ * the same object rather than fighting the type.
+ */
+const env = process.env as Record<string, string | undefined>;
+
+const realNodeEnv = env.NODE_ENV;
+const realWarn = console.warn;
+/** Warnings captured while a test runs, so the output stays readable. */
+let warnings: string[] = [];
 
 beforeEach(() => {
   resetRateLimits();
   delete process.env.AUDIT_RATE_LIMIT_PER_MINUTE;
+  warnings = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
 });
+
+afterEach(() => {
+  console.warn = realWarn;
+  if (realNodeEnv === undefined) delete env.NODE_ENV;
+  else env.NODE_ENV = realNodeEnv;
+});
+
+/** Sets the override and returns the limit actually applied. */
+function limitFor(value: string | undefined, nodeEnv?: string): number {
+  resetRateLimits();
+  if (value === undefined) delete env.AUDIT_RATE_LIMIT_PER_MINUTE;
+  else env.AUDIT_RATE_LIMIT_PER_MINUTE = value;
+  if (nodeEnv === undefined) delete env.NODE_ENV;
+  else env.NODE_ENV = nodeEnv;
+  return checkRateLimit("config-probe").limit;
+}
 
 test("allows requests up to the limit", () => {
   for (let i = 1; i <= 10; i++) {
@@ -78,22 +116,133 @@ test("a blocked caller does not extend their own lockout", () => {
   assert.equal(afterHammering.retryAfterSeconds, first.retryAfterSeconds);
 });
 
-test("the limit can be raised for local development", () => {
-  // Someone testing by hand may legitimately run more than ten in a minute.
+// ---------------------------------------------------------------------------
+// Configuring the limit
+//
+// The override exists so someone testing by hand is not blocked after ten
+// audits. It must not become a way to switch the protection off.
+// ---------------------------------------------------------------------------
+
+test("uses the default when nothing is configured", () => {
+  assert.equal(limitFor(undefined), DEFAULT_LIMIT);
+});
+
+test("accepts a normal configured value", () => {
+  assert.equal(limitFor("30", "development"), 30);
+  assert.equal(limitFor("25"), 25);
+  assert.equal(limitFor("1"), 1, "one a minute is a valid, if strict, choice");
+});
+
+test("accepts exactly the maximum allowed value", () => {
+  assert.equal(limitFor(String(MAX_LIMIT)), MAX_LIMIT);
+});
+
+test("rejects a value one above the maximum", () => {
+  // Not clamped: a setting outside the allowed range is a misconfiguration,
+  // and the safe answer to a misconfiguration is the default.
+  assert.equal(limitFor(String(MAX_LIMIT + 1)), DEFAULT_LIMIT);
+});
+
+test("rejects an extremely large value rather than disabling protection", () => {
+  // This is the case the review found: 9999999 made the limit unreachable.
+  for (const huge of ["9999999", "1e9", "100000", "999999999999999"]) {
+    assert.equal(limitFor(huge), DEFAULT_LIMIT, `for "${huge}"`);
+  }
+});
+
+test("rejects invalid values of every kind", () => {
+  const invalid = [
+    "abc", // text
+    "-5", // negative
+    "-1",
+    "0", // zero would block everything
+    "", // empty
+    "   ", // whitespace
+    "10.5", // fractional
+    "Infinity", // not finite
+    "NaN",
+    "1e400", // overflows to Infinity
+    "0x10", // hex: Number() reads this as 16, which nobody typing a limit means
+    "0xFF",
+    "10abc",
+    "+10", // a sign is not a plain digit
+    "1_0", // numeric separators are a code feature, not a config format
+  ];
+  for (const value of invalid) {
+    assert.equal(limitFor(value), DEFAULT_LIMIT, `for "${value}"`);
+  }
+});
+
+test("PRODUCTION ignores the override entirely", () => {
+  // A developer's .env copied to a server, or a value left over from
+  // debugging, must not quietly remove the limit where it matters most.
+  assert.equal(limitFor("60", "production"), DEFAULT_LIMIT);
+  assert.equal(limitFor("50", "production"), DEFAULT_LIMIT);
+  assert.equal(limitFor("9999999", "production"), DEFAULT_LIMIT);
+});
+
+test("DEVELOPMENT honours a valid override", () => {
+  assert.equal(limitFor("40", "development"), 40);
+  assert.equal(limitFor("40", "test"), 40);
+  assert.equal(limitFor("40", undefined), 40, "unset NODE_ENV is treated as non-production");
+});
+
+test("production is limited even when the override would otherwise be valid", () => {
+  env.NODE_ENV = "production";
+  env.AUDIT_RATE_LIMIT_PER_MINUTE = "60";
+  resetRateLimits();
+
+  for (let i = 0; i < DEFAULT_LIMIT; i++) {
+    assert.equal(checkRateLimit("prod-caller").allowed, true, `request ${i + 1}`);
+  }
+  assert.equal(
+    checkRateLimit("prod-caller").allowed,
+    false,
+    "the eleventh must be blocked despite the override asking for 60",
+  );
+});
+
+test("a raised limit still limits, just higher", () => {
   process.env.AUDIT_RATE_LIMIT_PER_MINUTE = "50";
+  resetRateLimits();
 
   for (let i = 0; i < 50; i++) {
     assert.equal(checkRateLimit("1.2.3.4").allowed, true, `request ${i + 1}`);
   }
-  assert.equal(checkRateLimit("1.2.3.4").allowed, false, "still limited, just higher");
+  assert.equal(checkRateLimit("1.2.3.4").allowed, false, "still limited at the raised value");
 });
 
-test("ignores a nonsense limit setting and uses the default", () => {
-  for (const bad of ["abc", "-5", "0", ""]) {
-    resetRateLimits();
-    process.env.AUDIT_RATE_LIMIT_PER_MINUTE = bad;
-    assert.equal(checkRateLimit("1.2.3.4").limit, 10, `for "${bad}"`);
-  }
+test("says on the console when a setting was ignored", () => {
+  // A developer whose value was rejected should find out, not wonder why they
+  // are still being limited.
+  limitFor("9999999");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /9999999/);
+  assert.match(warnings[0], /above the maximum/i);
+});
+
+test("explains that production ignores the override", () => {
+  limitFor("50", "production");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /not available in production/i);
+});
+
+test("mentions an ignored setting once, not on every request", () => {
+  process.env.AUDIT_RATE_LIMIT_PER_MINUTE = "9999999";
+  resetRateLimits();
+  warnings = [];
+
+  for (let i = 0; i < 5; i++) checkRateLimit("noisy");
+  assert.equal(warnings.length, 1, "the warning must not repeat per request");
+});
+
+test("says nothing when the setting is valid or absent", () => {
+  limitFor("30");
+  assert.deepEqual(warnings, [], "a valid setting is not a problem to report");
+
+  warnings = [];
+  limitFor(undefined);
+  assert.deepEqual(warnings, [], "no setting at all is not a problem either");
 });
 
 test("identifies the caller from the forwarding header", () => {

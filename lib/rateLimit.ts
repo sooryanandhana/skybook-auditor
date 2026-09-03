@@ -15,16 +15,85 @@
  */
 
 /** How many audits one caller may run per minute. */
-const DEFAULT_LIMIT = 10;
-const WINDOW_MS = 60_000;
+export const DEFAULT_LIMIT = 10;
 
 /**
- * The limit can be raised for local development, where a person testing by
- * hand may legitimately run more than ten audits in a minute.
+ * The highest the limit may ever be set to.
+ *
+ * A ceiling exists so the override cannot be used to switch protection off.
+ * Sixty a minute is one a second — far above anything a person does by hand,
+ * and still low enough that a runaway script is caught.
+ */
+export const MAX_LIMIT = 60;
+
+const WINDOW_MS = 60_000;
+
+/** So a misconfiguration is mentioned once, not on every request. */
+let warnedAboutValue: string | null = null;
+
+function warnOnce(value: string, reason: string): void {
+  if (warnedAboutValue === value) return;
+  warnedAboutValue = value;
+  console.warn(
+    `AUDIT_RATE_LIMIT_PER_MINUTE="${value}" ignored (${reason}). ` +
+      `Using the default of ${DEFAULT_LIMIT} audits per minute.`,
+  );
+}
+
+/**
+ * How many audits one caller may run per minute.
+ *
+ * The limit can be raised for local development, where someone testing by hand
+ * may legitimately run more than ten in a minute. Three rules keep that
+ * convenience from becoming a way to switch the protection off:
+ *
+ *   1. IN PRODUCTION THE VARIABLE IS IGNORED ENTIRELY. A developer's .env file
+ *      copied to a server, or a value left over from debugging, cannot quietly
+ *      remove the limit where it matters most.
+ *   2. A value above MAX_LIMIT is treated as invalid and falls back to the
+ *      default, rather than being honoured in part. Setting 9999999 clearly
+ *      means "no limit", and the safe answer to that is the default one.
+ *   3. Anything not a whole number of at least 1 — negative, zero, fractional,
+ *      NaN, Infinity, empty, or text — falls back to the default too.
+ *
+ * Every rejected value is reported once on the console, so a developer whose
+ * setting was ignored finds out rather than wondering why they are still
+ * being limited.
  */
 function configuredLimit(): number {
-  const fromEnv = Number(process.env.AUDIT_RATE_LIMIT_PER_MINUTE);
-  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : DEFAULT_LIMIT;
+  const raw = process.env.AUDIT_RATE_LIMIT_PER_MINUTE;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_LIMIT;
+
+  if (process.env.NODE_ENV === "production") {
+    warnOnce(raw, "the override is not available in production");
+    return DEFAULT_LIMIT;
+  }
+
+  /*
+   * Plain decimal digits only.
+   *
+   * Number() is more accepting than a configuration value should be: it reads
+   * "0x10" as 16 and "1e9" as a billion. Neither is what someone typing a
+   * request limit means, so the format is checked before the value.
+   */
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    warnOnce(raw, "not a whole number written in plain digits");
+    return DEFAULT_LIMIT;
+  }
+
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    warnOnce(raw, "not a whole number of at least 1");
+    return DEFAULT_LIMIT;
+  }
+
+  if (parsed > MAX_LIMIT) {
+    warnOnce(raw, `above the maximum of ${MAX_LIMIT}`);
+    return DEFAULT_LIMIT;
+  }
+
+  return parsed;
 }
 
 /** When each caller's recent requests happened. */
@@ -106,7 +175,8 @@ export function callerKey(request: Request): string {
   return request.headers.get("x-real-ip")?.trim() || "unknown";
 }
 
-/** Test helper: forget all recorded requests. */
+/** Test helper: forget all recorded requests and any warning already given. */
 export function resetRateLimits(): void {
   recentRequests.clear();
+  warnedAboutValue = null;
 }

@@ -15,6 +15,8 @@ import {
   runTechnicalChecks,
 } from "./technicalChecks.ts";
 import { createDeadline } from "./deadline.ts";
+import { parseRobots } from "./robots.ts";
+import fs from "node:fs";
 
 test("detects a site blocking all crawlers", () => {
   assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /"), true);
@@ -152,8 +154,10 @@ test("all requests together stay inside ONE shared budget", async () => {
     elapsed < budget * 1.8,
     `two hanging requests took ${elapsed}ms; a shared ${budget}ms budget should not be spent twice`,
   );
-  // Nothing was learned, and nothing is invented.
-  assert.equal(result.robotsTxtFound, false);
+  // Nothing was learned, and nothing is invented. "unavailable", NOT
+  // "absent": a request that hung tells us nothing about the client site.
+  assert.equal(result.robotsTxtStatus, "unavailable");
+  assert.equal(result.sitemapStatus, "unavailable");
   assert.equal(result.sitemapUrl, null);
 });
 
@@ -231,7 +235,7 @@ test("normal robots.txt and sitemap checks still work", async () => {
 
   const result = await runTechnicalChecks(PAGE, 5_000);
 
-  assert.equal(result.robotsTxtFound, true);
+  assert.equal(result.robotsTxtStatus, "found");
   assert.equal(result.robotsBlocksEverything, false);
   assert.equal(result.sitemapUrl, "https://93.184.216.34/sm.xml");
   // A sitemap named in robots.txt means the conventional location is not tried.
@@ -308,6 +312,288 @@ test("no request is made at all once the budget is already gone", async () => {
   const result = await runTechnicalChecks(PAGE, 0);
 
   assert.equal(requests.length, 0, "nothing should have been requested");
-  assert.equal(result.robotsTxtFound, false);
+  // We never looked, so we may not claim the files are missing.
+  assert.equal(result.robotsTxtStatus, "unavailable");
+  assert.equal(result.sitemapStatus, "unavailable");
   assert.equal(result.sitemapUrl, null);
+});
+
+// ---------------------------------------------------------------------------
+// Three states, not two
+//
+// A boolean could only say "found" or "not found", so a request that timed out
+// was recorded as the client having no robots.txt — reporting a file as absent
+// from somebody's website on the strength of our own failed request.
+//
+// Only the SERVER saying so makes a file absent. Everything else is
+// "unavailable", which says nothing about the website at all.
+// ---------------------------------------------------------------------------
+
+const robotsText = (body: string, status = 200) =>
+  new Response(body, { status, headers: { "content-type": "text/plain" } });
+
+/** Answers robots.txt with `reply`; everything else 404s. */
+function robotsReplies(reply: () => Promise<Response>) {
+  mockFetch(async (_method, url, init) => {
+    if (url.includes("/robots.txt")) return reply();
+    void init;
+    return notFound();
+  });
+}
+
+test("a readable robots.txt is FOUND", async () => {
+  robotsReplies(async () => robotsText("User-agent: *\nDisallow: /admin/"));
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(result.robotsTxtStatus, "found");
+  assert.equal(result.robotsBlocksEverything, false);
+});
+
+test("a 404 is ABSENT — the server told us", async () => {
+  robotsReplies(async () => new Response("", { status: 404 }));
+
+  assert.equal((await runTechnicalChecks(PAGE, 5_000)).robotsTxtStatus, "absent");
+});
+
+test("a 410 is ABSENT — the server told us it is gone", async () => {
+  robotsReplies(async () => new Response("", { status: 410 }));
+
+  assert.equal((await runTechnicalChecks(PAGE, 5_000)).robotsTxtStatus, "absent");
+});
+
+test("a 5xx is UNAVAILABLE — the server has one and would not show us", async () => {
+  robotsReplies(async () => new Response("", { status: 503 }));
+
+  assert.equal((await runTechnicalChecks(PAGE, 5_000)).robotsTxtStatus, "unavailable");
+});
+
+test("a 403 is UNAVAILABLE, not absent", async () => {
+  // A firewall refusing our scanner is not a website without a robots.txt.
+  robotsReplies(async () => new Response("", { status: 403 }));
+
+  assert.equal((await runTechnicalChecks(PAGE, 5_000)).robotsTxtStatus, "unavailable");
+});
+
+test("a timeout is UNAVAILABLE", async () => {
+  mockFetch((_method, _url, init) => hangUntilAborted(init));
+
+  assert.equal((await runTechnicalChecks(PAGE, 200)).robotsTxtStatus, "unavailable");
+});
+
+test("a network failure is UNAVAILABLE", async () => {
+  robotsReplies(async () => {
+    throw new TypeError("fetch failed");
+  });
+
+  assert.equal((await runTechnicalChecks(PAGE, 5_000)).robotsTxtStatus, "unavailable");
+});
+
+test("an oversized robots.txt is UNAVAILABLE — it exists, we could not read it", async () => {
+  // Past MAX_ROBOTS_BYTES. The file is plainly there; we just have not read it,
+  // so we cannot say what it contains or that it is missing.
+  robotsReplies(async () => robotsText("#".repeat(600_000)));
+
+  assert.equal((await runTechnicalChecks(PAGE, 5_000)).robotsTxtStatus, "unavailable");
+});
+
+test("an exhausted budget is UNAVAILABLE — we never looked", async () => {
+  mockFetch(async () => robotsText("User-agent: *"));
+
+  const result = await runTechnicalChecks(PAGE, 0);
+
+  assert.equal(requests.length, 0);
+  assert.equal(result.robotsTxtStatus, "unavailable");
+});
+
+test("HTML served for robots.txt is ABSENT — the server answered fine", async () => {
+  // Many sites return their homepage for any unknown path. That is a genuine
+  // "there is no robots.txt here", not a failure to find out.
+  robotsReplies(
+    async () => new Response("<html></html>", { headers: { "content-type": "text/html" } }),
+  );
+
+  assert.equal((await runTechnicalChecks(PAGE, 5_000)).robotsTxtStatus, "absent");
+});
+
+test("robotsBlocksEverything is false when the file was never read", async () => {
+  // False here means "no information", not "this site blocks nobody" — which
+  // is exactly why the rule consults the status rather than this flag.
+  robotsReplies(async () => new Response("", { status: 500 }));
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(result.robotsTxtStatus, "unavailable");
+  assert.equal(result.robotsBlocksEverything, false);
+});
+
+test("a blocking robots.txt is still detected", async () => {
+  // The new states must not stop the rule seeing a real problem.
+  robotsReplies(async () => robotsText("User-agent: *\nDisallow: /"));
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(result.robotsTxtStatus, "found");
+  assert.equal(result.robotsBlocksEverything, true);
+});
+
+test("the sitemap carries the same three states", async () => {
+  mockFetch(async (_m, url) =>
+    url.includes("/sitemap.xml") ? new Response("", { status: 503 }) : notFound(),
+  );
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(result.sitemapStatus, "unavailable", "a 503 is not 'no sitemap'");
+  assert.equal(result.sitemapUrl, null);
+});
+
+test("a sitemap that 404s is genuinely absent", async () => {
+  mockFetch(async () => notFound());
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(result.sitemapStatus, "absent");
+  assert.equal(result.sitemapUrl, null);
+});
+
+test("a sitemap declared in robots.txt is found without a second request", async () => {
+  robotsReplies(async () => robotsText("Sitemap: https://93.184.216.34/custom.xml"));
+
+  const result = await runTechnicalChecks(PAGE, 5_000);
+
+  assert.equal(result.sitemapStatus, "found");
+  assert.equal(result.sitemapUrl, "https://93.184.216.34/custom.xml");
+  assert.equal(sitemapRequests().length, 0, "robots already told us");
+});
+
+// ---------------------------------------------------------------------------
+// ONE PARSER, NOT TWO
+//
+// This rule is CRITICAL: it tells a client their site is invisible to search.
+// It used to read robots.txt with its own line scanner, which discarded the
+// wildcard group's verdict as soon as another `User-agent` line appeared. That
+// shape is common — sites routinely add groups for SEO crawlers — so a site
+// left with `Disallow: /` passed the audit in silence.
+//
+// It now reads the file through `parseGroups` / `selectRules` / `isPathAllowed`,
+// the very functions the crawler obeys when deciding whether it may fetch a
+// page, so the two cannot disagree about a file again.
+// ---------------------------------------------------------------------------
+
+const BLOCKS_ALL = "User-agent: *\nDisallow: /";
+
+test("a later agent-specific group does not cancel the wildcard block", () => {
+  /*
+   * THE BUG, AS A TEST. Googlebot has no group of its own here, so the
+   * wildcard applies to it and the whole site is hidden from search. The
+   * AhrefsBot group changes nothing about that.
+   */
+  const robots = `${BLOCKS_ALL}\n\nUser-agent: AhrefsBot\nDisallow: /admin`;
+
+  assert.equal(blocksEveryCrawler(robots), true);
+});
+
+test("several agent-specific groups still do not cancel it", () => {
+  const robots = [
+    BLOCKS_ALL,
+    "User-agent: AhrefsBot\nDisallow: /a",
+    "User-agent: SemrushBot\nDisallow: /b",
+    "User-agent: DotBot\nCrawl-delay: 10",
+  ].join("\n\n");
+
+  assert.equal(blocksEveryCrawler(robots), true);
+});
+
+test("Disallow: /* blocks the whole site, because the pattern matcher says so", () => {
+  // Not special-cased anywhere: `patternMatches` already understands `*`, and
+  // the rule simply asks it.
+  assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /*"), true);
+  assert.equal(
+    blocksEveryCrawler("User-agent: *\nDisallow: /*\n\nUser-agent: AhrefsBot\nDisallow: /admin"),
+    true,
+  );
+});
+
+test("the wildcard group on its own still fires", () => {
+  assert.equal(blocksEveryCrawler(BLOCKS_ALL), true);
+});
+
+// --- the other direction: a group that legitimately overrides the wildcard --
+
+test("an applicable Googlebot group overrides the wildcard block", () => {
+  /*
+   * Blocking every OTHER crawler while inviting Google is a deliberate, common
+   * configuration. The site is not hidden from search, and claiming it was
+   * would be the false claim this rule exists to avoid.
+   */
+  assert.equal(blocksEveryCrawler(`${BLOCKS_ALL}\n\nUser-agent: Googlebot\nDisallow:`), false);
+  assert.equal(blocksEveryCrawler(`${BLOCKS_ALL}\n\nUser-agent: Googlebot\nAllow: /`), false);
+});
+
+test("an Allow rule means the site is not entirely blocked", () => {
+  assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /\nAllow: /public/"), false);
+});
+
+test("blocking part of a site is not blocking a site", () => {
+  assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /admin"), false);
+  assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /admin/"), false);
+  assert.equal(blocksEveryCrawler("User-agent: *\nCrawl-delay: 10"), false);
+});
+
+test("a block aimed at one named crawler is not a block on search", () => {
+  assert.equal(blocksEveryCrawler("User-agent: BadBot\nDisallow: /"), false);
+});
+
+test("a group naming a prefix of a search engine applies to it", () => {
+  // `selectRules` matches by prefix, so a group written "Bing" is Bingbot's.
+  // Bing may crawl, so the site is not hidden from every search engine.
+  assert.equal(blocksEveryCrawler(`${BLOCKS_ALL}\n\nUser-agent: Bing\nDisallow:`), false);
+});
+
+// --- the two implementations agree -----------------------------------------
+
+test("the rule and the crawler read the same file the same way", () => {
+  /*
+   * The property that matters: whenever the rule claims the whole site is
+   * blocked, a real crawler must also be refused the root. The converse is NOT
+   * asserted — an Allow carve-out blocks the root while leaving part of the
+   * site reachable, so the crawler is refused while the site is not entirely
+   * hidden. They answer different questions and both answers are right.
+   */
+  const files = [
+    BLOCKS_ALL,
+    `${BLOCKS_ALL}\n\nUser-agent: AhrefsBot\nDisallow: /admin`,
+    "User-agent: *\nDisallow: /*",
+    `${BLOCKS_ALL}\n\nUser-agent: Googlebot\nDisallow:`,
+    "User-agent: *\nDisallow: /\nAllow: /public/",
+    "User-agent: *\nDisallow: /admin",
+    "User-agent: BadBot\nDisallow: /",
+    "User-agent: *\nDisallow:",
+    "",
+    "# nothing but a comment",
+    "Sitemap: https://x.test/sitemap.xml",
+  ];
+
+  for (const text of files) {
+    const ruleSaysBlocked = blocksEveryCrawler(text);
+    const crawlerRefusedRoot = !parseRobots(text, "googlebot").isAllowed("https://x.test/");
+
+    if (ruleSaysBlocked) {
+      assert.equal(crawlerRefusedRoot, true, `the crawler must agree about: ${JSON.stringify(text)}`);
+    }
+  }
+});
+
+test("the rule keeps no robots parser of its own", () => {
+  /*
+   * A structural guard, because the bug was not a wrong line — it was a second
+   * implementation. If this file starts reading User-agent or Disallow lines
+   * again, the two readings can drift apart again.
+   */
+  const source = fs.readFileSync(new URL("./technicalChecks.ts", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("export function blocksEveryCrawler"));
+
+  assert.ok(!/split\(\/\\r\?\\n\//.test(body), "no line splitting of its own");
+  assert.ok(/parseGroups|selectRules|isPathAllowed/.test(body), "it uses the shared parser");
 });

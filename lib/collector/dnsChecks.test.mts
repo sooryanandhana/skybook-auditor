@@ -16,6 +16,9 @@ import {
   runDnsChecks,
   emailDomainFor,
   createLookupCache,
+  checkDmarc,
+  organisationalDomainFor,
+  readPolicyTag,
 } from "./dnsChecks.ts";
 import { createDeadline } from "./deadline.ts";
 import { Resolver } from "node:dns/promises";
@@ -380,4 +383,458 @@ test("reports a genuinely absent record as absent, not as an error", async () =>
   assert.equal(result.mx.status, "absent", "the server answered: there are none");
   assert.deepEqual(result.mx.records, []);
   assert.equal(result.mx.error, null, "an absence is not an error");
+});
+
+// ---------------------------------------------------------------------------
+// DMARC INHERITS. SPF DOES NOT.
+//
+// A subdomain with no DMARC record of its own is covered by its organisational
+// domain's record. Checking only the audited name reported "this domain
+// publishes no DMARC record" about domains that are protected — confirmed
+// against a real site, where the audited host had nothing and its parent
+// published `v=DMARC1; p=quarantine; sp=none`.
+//
+// Every test here drives a stubbed resolver, so none of them touches DNS.
+// ---------------------------------------------------------------------------
+
+/**
+ * A resolver that answers TXT from a table and nothing else from the network.
+ *
+ * A name missing from the table genuinely has no record — that is ENOTFOUND,
+ * the answer a server gives, and it must stay distinguishable from a failure.
+ */
+function dmarcResolver(txt: Record<string, string[] | "FAIL">) {
+  const asked: string[] = [];
+
+  const answerTxt = (name: string) => {
+    asked.push(name);
+    const entry = txt[name];
+    if (entry === "FAIL") {
+      return Promise.reject(Object.assign(new Error("ETIMEOUT"), { code: "ETIMEOUT" }));
+    }
+    if (entry === undefined) {
+      return Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" }));
+    }
+    return Promise.resolve(entry.map((line) => [line]));
+  };
+
+  const resolver = {
+    // A _dmarc name holds only TXT and has no address. Answering ENODATA is
+    // what a real server does, and the safety check allows it.
+    resolve4: () => Promise.reject(Object.assign(new Error("ENODATA"), { code: "ENODATA" })),
+    resolve6: () => Promise.reject(Object.assign(new Error("ENODATA"), { code: "ENODATA" })),
+    resolveMx: () => Promise.resolve([]),
+    resolveNs: () => Promise.resolve([]),
+    resolveTxt: answerTxt,
+  } as unknown as Resolver;
+
+  return { asked, cache: createLookupCache(resolver) };
+}
+
+const dmarcFor = (domain: string, txt: Record<string, string[] | "FAIL">) =>
+  checkDmarc(domain, dmarcResolver(txt).cache, createDeadline(5_000));
+
+// --- the record the domain publishes itself --------------------------------
+
+test("a record on the audited domain is its own, not inherited", async () => {
+  const result = await dmarcFor("example.com", {
+    "_dmarc.example.com": ["v=DMARC1; p=reject"],
+  });
+
+  assert.equal(result.status, "found");
+  assert.equal(result.record, "v=DMARC1; p=reject");
+  assert.equal(result.policyDomain, "example.com");
+  assert.equal(result.inherited, false);
+  assert.equal(result.effectivePolicy, "reject");
+  assert.equal(result.hostname, "_dmarc.example.com");
+});
+
+test("a domain with its own record is never asked about its parent", async () => {
+  const { asked, cache } = dmarcResolver({
+    "_dmarc.shop.example.com": ["v=DMARC1; p=none"],
+    "_dmarc.example.com": ["v=DMARC1; p=reject"],
+  });
+
+  const result = await checkDmarc("shop.example.com", cache, createDeadline(5_000));
+
+  // Its own record governs it. The parent's is irrelevant and must not be read.
+  assert.equal(result.policyDomain, "shop.example.com");
+  assert.equal(result.effectivePolicy, "none");
+  assert.deepEqual(asked, ["_dmarc.shop.example.com"]);
+});
+
+// --- THE REGRESSION: a subdomain covered from above ------------------------
+
+test("a subdomain with no record of its own inherits its parent's", async () => {
+  // The bug, stated as a test. This used to come back "absent", which became
+  // a finding telling the client they had no DMARC at all.
+  const result = await dmarcFor("shop.example.com", {
+    "_dmarc.example.com": ["v=DMARC1; p=reject"],
+  });
+
+  assert.equal(result.status, "found", "a policy applies here");
+  assert.notEqual(result.status, "absent");
+  assert.equal(result.record, "v=DMARC1; p=reject");
+  assert.equal(result.policyDomain, "example.com");
+  assert.equal(result.inherited, true);
+  assert.equal(result.hostname, "_dmarc.example.com", "names where it was read from");
+});
+
+test("sp= governs the subdomain when the inherited record sets one", async () => {
+  // The real record that exposed this: strict for the domain itself, nothing
+  // for its subdomains. Reporting `p=quarantine` here would overstate the
+  // protection this subdomain actually has.
+  const result = await dmarcFor("info.example.com", {
+    "_dmarc.example.com": ["v=DMARC1; p=quarantine; sp=none; pct=100"],
+  });
+
+  assert.equal(result.status, "found");
+  assert.equal(result.inherited, true);
+  assert.equal(result.effectivePolicy, "none", "sp= wins for a subdomain");
+});
+
+test("p= governs the subdomain when the inherited record sets no sp=", async () => {
+  const result = await dmarcFor("shop.example.com", {
+    "_dmarc.example.com": ["v=DMARC1; p=quarantine"],
+  });
+
+  assert.equal(result.effectivePolicy, "quarantine");
+});
+
+test("a multi-level subdomain still reaches one level up, and only one", async () => {
+  const { asked, cache } = dmarcResolver({
+    "_dmarc.example.com": ["v=DMARC1; p=reject"],
+  });
+
+  const result = await checkDmarc("eu.shop.example.com", cache, createDeadline(5_000));
+
+  /*
+   * DMARC defines ONE fallback, to the organisational domain. Walking all the
+   * way up would be inventing a lookup the specification does not describe, so
+   * this stops after the first parent and reports honestly.
+   */
+  assert.deepEqual(asked, ["_dmarc.eu.shop.example.com", "_dmarc.shop.example.com"]);
+  assert.equal(result.status, "absent");
+});
+
+// --- the opposite direction: absence must stay absence ---------------------
+
+test("no record anywhere is ABSENT, and stays a finding", async () => {
+  const result = await dmarcFor("example.com", {});
+
+  assert.equal(result.status, "absent");
+  assert.equal(result.record, null);
+  assert.equal(result.policyDomain, null);
+  assert.equal(result.inherited, false);
+  assert.equal(result.effectivePolicy, null);
+});
+
+test("a subdomain whose parent also has nothing is ABSENT", async () => {
+  const result = await dmarcFor("shop.example.com", {});
+
+  assert.equal(result.status, "absent");
+  assert.notEqual(result.status, "found");
+  assert.equal(result.inherited, false);
+});
+
+test("a two-label domain has no parent worth asking about", async () => {
+  const { asked } = dmarcResolver({});
+  const probe = dmarcResolver({});
+  await checkDmarc("example.com", probe.cache, createDeadline(5_000));
+
+  // Never `_dmarc.com`: a bare TLD is not an organisational domain.
+  assert.deepEqual(probe.asked, ["_dmarc.example.com"]);
+  assert.equal(asked.length, 0);
+});
+
+test("a www host is reduced before any of this, so it behaves like the domain", async () => {
+  // emailDomainFor strips the www; this confirms the two agree.
+  assert.equal(emailDomainFor("www.example.com"), "example.com");
+
+  const probe = dmarcResolver({ "_dmarc.example.com": ["v=DMARC1; p=none"] });
+  const result = await checkDmarc(
+    emailDomainFor("www.example.com"),
+    probe.cache,
+    createDeadline(5_000),
+  );
+
+  assert.equal(result.status, "found");
+  assert.equal(result.inherited, false, "the domain's own record, not a parent's");
+  assert.deepEqual(probe.asked, ["_dmarc.example.com"]);
+});
+
+// --- the opposite direction: a failure must stay a failure -----------------
+
+test("a failed lookup on the domain is UNAVAILABLE, never absent", async () => {
+  const result = await dmarcFor("example.com", { "_dmarc.example.com": "FAIL" });
+
+  assert.equal(result.status, "error");
+  assert.notEqual(result.status, "absent");
+  assert.equal(result.record, null);
+  assert.match(result.error ?? "", /ETIMEOUT/);
+});
+
+test("a failed lookup on the PARENT is UNAVAILABLE, never absent", async () => {
+  /*
+   * The subtle one. We established the subdomain has no record of its own, and
+   * then failed to find out whether one above it applies. That is "we do not
+   * know" — and it must not collapse into the sentence that becomes a finding.
+   */
+  const result = await dmarcFor("shop.example.com", { "_dmarc.example.com": "FAIL" });
+
+  assert.equal(result.status, "error");
+  assert.notEqual(result.status, "absent");
+  assert.equal(result.policyDomain, null, "no source can be named for a record never read");
+  assert.equal(result.inherited, false);
+});
+
+test("a failed domain lookup never causes a parent lookup", async () => {
+  const { asked, cache } = dmarcResolver({
+    "_dmarc.shop.example.com": "FAIL",
+    "_dmarc.example.com": ["v=DMARC1; p=reject"],
+  });
+
+  const result = await checkDmarc("shop.example.com", cache, createDeadline(5_000));
+
+  // We do not know whether the subdomain has its own record, so a parent's
+  // record cannot be said to apply — it only applies in the absence of one.
+  assert.equal(result.status, "error");
+  assert.deepEqual(asked, ["_dmarc.shop.example.com"]);
+});
+
+test("no time left means unavailable, not absent", async () => {
+  const probe = dmarcResolver({ "_dmarc.example.com": ["v=DMARC1; p=reject"] });
+  const result = await checkDmarc("example.com", probe.cache, createDeadline(0));
+
+  assert.equal(result.status, "error");
+  assert.notEqual(result.status, "absent");
+});
+
+// --- reading the policy tag ------------------------------------------------
+
+test("policy tags are read from the record, and only the defined ones", () => {
+  assert.equal(readPolicyTag("v=DMARC1; p=reject", "p"), "reject");
+  assert.equal(readPolicyTag("v=DMARC1; p=quarantine; sp=none", "sp"), "none");
+  assert.equal(readPolicyTag("v=DMARC1;p=none;", "p"), "none");
+  assert.equal(readPolicyTag("v=DMARC1; P=Reject", "p"), "reject", "tags are case-insensitive");
+  assert.equal(readPolicyTag("v=DMARC1; p=reject", "sp"), null, "no sp= means no sp=");
+
+  // An unrecognised value is NOT "none". Reading it as none would report that
+  // the record permits forged mail through, on the strength of a value we did
+  // not understand.
+  assert.equal(readPolicyTag("v=DMARC1; p=banana", "p"), null);
+  assert.equal(readPolicyTag("v=DMARC1; p=", "p"), null);
+  assert.equal(readPolicyTag("not a dmarc record", "p"), null);
+});
+
+test("a record with no readable policy is still a record", async () => {
+  const result = await dmarcFor("example.com", { "_dmarc.example.com": ["v=DMARC1; p=banana"] });
+
+  assert.equal(result.status, "found", "the record exists and we read it");
+  assert.equal(result.effectivePolicy, null, "but it states no policy we recognise");
+});
+
+// --- the organisational domain, and what it cannot know --------------------
+
+test("the parent is one level up, and never a bare TLD", () => {
+  assert.equal(organisationalDomainFor("shop.example.com"), "example.com");
+  assert.equal(organisationalDomainFor("eu.shop.example.com"), "shop.example.com");
+  assert.equal(organisationalDomainFor("example.com"), null);
+  assert.equal(organisationalDomainFor("com"), null);
+  assert.equal(organisationalDomainFor(""), null);
+});
+
+test("a public-suffix boundary is asked about but cannot answer wrongly", async () => {
+  /*
+   * `example.co.uk` is an organisational domain, but knowing that needs the
+   * Public Suffix List, which this project has not taken on. So the parent
+   * computed here is `co.uk` — a public suffix.
+   *
+   * Harmless in the direction that matters: public suffixes do not publish
+   * DMARC records, so the lookup finds nothing and the answer stays exactly
+   * what it was before. Verified against co.uk, com.au, org.uk and github.io.
+   */
+  const probe = dmarcResolver({});
+  const result = await checkDmarc("example.co.uk", probe.cache, createDeadline(5_000));
+
+  assert.deepEqual(probe.asked, ["_dmarc.example.co.uk", "_dmarc.co.uk"]);
+  assert.equal(result.status, "absent");
+});
+
+test("a deeper name under a public suffix still finds the right parent", async () => {
+  // shop.example.co.uk -> example.co.uk, which IS the organisational domain.
+  const result = await dmarcFor("shop.example.co.uk", {
+    "_dmarc.example.co.uk": ["v=DMARC1; p=reject"],
+  });
+
+  assert.equal(result.status, "found");
+  assert.equal(result.policyDomain, "example.co.uk");
+  assert.notEqual(result.policyDomain, "co.uk");
+  assert.equal(result.inherited, true);
+});
+
+// ---------------------------------------------------------------------------
+// WHICH DOMAIN IS THE POLICY ABOUT?
+//
+// Four different names are in play and it used to take knowledge of the code
+// to tell them apart:
+//
+//   the audited hostname     www.example.com   the website's address
+//   the mail domain          example.com       where email comes from
+//   where the record was     example.com       or a parent, when inherited
+//   the policy tag           p= or sp=         depending on which of those
+//
+// `appliesTo` names the second one outright, so nothing has to be inferred and
+// `effectivePolicy` can never be read as being about a domain it is not.
+// ---------------------------------------------------------------------------
+
+test("the record says which domain it is about", async () => {
+  const result = await dmarcFor("example.com", { "_dmarc.example.com": ["v=DMARC1; p=reject"] });
+
+  assert.equal(result.appliesTo, "example.com");
+  assert.equal(result.policyDomain, "example.com");
+  assert.equal(result.inherited, false, "read from the very domain it governs");
+});
+
+test("appliesTo and policyDomain differ exactly when the policy is inherited", async () => {
+  const inheritedCase = await dmarcFor("shop.example.com", {
+    "_dmarc.example.com": ["v=DMARC1; p=reject"],
+  });
+
+  assert.equal(inheritedCase.appliesTo, "shop.example.com", "the domain being described");
+  assert.equal(inheritedCase.policyDomain, "example.com", "the domain it was read from");
+  assert.equal(inheritedCase.inherited, true);
+  assert.notEqual(inheritedCase.appliesTo, inheritedCase.policyDomain);
+
+  const directCase = await dmarcFor("shop.example.com", {
+    "_dmarc.shop.example.com": ["v=DMARC1; p=none"],
+  });
+
+  assert.equal(directCase.appliesTo, directCase.policyDomain);
+  assert.equal(directCase.inherited, false);
+});
+
+test("a www website reports the DMARC position of its MAIL domain", async () => {
+  /*
+   * The case this field exists for. `www.example.com` is a website address;
+   * nobody sends email from it. `emailDomainFor` drops the label before any
+   * lookup, so what is reported is `example.com`'s position — which is the one
+   * the client actually has — and `appliesTo` says so rather than leaving a
+   * reader to assume the hostname they typed.
+   */
+  const mailDomain = emailDomainFor("www.example.com");
+  assert.equal(mailDomain, "example.com");
+
+  const probe = dmarcResolver({ "_dmarc.example.com": ["v=DMARC1; p=quarantine; sp=none"] });
+  const result = await checkDmarc(mailDomain, probe.cache, createDeadline(5_000));
+
+  assert.equal(result.appliesTo, "example.com", "not www.example.com");
+  assert.equal(result.policyDomain, "example.com");
+  assert.equal(result.inherited, false, "example.com publishes this itself");
+  // p=, because the record belongs to the domain being described. sp= governs
+  // that domain's subdomains, which this is not one of.
+  assert.equal(result.effectivePolicy, "quarantine");
+  assert.deepEqual(probe.asked, ["_dmarc.example.com"], "the www name is never queried");
+});
+
+test("a www host under a subdomain still resolves to that subdomain", async () => {
+  // www.shop.example.com -> shop.example.com, which has no record of its own,
+  // so example.com's sp= governs it.
+  const mailDomain = emailDomainFor("www.shop.example.com");
+  assert.equal(mailDomain, "shop.example.com");
+
+  const result = await dmarcFor(mailDomain, {
+    "_dmarc.example.com": ["v=DMARC1; p=reject; sp=quarantine"],
+  });
+
+  assert.equal(result.appliesTo, "shop.example.com");
+  assert.equal(result.policyDomain, "example.com");
+  assert.equal(result.inherited, true);
+  assert.equal(result.effectivePolicy, "quarantine", "sp= governs a subdomain");
+});
+
+test("effectivePolicy follows where the record was found, not what it says first", async () => {
+  const record = ["v=DMARC1; p=reject; sp=none"];
+
+  // Read from the domain itself: p= governs it.
+  const direct = await dmarcFor("example.com", { "_dmarc.example.com": record });
+  assert.equal(direct.effectivePolicy, "reject");
+
+  // The very same record, inherited by a subdomain: sp= governs that.
+  const inherited = await dmarcFor("shop.example.com", { "_dmarc.example.com": record });
+  assert.equal(inherited.effectivePolicy, "none");
+
+  assert.equal(direct.record, inherited.record, "one record, two different policies");
+});
+
+test("the info.cern.ch shape still behaves as the audit found it", async () => {
+  /*
+   * The real case that exposed the original bug, as a fixture: the audited
+   * host publishes nothing and its parent publishes p=quarantine with sp=none.
+   * It must be a found policy, inherited, and honestly reported as giving the
+   * subdomain no enforcement at all.
+   */
+  const result = await dmarcFor("info.cern.ch", {
+    "_dmarc.cern.ch": ["v=DMARC1; p=quarantine; sp=none; pct=100; fo=1"],
+  });
+
+  assert.equal(result.status, "found");
+  assert.notEqual(result.status, "absent", "the bug was reporting this as absent");
+  assert.equal(result.appliesTo, "info.cern.ch");
+  assert.equal(result.policyDomain, "cern.ch");
+  assert.equal(result.inherited, true);
+  assert.equal(result.effectivePolicy, "none");
+  assert.equal(result.hostname, "_dmarc.cern.ch");
+});
+
+test("a domain with nothing anywhere still names itself", async () => {
+  const result = await dmarcFor("example.com", {});
+
+  assert.equal(result.status, "absent");
+  assert.equal(result.appliesTo, "example.com", "we know who we asked about");
+  assert.equal(result.policyDomain, null, "but there is no record to point at");
+  assert.equal(result.effectivePolicy, null);
+});
+
+test("a failed lookup names the domain but claims no policy", async () => {
+  const result = await dmarcFor("example.com", { "_dmarc.example.com": "FAIL" });
+
+  assert.equal(result.status, "error");
+  assert.equal(result.appliesTo, "example.com");
+  assert.equal(result.policyDomain, null);
+  assert.equal(result.inherited, false);
+  assert.equal(result.effectivePolicy, null);
+});
+
+test("a malformed record is read as far as it goes and no further", async () => {
+  const cases: Array<[string, string | null]> = [
+    ["v=DMARC1; p=banana", null],
+    ["v=DMARC1", null],
+    ["v=DMARC1; p=", null],
+    ["v=DMARC1; sp=reject", null],
+  ];
+
+  for (const [record, expected] of cases) {
+    const result = await dmarcFor("example.com", { "_dmarc.example.com": [record] });
+    assert.equal(result.status, "found", `${record} is still a record`);
+    assert.equal(result.effectivePolicy, expected, record);
+  }
+});
+
+test("every DMARC answer names the domain it describes", async () => {
+  // No shape may leave appliesTo out, whatever happened during the lookup.
+  const shapes = [
+    await dmarcFor("example.com", { "_dmarc.example.com": ["v=DMARC1; p=reject"] }),
+    await dmarcFor("shop.example.com", { "_dmarc.example.com": ["v=DMARC1; p=reject"] }),
+    await dmarcFor("example.com", {}),
+    await dmarcFor("example.com", { "_dmarc.example.com": "FAIL" }),
+    await dmarcFor("shop.example.com", { "_dmarc.example.com": "FAIL" }),
+    await checkDmarc("example.com", dmarcResolver({}).cache, createDeadline(0)),
+  ];
+
+  for (const shape of shapes) {
+    assert.equal(typeof shape.appliesTo, "string");
+    assert.ok(shape.appliesTo.length > 0);
+    assert.equal(shape.inherited, shape.policyDomain !== null && shape.policyDomain !== shape.appliesTo);
+  }
 });

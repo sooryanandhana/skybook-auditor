@@ -3,20 +3,123 @@
 //   We need that because this page has a button, a text box, and remembers
 //   things (state) — all of which are browser-side behaviour.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { AuditProgress } from "./AuditProgress";
+import { PerformancePanel } from "./PerformancePanel";
+import {
+  SKIPPED_HEADING,
+  SKIPPED_INTRO,
+  findingsState,
+  findingsSummary,
+  showsSkippedPanel,
+} from "@/lib/report/findingsState";
+import {
+  PAGE_FINDINGS_HEADING,
+  PAGE_FINDINGS_INTRO,
+  SITE_FINDINGS_HEADING,
+  SITE_FINDINGS_INTRO,
+  affectedView,
+  crawlView,
+  hasAffectedList,
+  partitionByScope,
+  robotsNote,
+  scopeLabel,
+  siteFileText,
+  type FindingScope,
+} from "@/lib/report/siteFindingsView";
+import type { SiteCrawlSummary } from "@/lib/collector/crawlSite";
 import type {
   AuditData,
-  AuditResponse,
+  AuditResultResponse,
+  AuditStartResponse,
+  AuditStatusResponse,
   CertificateProblem,
+  JobProgressView,
+  SiteAuditResult,
+  Finding,
+  SkippedCheck,
+  PerformanceData,
+  PerformanceResponse,
   Severity,
   UptimeCheck,
 } from "@/lib/types";
 import styles from "./page.module.css";
 
+/** How often to ask the server how the audit is getting on. */
+const POLL_INTERVAL_MS = 1000;
+
 export default function HomePage() {
   // Pieces of "state" — values the page remembers and re-renders when changed.
   const [url, setUrl] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  /** What the server last said about the running job, for the progress line. */
+  const [jobStatus, setJobStatus] = useState<
+    "queued" | "running" | "completed" | "partial" | null
+  >(null);
+  const [progress, setProgress] = useState<JobProgressView | null>(null);
+  /**
+   * The whole-site result, kept beside the entry page rather than instead of it.
+   *
+   * `result` stays exactly what it always was — the entry page's audit — so
+   * every existing section renders unchanged. This carries the crawl summary
+   * and the site-wide findings for the parts that need them.
+   */
+  const [siteResult, setSiteResult] = useState<SiteAuditResult | null>(null);
+  /*
+   * Opt-in, and remembered for the run that is in flight.
+   * `includePerformance` can be toggled while an audit runs, so the progress UI
+   * reads `runningWithPerformance` — what was actually asked for — rather than
+   * what the checkbox says right now.
+   */
+  const [includePerformance, setIncludePerformance] = useState(false);
+  /*
+   * The speed check runs as its own request, so it has its own state. "running"
+   * is a real state here — the audit below it is finished and readable while
+   * this is still in flight.
+   */
+  const [performance, setPerformance] = useState<PerformanceData | null>(null);
+  const [performanceRunning, setPerformanceRunning] = useState(false);
+  /*
+   * The speed findings, exactly as the server graded them.
+   *
+   * Held rather than derived. Nothing in this file decides a severity, reads a
+   * threshold, or judges whether a site is slow — that happens in
+   * lib/rules/speed.ts on the server, and the browser only displays the result.
+   */
+  const [performanceFindings, setPerformanceFindings] = useState<Finding[]>([]);
+  const [performanceSkipped, setPerformanceSkipped] = useState<SkippedCheck[]>([]);
+
+  /*
+   * Which audit is current.
+   *
+   * A speed check started for the previous URL can still be in flight when a
+   * new audit begins — Google takes up to 90 seconds. Without this, that older
+   * reply would land in the panel and quietly report one site's speed under
+   * another site's audit. Every reply checks this before it is allowed to
+   * write anything.
+   */
+  const runIdRef = useRef(0);
+  /** Lets a superseded speed check be abandoned rather than merely ignored. */
+  const performanceAbortRef = useRef<AbortController | null>(null);
+  /** The pending poll delay, so unmounting can clear it rather than leak it. */
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Set when the component goes away, so a running poll loop stops. */
+  const stoppedRef = useRef(false);
+
+  /*
+   * Stop polling when the page goes away.
+   *
+   * Without this the loop would keep asking a server nobody is listening to,
+   * and would call setState on a component that no longer exists.
+   */
+  useEffect(() => {
+    stoppedRef.current = false;
+    return () => {
+      stoppedRef.current = true;
+      if (pollTimerRef.current !== null) clearTimeout(pollTimerRef.current);
+      performanceAbortRef.current?.abort();
+    };
+  }, []);
   const [result, setResult] = useState<AuditData | null>(null);
   const [error, setError] = useState<string | null>(null);
   // A failed audit can still have measured something — see AuditResponse.
@@ -25,31 +128,194 @@ export default function HomePage() {
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault(); // stop the browser reloading the page
 
+    // Any reply from the previous audit is now stale by definition.
+    const runId = runIdRef.current + 1;
+    runIdRef.current = runId;
+    performanceAbortRef.current?.abort();
+    performanceAbortRef.current = null;
+
     setIsLoading(true);
     setError(null);
     setErrorUptime(null);
     setResult(null);
+    setSiteResult(null);
+    setJobStatus(null);
+    setProgress(null);
+    setPerformance(null);
+    setPerformanceRunning(false);
+    setPerformanceFindings([]);
+    setPerformanceSkipped([]);
 
     try {
-      // Send the URL to our own backend at /api/audit and wait for its answer.
+      /*
+       * The audit no longer answers this request — a full-site crawl takes
+       * minutes. This starts one and gets back a receipt; the loop below asks
+       * how it is getting on until it stops.
+       */
       const response = await fetch("/api/audit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
       });
 
-      const payload: AuditResponse = await response.json();
+      const started: AuditStartResponse = await response.json();
 
-      if (payload.ok) {
-        setResult(payload.data);
-      } else {
-        setError(payload.error);
-        setErrorUptime(payload.uptime ?? null);
+      // A newer audit started while this one was in flight.
+      if (runIdRef.current !== runId) return;
+
+      if (!started.ok) {
+        setError(started.error);
+        setIsLoading(false);
+        return;
+      }
+
+      void pollUntilDone(started.jobId, runId);
+    } catch {
+      if (runIdRef.current !== runId) return;
+      setError("Could not reach the audit service. Is the server running?");
+      setIsLoading(false);
+    }
+  }
+
+  /**
+   * Asks how the audit is getting on, once a second, until it stops.
+   *
+   * Sequential rather than on a timer: each poll is sent only after the last
+   * one answered, so a slow reply can never leave two in flight or let them
+   * arrive out of order. `runIdRef` ends the loop when a newer audit begins,
+   * and `stoppedRef` ends it when the component goes away — an interval left
+   * running after unmount would poll a server nobody is listening to.
+   */
+  async function pollUntilDone(jobId: string, runId: number) {
+    setJobStatus("queued");
+
+    for (;;) {
+      if (runIdRef.current !== runId || stoppedRef.current) return;
+
+      await new Promise((resolve) => {
+        pollTimerRef.current = setTimeout(resolve, POLL_INTERVAL_MS);
+      });
+
+      if (runIdRef.current !== runId || stoppedRef.current) return;
+
+      let status: AuditStatusResponse;
+      try {
+        const response = await fetch(
+          `/api/audit/status?jobId=${encodeURIComponent(jobId)}`,
+        );
+        status = await response.json();
+      } catch {
+        if (runIdRef.current !== runId) return;
+        setError("Lost contact with the audit service.");
+        setIsLoading(false);
+        return;
+      }
+
+      if (runIdRef.current !== runId || stoppedRef.current) return;
+
+      if (!("status" in status)) {
+        // The job is gone — expired, or the server restarted.
+        setError(status.error);
+        setIsLoading(false);
+        return;
+      }
+
+      if (status.status === "failed") {
+        setError(status.error);
+        setIsLoading(false);
+        return;
+      }
+
+      setJobStatus(status.status);
+      setProgress(status.progress);
+
+      // Terminal: stop asking and go and get the report.
+      if (status.status === "completed" || status.status === "partial") {
+        await loadResult(jobId, runId);
+        return;
+      }
+    }
+  }
+
+  /** Fetches the finished audit and puts it on screen. */
+  async function loadResult(jobId: string, runId: number) {
+    try {
+      const response = await fetch(`/api/audit/result?jobId=${encodeURIComponent(jobId)}`);
+      const payload: AuditResultResponse = await response.json();
+
+      if (runIdRef.current !== runId || stoppedRef.current) return;
+
+      if (!payload.ok) {
+        setError("error" in payload ? payload.error : "The audit produced no report.");
+        return;
+      }
+
+      setResult(payload.result.data);
+      setSiteResult(payload.result);
+
+      /*
+       * The audit is on screen now. The speed check starts here and the page
+       * stays fully usable while it runs — this is the whole point of the
+       * split, so it must not be awaited before showing the results above.
+       */
+      if (includePerformance) {
+        void startPerformance(payload.result.data.fetch.finalUrl, runId);
       }
     } catch {
-      setError("Could not reach the audit service. Is the server running?");
+      if (runIdRef.current !== runId) return;
+      setError("Could not read the finished audit.");
     } finally {
-      setIsLoading(false);
+      if (runIdRef.current === runId) setIsLoading(false);
+    }
+  }
+
+  /**
+   * Asks the server for the speed figures, separately from the audit.
+   *
+   * There is deliberately no retry here. The collector already makes at most
+   * two attempts at Google, and a retry in the browser would turn that into
+   * four — doubling a paid quota to solve a problem already solved.
+   */
+  async function startPerformance(finalUrl: string, runId: number) {
+    const controller = new AbortController();
+    performanceAbortRef.current = controller;
+    setPerformanceRunning(true);
+
+    try {
+      const response = await fetch("/api/audit/performance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: finalUrl }),
+        signal: controller.signal,
+      });
+
+      const payload: PerformanceResponse = await response.json();
+      if (runIdRef.current !== runId) return;
+
+      setPerformance(
+        payload.ok ? payload.data : localPerformanceFailure(finalUrl, payload.error),
+      );
+      // Copied through untouched. A failed request grades nothing, so there is
+      // nothing to invent here either.
+      setPerformanceFindings(payload.ok ? payload.findings : []);
+      setPerformanceSkipped(payload.ok ? payload.skippedChecks : []);
+    } catch (fetchError) {
+      /*
+       * An abort means WE cancelled it because a newer audit began. That is not
+       * a failure of anything, and reporting it as one would invent a Google
+       * error that never happened.
+       */
+      if (fetchError instanceof DOMException && fetchError.name === "AbortError") return;
+      if (runIdRef.current !== runId) return;
+
+      setPerformance(
+        localPerformanceFailure(
+          finalUrl,
+          "Could not reach the speed check on this server.",
+        ),
+      );
+    } finally {
+      if (runIdRef.current === runId) setPerformanceRunning(false);
     }
   }
 
@@ -90,12 +356,66 @@ export default function HomePage() {
         </button>
       </form>
 
-      {/* Removed once all six Phase 3 checks are in place. */}
-      <p className={styles.placeholderNotice}>
-        Steps 1–3 of 6 are live: the page is fetched, its SEO checked and its
-        security settings read. SSL/DNS, speed and the severity rules are still
-        to come.
+      {/*
+        Off by default, and says why. The speed test is the slowest thing this
+        tool does, so the cost is on the label rather than discovered after the
+        button is pressed.
+      */}
+      <label className={styles.toggle}>
+        <input
+          type="checkbox"
+          checked={includePerformance}
+          onChange={(event) => setIncludePerformance(event.target.checked)}
+          disabled={isLoading}
+        />
+        <span>
+          Include Google PageSpeed performance analysis
+          <span className={styles.toggleNote}>
+            Takes up to 90 seconds, and runs separately — your audit results
+            appear first. Uses Google&rsquo;s service, not this server.
+          </span>
+        </span>
+      </label>
+
+      {/*
+        A statement of how the report is produced, not a caveat about it —
+        hence the plain subtitle style rather than the amber notice box that
+        carried the old "rules still being written" warning.
+      */}
+      <p className={styles.subtitle}>
+        This report is generated from deterministic website checks.
+        Recommendations are based on measured results.
       </p>
+
+      {isLoading && <AuditProgress />}
+
+      {/*
+        Counts, never a percentage. A crawl discovers more of a site as it
+        reads it, so there is no denominator that would make a percentage
+        true — "12 of 40 discovered" is a fact, "30% complete" is a guess.
+      */}
+      {isLoading && progress !== null && (
+        <p className={styles.progressLine} role="status">
+          {jobStatus === "queued"
+            ? "Waiting for an available audit slot…"
+            : `${progress.evaluated} of ${progress.discovered} pages read` +
+              (progress.queued > 0 ? ` · ${progress.queued} waiting` : "") +
+              (progress.unavailable > 0
+                ? ` · ${progress.unavailable} could not be read`
+                : "") +
+              (progress.robotsExcluded > 0
+                ? ` · ${progress.robotsExcluded} excluded by robots.txt`
+                : "")}
+        </p>
+      )}
+
+      {/*
+        A crawl that stopped at a limit is not a whole-site audit, and the
+        report must say so rather than letting the reader assume otherwise.
+        This is state, not a finding: it carries no severity, because a limit
+        we imposed is not a fault of the website.
+      */}
+      {siteResult !== null && <CrawlSummary crawl={siteResult.crawl} />}
 
       {error && (
         <div className={styles.error}>
@@ -111,16 +431,99 @@ export default function HomePage() {
         </div>
       )}
 
-      {result && <Results data={result} />}
+      {result && (
+        <Results
+          data={result}
+          siteResult={siteResult}
+          performance={performance}
+          performanceRunning={performanceRunning}
+          performanceFindings={performanceFindings}
+          performanceSkipped={performanceSkipped}
+        />
+      )}
     </main>
   );
 }
 
+/**
+ * A speed section describing a failure on OUR side of the wire.
+ *
+ * Used when the request never reached the collector — a refused address, the
+ * rate limit, or our own server being unreachable. Marked "internal-error"
+ * rather than any Google-specific reason, because in these cases nothing at
+ * all is known about Google's service.
+ */
+function localPerformanceFailure(requestedUrl: string, message: string): PerformanceData {
+  return {
+    status: "error",
+    strategy: "mobile",
+    requestedUrl,
+    failureReason: "internal-error",
+    field: {
+      status: "error",
+      measuredUrl: null,
+      scope: null,
+      overall: null,
+      lcp: null,
+      inp: null,
+      cls: null,
+      fcp: null,
+      ttfb: null,
+      error: message,
+    },
+    lab: {
+      status: "error",
+      measuredUrl: null,
+      score: null,
+      lcpMs: null,
+      fcpMs: null,
+      tbtMs: null,
+      speedIndexMs: null,
+      cls: null,
+      error: message,
+    },
+    notInspected: [
+      "Page speed and Core Web Vitals — the speed check could not be started.",
+    ],
+    message,
+  };
+}
+
 /** Displays one completed audit. */
-function Results({ data }: { data: AuditData }) {
+function Results({
+  data,
+  siteResult,
+  performance,
+  performanceRunning,
+  performanceFindings,
+  performanceSkipped,
+}: {
+  data: AuditData;
+  /** The whole-site audit, when a crawl produced one. */
+  siteResult: SiteAuditResult | null;
+  performance: PerformanceData | null;
+  performanceRunning: boolean;
+  performanceFindings: Finding[];
+  performanceSkipped: SkippedCheck[];
+}) {
   return (
     <section className={styles.results}>
       <div className={styles.summary}>
+        {/*
+          Said plainly, because a speed check that failed must not make the
+          whole audit read as failed. The performance panel carries its own
+          heading for that case.
+        */}
+        {/*
+          "Complete" is a claim about the SITE, so it may only be made when
+          the crawl actually covered it. A partial crawl says so instead —
+          the banner above gives the detail, and this must not contradict it.
+        */}
+        <p className={styles.completeBadge}>
+          {siteResult !== null && !siteResult.crawl.complete
+            ? "Partial website audit"
+            : "Website audit complete"}
+        </p>
         <h2 className={styles.resultsUrl}>{data.fetch.finalUrl}</h2>
         <p className={styles.checkedAt}>
           Checked {new Date(data.website.checkedAt).toLocaleString()}
@@ -155,30 +558,246 @@ function Results({ data }: { data: AuditData }) {
         </dl>
       </div>
 
-      <MeasuredFacts data={data} />
+      {/*
+        FINDINGS FIRST.
 
-      <h3 className={styles.findingsHeading}>
-        Findings ({data.findings.length})
-      </h3>
-      {data.findings.length === 0 && (
-        <p className={styles.emptyFindings}>
-          The facts above are measured, but nothing has been graded yet. Step 6
-          adds the rules that turn them into Critical / High / Medium findings.
-        </p>
+        They used to sit last, below the speed panel and twenty-eight rows of
+        measured facts — about seventeen hundred pixels down, two screens below
+        the fold. That inverted the product: a salesperson opens this to learn
+        what is wrong with a prospect's site, and had to scroll past the
+        appendix to reach the answer.
+
+        The measured facts exist so a person can CHECK a claim, which means
+        they belong after the claim, not in front of it.
+
+        The audit findings and the speed findings are shown together. Both
+        arrays arrive already GRADED by the server. Each is sorted within
+        itself, so the concatenation is not — FindingsSection reorders them by
+        the severity it was given. Ordering by a severity is not deciding one.
+      */}
+      <FindingsSection
+        /*
+         * The WHOLE SITE when a crawl produced one, not just the entry page.
+         *
+         * `site.findings` already contains both kinds: the page-scoped rules
+         * aggregated across every page that was read, and the site-scoped rules
+         * evaluated once. Adding `data.findings` as well would show the entry
+         * page twice, since it is one of the pages already counted.
+         */
+        findings={[...(siteResult?.site.findings ?? data.findings), ...performanceFindings]}
+        skipped={[
+          ...(siteResult?.site.skippedChecks ?? data.skippedChecks),
+          ...performanceSkipped,
+        ]}
+      />
+
+      {/*
+        Its own section, with its own state. The audit above is complete and
+        readable whatever this is doing.
+      */}
+      <PerformancePanel
+        performance={performance ?? data.performance}
+        running={performanceRunning}
+      />
+
+      <MeasuredFacts data={data} />
+    </section>
+  );
+}
+
+/**
+ * What the rules concluded, and what they could not look at.
+ *
+ * Four states, because collapsing them is how a report ends up saying
+ * something untrue. "No findings" can mean the site came back clean, or that
+ * several checks never ran — and only one of those is good news. The section
+ * used to say grading had not happened at all, which stopped being true the
+ * moment the security rules started running.
+ *
+ * The skipped list is deliberately plain: no badge, no colour, no severity. A
+ * check that did not run is neither a problem nor a pass, and styling it as
+ * either would make it one.
+ */
+function FindingsSection({
+  findings,
+  skipped,
+}: {
+  findings: Finding[];
+  skipped: SkippedCheck[];
+}) {
+  const state = findingsState(findings.length, skipped.length);
+  const summary = findingsSummary(state);
+
+  /*
+   * Worst first. The findings arrive from two requests, each sorted within
+   * itself, so the joined list needs reordering to read sensibly.
+   *
+   * This reads `severity` and never sets it. Every value here was decided by
+   * a rule on the server; nothing in the browser can change one, and the ties
+   * break on id so the order is stable rather than dependent on which request
+   * answered first.
+   */
+  const ordered = [...findings].sort((a, b) => {
+    const rank = { critical: 0, high: 1, medium: 2, good: 3 } as const;
+    return rank[a.severity] - rank[b.severity] || a.id.localeCompare(b.id);
+  });
+
+  /*
+   * Split by the scope the RULE declared, which the server carried through.
+   * Nothing here reads a title or an id to work out what a finding is about.
+   */
+  const { site, page } = partitionByScope(ordered);
+
+  return (
+    <>
+      <h3 className={styles.findingsHeading}>Findings ({findings.length})</h3>
+
+      {summary && <p className={styles.emptyFindings}>{summary}</p>}
+
+      {site.length > 0 && (
+        <section className={styles.findingGroup} aria-labelledby="site-findings">
+          <h4 id="site-findings" className={styles.groupHeading}>
+            {SITE_FINDINGS_HEADING} ({site.length})
+          </h4>
+          <p className={styles.groupIntro}>{SITE_FINDINGS_INTRO}</p>
+          <ul className={styles.findings}>
+            {site.map((finding) => (
+              <FindingCard key={finding.id} finding={finding} scope="site" />
+            ))}
+          </ul>
+        </section>
       )}
-      <ul className={styles.findings}>
-        {data.findings.map((finding) => (
-          <li key={finding.id} className={styles.finding}>
-            <span className={`${styles.badge} ${styles[finding.severity]}`}>
-              {severityLabel(finding.severity)}
-            </span>
-            <div>
-              <p className={styles.findingTitle}>{finding.title}</p>
-              <p className={styles.evidence}>{finding.evidence}</p>
-            </div>
-          </li>
+
+      {page.length > 0 && (
+        <section className={styles.findingGroup} aria-labelledby="page-findings">
+          <h4 id="page-findings" className={styles.groupHeading}>
+            {PAGE_FINDINGS_HEADING} ({page.length})
+          </h4>
+          <p className={styles.groupIntro}>{PAGE_FINDINGS_INTRO}</p>
+          <ul className={styles.findings}>
+            {page.map((finding) => (
+              <FindingCard key={finding.id} finding={finding} scope="page" />
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {showsSkippedPanel(state) && (
+        <section className={styles.skipped}>
+          <h4 className={styles.skippedHeading}>
+            {SKIPPED_HEADING} ({skipped.length})
+          </h4>
+          <p className={styles.skippedIntro}>{SKIPPED_INTRO}</p>
+          <ul className={styles.skippedList}>
+            {skipped.map((check) => (
+              <li key={`${check.ruleId} ${check.reason}`} className={styles.skippedItem}>
+                <span className={styles.skippedId}>{check.ruleId}</span>
+                {/* The server own reason, verbatim. Never reworded here. */}
+                <span className={styles.skippedReason}>{check.reason}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </>
+  );
+}
+
+/**
+ * One finding.
+ *
+ * Every number and every sentence comes from the server. The only decisions
+ * made here are which of them to show and where to put it.
+ */
+function FindingCard({ finding, scope }: { finding: Finding; scope: FindingScope }) {
+  const reach = affectedView(finding);
+
+  return (
+    <li className={styles.finding}>
+      <span className={`${styles.badge} ${styles[finding.severity]}`}>
+        {severityLabel(finding.severity)}
+      </span>
+      <div className={styles.findingBody}>
+        <p className={styles.findingTitle}>{finding.title}</p>
+
+        <p className={styles.findingMeta}>
+          {/* Not colour alone: the scope is spelled out in words. */}
+          <span className={scope === "site" ? styles.scopeSite : styles.scopePage}>
+            {scopeLabel(scope)}
+          </span>
+          {/*
+            Present only for page findings, and only when the server supplied
+            both numbers. A site finding has no page denominator and must never
+            be shown one.
+          */}
+          {reach.reach !== null && <span className={styles.reach}>{reach.reach}</span>}
+        </p>
+
+        <p className={styles.evidence}>{finding.evidence}</p>
+        {/* The fixed action declared by the rule, not written by an AI. */}
+        <p className={styles.remediation}>{finding.remediation}</p>
+
+        {scope === "page" && hasAffectedList(finding) && (
+          <details className={styles.affected}>
+            <summary className={styles.affectedToggle}>
+              View affected pages
+              {/*
+                Said outright when the list is shorter than the total, so the
+                sample is never mistaken for the whole.
+              */}
+              {reach.sample !== null && (
+                <span className={styles.affectedSample}> ({reach.sample})</span>
+              )}
+            </summary>
+            <ul className={styles.affectedList}>
+              {reach.pages.map((entry) => (
+                <li key={entry.url} className={styles.affectedItem}>
+                  <span className={styles.affectedUrl}>{entry.url}</span>
+                  <span className={styles.affectedEvidence}>{entry.evidence}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/**
+ * What the crawl covered.
+ *
+ * `partial` comes straight from the server complete flag. Nothing here
+ * decides whether a crawl finished by comparing counts — a crawl can read
+ * every page it found and still be incomplete, because there were sections it
+ * never heard of.
+ */
+function CrawlSummary({ crawl }: { crawl: SiteCrawlSummary }) {
+  const view = crawlView(crawl);
+  const robots = robotsNote(crawl);
+
+  return (
+    <section
+      className={view.partial ? styles.crawlPartial : styles.crawlComplete}
+      aria-labelledby="crawl-summary"
+    >
+      {/* h2: it sits at the top level of the report, beside the audited
+          address, so an h3 here would skip a level from the page title. */}
+      <h2 id="crawl-summary" className={styles.crawlHeading}>
+        {view.partial ? "Partial crawl" : "Site crawl"}
+      </h2>
+      <p className={styles.crawlHeadline}>{view.headline}</p>
+      {view.reason !== null && <p className={styles.crawlReason}>{view.reason}</p>}
+      {robots !== null && <p className={styles.crawlReason}>{robots}</p>}
+
+      <dl className={styles.crawlFacts}>
+        {view.facts.map((fact) => (
+          <div key={fact.label} className={styles.crawlFact}>
+            <dt className={styles.crawlFactLabel}>{fact.label}</dt>
+            <dd className={styles.crawlFactValue}>{fact.value}</dd>
+          </div>
         ))}
-      </ul>
+      </dl>
     </section>
   );
 }
@@ -268,9 +887,7 @@ function MeasuredFacts({ data }: { data: AuditData }) {
           value={
             technical === null
               ? "Not checked — the audit ran out of time"
-              : technical.robotsTxtFound
-                ? "Found"
-                : "Not found"
+              : siteFileText(technical.robotsTxtStatus, "Found")
           }
           note={technical?.robotsBlocksEverything ? "Blocks all crawlers" : undefined}
         />
@@ -279,7 +896,7 @@ function MeasuredFacts({ data }: { data: AuditData }) {
           value={
             technical === null
               ? "Not checked — the audit ran out of time"
-              : (technical.sitemapUrl ?? "— not found —")
+              : siteFileText(technical.sitemapStatus, technical.sitemapUrl ?? "Found")
           }
         />
       </dl>

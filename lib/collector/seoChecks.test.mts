@@ -10,6 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runSeoChecks } from "./seoChecks.ts";
+import { classifyLink } from "./securityChecks.ts";
 
 test("finds the title and its length", () => {
   const seo = runSeoChecks(`<html><head><title>  Hello   World  </title></head><body></body></html>`);
@@ -162,4 +163,199 @@ test("ignores <img> written inside a script, which is not a real image", () => {
     </body></html>
   `);
   assert.equal(seo.imageCount, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Inert markup is not on the page
+//
+// Regression: a <template> is parsed by the browser but never rendered, and
+// counting its contents made a correct page report three findings it did not
+// deserve — including one whose evidence quoted the template's own placeholder
+// back to the client as though it were their heading.
+// ---------------------------------------------------------------------------
+
+test("content inside <template> is not counted as being on the page", () => {
+  const html = `<html lang="en"><head><title>Products</title></head><body>
+    <h1>Products</h1>
+    <h2>Featured</h2>
+    <p>${"Real visible copy about our products. ".repeat(6)}</p>
+    <img src="/hero.png" alt="Our storefront">
+    <template id="card">
+      <h1>{{ product.name }}</h1>
+      <h4>{{ product.sku }}</h4>
+      <img src="{{ product.image }}">
+    </template>
+  </body></html>`;
+
+  const seo = runSeoChecks(html, "https://shop.test/products");
+
+  assert.equal(seo.h1Count, 1, "the template's h1 is never rendered");
+  assert.deepEqual(seo.h1Texts, ["Products"], "and its placeholder is not quoted back");
+  assert.equal(seo.imageCount, 1);
+  assert.equal(seo.imagesMissingAlt, 0, "a placeholder image is not a missing alt");
+  assert.deepEqual(seo.headingSkips, [], "h1 to h4 inside a template is not a skip");
+});
+
+test("content inside <noscript> is not counted either", () => {
+  // The usual occupant is a tracking pixel with no alt attribute, shown only
+  // to visitors with scripts disabled.
+  const html = `<html lang="en"><head><title>T</title></head><body>
+    <p>${"Real content. ".repeat(10)}</p>
+    <noscript><img height="1" width="1" src="https://tracker.test/p.gif"></noscript>
+  </body></html>`;
+
+  const seo = runSeoChecks(html, "https://x.test/");
+
+  assert.equal(seo.imagesMissingAlt, 0);
+});
+
+test("a genuinely broken page is still detected", () => {
+  // The fix must remove false positives without hiding real ones.
+  const html = `<html><head></head><body>
+    <h1>A</h1><h1>B</h1><h4>Deep</h4>
+    <p>${"text ".repeat(30)}</p><img src="/x.png">
+  </body></html>`;
+
+  const seo = runSeoChecks(html, "https://x.test/");
+
+  assert.equal(seo.h1Count, 2);
+  assert.equal(seo.imagesMissingAlt, 1);
+  assert.equal(seo.headingSkips.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// `rel` IS A LIST OF TOKENS, NOT A STRING
+//
+// The canonical tag used to be found with an exact attribute match, so a page
+// written rel="canonical alternate" — legal, and meaning exactly what
+// rel="canonical" means — was read as declaring no canonical URL at all. The
+// rule then told the client their page has none.
+//
+// The other half matters as much: "xcanonical" is its own token and must not
+// be mistaken for one.
+// ---------------------------------------------------------------------------
+
+const canonicalFrom = (relAttribute: string) =>
+  runSeoChecks(
+    `<html><head><link rel=${relAttribute} href="/a"></head><body><p>text</p></body></html>`,
+    "https://example.com/page",
+  ).canonicalUrl;
+
+test("a canonical relation is recognised however the rel is written", () => {
+  const declared = [
+    '"canonical"',
+    '"Canonical"',
+    '"CANONICAL"',
+    '"canonical alternate"',
+    '"alternate canonical"',
+    '" canonical "',
+    '"  alternate   canonical  "',
+    "canonical", // unquoted
+    '"nofollow canonical noopener"', // buried in the middle
+  ];
+
+  for (const rel of declared) {
+    assert.equal(canonicalFrom(rel), "https://example.com/a", `rel=${rel}`);
+  }
+});
+
+test("a token that merely CONTAINS canonical is not one", () => {
+  for (const rel of ['"xcanonical"', '"canonicalfoo"', '"canonical-alternate"', '"canon"']) {
+    assert.equal(canonicalFrom(rel), null, `rel=${rel} declares no canonical relation`);
+  }
+});
+
+test("a link with no rel, or an empty one, declares nothing", () => {
+  assert.equal(canonicalFrom('""'), null);
+  assert.equal(canonicalFrom('"   "'), null);
+  assert.equal(
+    runSeoChecks(`<html><head><link href="/a"></head><body><p>t</p></body></html>`).canonicalUrl,
+    null,
+  );
+});
+
+test("the first canonical still wins when a page carries several", () => {
+  // Unchanged behaviour, restated so the token fix cannot quietly alter it.
+  const seo = runSeoChecks(
+    `<html><head>
+     <link rel="canonical alternate" href="/first">
+     <link rel="canonical" href="/second">
+     </head><body><p>text</p></body></html>`,
+    "https://example.com/page",
+  );
+
+  assert.equal(seo.canonicalUrl, "https://example.com/first");
+});
+
+test("a canonical is still resolved against the page it was found on", () => {
+  assert.equal(
+    runSeoChecks(
+      `<html><head><link rel="alternate canonical" href="../a"></head><body><p>t</p></body></html>`,
+      "https://example.com/shop/kettles",
+    ).canonicalUrl,
+    "https://example.com/a",
+  );
+});
+
+test("a rel token list does not change what OTHER link types mean", () => {
+  // The same reader classifies mixed content, so a change here would show up
+  // as a stylesheet that stopped counting.
+  assert.equal(classifyLink("stylesheet", undefined), "active");
+  assert.equal(classifyLink("shortcut icon", undefined), "passive");
+  assert.equal(classifyLink("  STYLESHEET  ", undefined), "active");
+  assert.equal(classifyLink("canonical", undefined), null, "a canonical fetches nothing");
+  assert.equal(classifyLink("", undefined), null);
+  assert.equal(classifyLink(undefined, undefined), null);
+});
+
+// ---------------------------------------------------------------------------
+// A VIEWPORT TAG WITH NOTHING IN IT DOES NOTHING
+//
+// `<meta name="viewport" content="">` is read and ignored by a browser, so the
+// phone still renders the page at desktop width. Counting the tag as present
+// passed the rule and told the client their page was fine on mobile.
+// ---------------------------------------------------------------------------
+
+const viewportFrom = (tag: string) =>
+  runSeoChecks(`<html><head>${tag}</head><body><p>text</p></body></html>`).hasViewportMeta;
+
+test("a viewport declaration with content counts", () => {
+  assert.equal(viewportFrom('<meta name="viewport" content="width=device-width, initial-scale=1">'), true);
+  assert.equal(viewportFrom('<meta name="viewport" content="width=device-width">'), true);
+  // Whether the content is any GOOD is a different question, deliberately not
+  // asked here: anything non-empty is a declaration.
+  assert.equal(viewportFrom('<meta name="viewport" content="nonsense">'), true);
+});
+
+test("an EMPTY viewport declaration does not count", () => {
+  assert.equal(viewportFrom('<meta name="viewport" content="">'), false);
+});
+
+test("a whitespace-only viewport declaration does not count", () => {
+  assert.equal(viewportFrom('<meta name="viewport" content="   ">'), false);
+  assert.equal(viewportFrom('<meta name="viewport" content="\t\n ">'), false);
+});
+
+test("a viewport tag with no content attribute at all does not count", () => {
+  assert.equal(viewportFrom('<meta name="viewport">'), false);
+});
+
+test("no viewport tag does not count", () => {
+  assert.equal(viewportFrom(""), false);
+  assert.equal(viewportFrom('<meta name="description" content="hello">'), false);
+});
+
+test("the viewport name is still matched whatever its case", () => {
+  // Unchanged behaviour, kept under test alongside the content change.
+  assert.equal(viewportFrom('<meta NAME="Viewport" CONTENT="width=device-width">'), true);
+  assert.equal(viewportFrom('<meta NAME="VIEWPORT" CONTENT="">'), false);
+});
+
+test("one usable viewport among several is enough", () => {
+  // A page with an empty tag and a real one is correctly configured by the
+  // real one, so the empty one must not veto it.
+  assert.equal(
+    viewportFrom('<meta name="viewport" content=""><meta name="viewport" content="width=device-width">'),
+    true,
+  );
 });

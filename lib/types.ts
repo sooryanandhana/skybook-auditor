@@ -22,6 +22,14 @@
  */
 export type NotYetImplemented = null;
 
+/*
+ * Type-only, so nothing is imported at runtime and no cycle is created — the
+ * crawler already reads its own types from this file. The crawl summary lives
+ * with the crawler because that is what produces it; it is referenced here so
+ * a whole-site result can carry it without a second, drifting copy.
+ */
+import type { SiteCrawlSummary } from "./collector/crawlSite";
+
 /**
  * How serious a problem is.
  *
@@ -46,6 +54,89 @@ export interface Finding {
    * This is what makes the finding checkable by a human.
    */
   evidence: string;
+  /**
+   * What to do about it, in one sentence.
+   *
+   * A constant declared by the rule, exactly like severity — not generated,
+   * not chosen per audit, and not written by an AI. Claude may expand on it in
+   * Phase 5; it never replaces it.
+   */
+  remediation: string;
+
+  /*
+   * The three fields below are set ONLY by site-wide aggregation, when one
+   * finding stands for the same rule firing across many crawled pages. A
+   * single-page audit leaves all three absent, so everything written before
+   * multi-page crawling reads exactly as it did.
+   *
+   * None of them influences `severity`. The rule declares that, and a finding
+   * on eighty pages carries the same severity as the same finding on one —
+   * counting is not grading.
+   */
+
+  /**
+   * Which pages this finding was found on, and what was measured on each.
+   *
+   * A BOUNDED SAMPLE, not the whole list: see `affectedCount` for the real
+   * total. Sorted by address so the same crawl always produces the same order,
+   * whatever order the workers happened to finish in.
+   */
+  affected?: Array<{ url: string; evidence: string }>;
+
+  /**
+   * How many pages this finding was actually found on.
+   *
+   * Reported separately because `affected` is capped. Without it, a rule
+   * firing on four hundred pages would silently read as fifty.
+   */
+  affectedCount?: number;
+
+  /**
+   * Whether this finding describes one page or the whole site.
+   *
+   * Copied from the rule, which declares it. It changes how the counts above
+   * are to be read: a `"page"` finding names the pages it was found on, while
+   * a `"site"` finding describes a single fact about the domain — one
+   * certificate, one SPF record — and carries no page denominator at all,
+   * because it does not have one.
+   */
+  scope?: "page" | "site";
+
+  /**
+   * How many crawled pages this rule ACTUALLY RAN on — the denominator.
+   *
+   * ABSENT ON SITE-SCOPED FINDINGS, deliberately. A domain's DNS records were
+   * not measured "on 128 pages", and giving that finding a page denominator
+   * would invite every reader of it to quote a proportion that was never
+   * measured.
+   *
+   * Not the number of pages crawled. A page where the rule was skipped could
+   * not have fired it, so counting that page would quietly turn "we could not
+   * check this" into "this page was fine". Pages that could not be read, that
+   * were not HTML, or that robots.txt kept us away from are not in it either.
+   */
+  evaluatedPages?: number;
+}
+
+/**
+ * A grading rule that could not run, and why.
+ *
+ * WHY THIS IS NOT A FINDING: "we could not check the SPF record" is not a
+ * problem with the website. Turning it into one would invent a fault, and
+ * dropping it silently would let a gap read as a pass. It is a third thing,
+ * and it is kept as a third thing.
+ *
+ * Distinct from every neighbouring state on purpose:
+ *   error            the measurement failed        -> skipped
+ *   null             never measured                -> skipped
+ *   applicable:false meaningless in this context   -> skipped
+ *   absent           measured, genuinely missing    -> a real finding
+ */
+export interface SkippedCheck {
+  /** The rule that did not run, e.g. "security.dns.spf". */
+  ruleId: string;
+  /** Why, in plain words, from the collector that knew. */
+  reason: string;
 }
 
 /** Why a certificate stopped an HTTPS connection succeeding. */
@@ -150,6 +241,29 @@ export interface SeoData {
   metaDescriptionText: string | null;
   metaDescriptionLength: number;
 
+  /**
+   * Characters of visible text in the SERVED HTML.
+   *
+   * A measurement, not a verdict. It says how much text arrived — it does not
+   * say the page is client-rendered, broken, or thin, and nothing here should
+   * be read as any of those.
+   *
+   * It exists because this scan does not run JavaScript. A site that builds
+   * its content in the browser serves an almost empty body, so its headings
+   * and images are absent from the HTML while being perfectly present for a
+   * visitor. Rules that depend on body content consult this first, so they can
+   * decline to judge rather than report half a dozen problems that are not
+   * there.
+   *
+   * Head-based facts below — title, meta description, canonical, lang,
+   * viewport — do not depend on it. They are served in the markup either way
+   * and are judged on their own.
+   *
+   * Excludes script, style, noscript and template contents: none of it is ever
+   * shown to a visitor.
+   */
+  bodyTextLength: number;
+
   /** How many <h1> elements the page has. Ideally exactly one. */
   h1Count: number;
   /** How many <h2> elements the page has. */
@@ -191,14 +305,46 @@ export interface SeoData {
 // technical — site-level files search engines look for
 // ---------------------------------------------------------------------------
 
+/**
+ * What we managed to establish about a site-level file.
+ *
+ * THREE STATES, NOT TWO, AND THE THIRD IS THE POINT. A boolean can only say
+ * "found" or "not found", so a request that timed out had to be recorded as
+ * "not found" — reporting a file as absent from the client's website when all
+ * we actually knew was that our own request failed.
+ *
+ *   found        we read it
+ *   absent       THE SERVER TOLD US it is not there: 404, 410, or a site that
+ *                answers every unknown address with its homepage
+ *   unavailable  we could not find out. A timeout, a 5xx, a refused
+ *                connection, or a body too large to read. Says nothing
+ *                whatsoever about the website.
+ *
+ * Nothing downstream may treat `unavailable` as `absent`, and the rule that
+ * reads robots.txt skips rather than passes when it sees one.
+ */
+export type SiteFileStatus = "found" | "absent" | "unavailable";
+
 export interface TechnicalData {
-  /** Whether /robots.txt exists and could be read. */
-  robotsTxtFound: boolean;
+  /**
+   * Whether /robots.txt was found, genuinely absent, or could not be checked.
+   *
+   * Replaced a `robotsTxtFound: boolean`, which had no way to express the
+   * third case and so reported our own failed request as the client having no
+   * robots.txt.
+   */
+  robotsTxtStatus: SiteFileStatus;
   /**
    * Whether robots.txt blocks all crawlers from the whole site.
    * A common and costly misconfiguration.
+   *
+   * Meaningful ONLY when `robotsTxtStatus` is "found". False when the file is
+   * absent — nothing is blocked — and false when it is unavailable, where the
+   * value carries no information and the rule declines to run.
    */
   robotsBlocksEverything: boolean;
+  /** Whether a sitemap was found, genuinely absent, or could not be checked. */
+  sitemapStatus: SiteFileStatus;
   /** A sitemap URL, from robots.txt or the usual /sitemap.xml location. */
   sitemapUrl: string | null;
 }
@@ -529,6 +675,15 @@ export type DnsStatus =
   /** The lookup did not complete, so we do not know either way. */
   | "error";
 
+/**
+ * What a DMARC record instructs receiving servers to do with failing mail.
+ *
+ * These three are the only values the specification defines. Anything else in
+ * the record is not one of them, and is recorded as no readable policy rather
+ * than being rounded to the nearest.
+ */
+export type DmarcPolicy = "none" | "quarantine" | "reject";
+
 export interface DnsRecordSet<T> {
   status: DnsStatus;
   /** The records found. Empty unless status is "found". */
@@ -582,11 +737,308 @@ export interface DnsData {
    * DMARC, which lives at its own hostname rather than in the domain's TXT.
    * The hostname is derived from user input, so it is safety-checked in its
    * own right before any lookup.
+   *
+   * UNLIKE SPF, DMARC IS INHERITED. A subdomain with no record of its own is
+   * covered by its organisational domain's record, so checking only the
+   * audited name reported "this domain publishes no DMARC record" for domains
+   * that are, in fact, protected. `policyDomain` says which name the record
+   * actually came from.
    */
   dmarc: EmailPolicyRecord & {
-    /** The derived hostname that was checked, e.g. "_dmarc.example.com". */
+    /** The derived hostname that was READ, e.g. "_dmarc.example.com". */
     hostname: string;
+    /**
+     * THE DOMAIN THIS POLICY IS ABOUT.
+     *
+     * Every other field here describes the DMARC position of this name and no
+     * other. It is the MAIL DOMAIN — `emailDomain` above — not the hostname
+     * the website is served from.
+     *
+     * Those differ, and the difference is the reason this field exists. A site
+     * at "www.example.com" has its mail on "example.com": nobody sends email
+     * from the www name, and `emailDomainFor` drops the label before any
+     * lookup happens. So an audit of "www.example.com" reports the DMARC
+     * position of "example.com", which is the one the client actually has.
+     *
+     * Without this field a reader had to know that rule to interpret the rest,
+     * and "the audited domain" could reasonably be read as the hostname that
+     * was typed. Now nothing has to be inferred.
+     */
+    appliesTo: string;
+    /**
+     * WHERE THE RECORD WAS READ FROM.
+     *
+     * The domain whose `_dmarc` name held the record — equal to `appliesTo`
+     * when the domain publishes its own, and a parent of it when the policy
+     * was inherited.
+     *
+     * Null when no record was found, and null when the lookup failed: we
+     * cannot name a source for a record we never read.
+     */
+    policyDomain: string | null;
+    /**
+     * Whether the policy came from somewhere OTHER than `appliesTo`.
+     *
+     * True exactly when `policyDomain` is a parent rather than `appliesTo`
+     * itself. Kept as its own field so nothing has to compare two strings to
+     * find out. "Your domain publishes DMARC" and "your parent domain's DMARC
+     * covers you" are different sentences, and only one is true at a time.
+     */
+    inherited: boolean;
+    /**
+     * The policy that governs mail from `appliesTo`.
+     *
+     * Which tag that is depends on where the record was found, because DMARC
+     * says so:
+     *
+     *   direct     `p=`               the record is this domain's own
+     *   inherited  `sp=`, else `p=`   `sp=` governs a parent's subdomains,
+     *                                 and a record without one applies its
+     *                                 `p=` to them instead
+     *
+     * NOT simply "whatever the record said". A parent publishing
+     * `p=reject; sp=none` protects itself and leaves its subdomains open, and
+     * reporting `reject` for a subdomain would overstate what the client has.
+     *
+     * Null when no record was found, and null when the record carries no
+     * policy tag we recognise — an unreadable tag is not `none`, and reading
+     * it that way would claim the record permits forged mail through.
+     */
+    effectivePolicy: DmarcPolicy | null;
   };
+}
+
+// ---------------------------------------------------------------------------
+// performance — how fast the site is, from Google PageSpeed Insights
+// ---------------------------------------------------------------------------
+
+/** Google's own rating of a metric. We record it rather than judging ourselves. */
+export type PerformanceRating = "FAST" | "AVERAGE" | "SLOW";
+
+/**
+ * Why a speed check produced no numbers.
+ *
+ * These are deliberately separate causes rather than one "it failed". A
+ * timeout, a reply too large to read, and a reply we could not parse each call
+ * for a different response from whoever reads the report, and collapsing them
+ * would tell that person the wrong thing to go and fix.
+ */
+export type PerformanceFailureReason =
+  /** No PAGESPEED_API_KEY on the server. Nothing was attempted. */
+  | "no-api-key"
+  /** The audit's clock ran out before the check could start. */
+  | "out-of-time"
+  /** Google was reached but did not finish in time — connecting, waiting, or sending. */
+  | "timeout"
+  /** Google could not be reached at all. */
+  | "network"
+  /** Google answered with an error status. Its own words are in `message`. */
+  | "api-error"
+  /** The reply exceeded the size we are willing to hold in memory. */
+  | "response-too-large"
+  /**
+   * The reply arrived complete but was not usable PageSpeed data.
+   *
+   * Strictly about Google's answer. An error on our side is never this — see
+   * "internal-error" below.
+   */
+  | "unreadable-response"
+  /**
+   * The check itself failed unexpectedly.
+   *
+   * Our fault, not Google's. Kept separate so a bug here can never be read as
+   * evidence that Google sent something bad.
+   */
+  | "internal-error";
+
+/** Whether the speed check ran, and why not if it did not. */
+export type PerformanceStatus =
+  /** The check ran and returned results. */
+  | "checked"
+  /** Nobody asked for it — the speed check is opt-in because it is slow. */
+  | "not-requested"
+  /** Asked for, but we have no API key configured. */
+  | "no-api-key"
+  /**
+   * Asked for, and running as a separate request.
+   *
+   * The speed check no longer holds up the audit: the main audit returns with
+   * this, and the answer arrives from /api/audit/performance afterwards. It is
+   * emphatically NOT a result — nothing has been measured yet, and it must
+   * never be read as "fine" or as "slow".
+   */
+  | "pending"
+  /** Asked for, but the check could not complete. See `message`. */
+  | "error";
+
+/** Whether real-visitor data exists for this address. */
+export type FieldDataStatus =
+  /** Google has enough real visits to report on. */
+  | "found"
+  /**
+   * Google has no data for this address. That means TOO FEW VISITORS to
+   * report anonymously — it does NOT mean the site is slow. A quiet site and
+   * a slow site must never look the same in a report.
+   */
+  | "absent"
+  /** The lookup did not complete, so we know nothing either way. */
+  | "error";
+
+/**
+ * One timing measurement from real visitors, in milliseconds.
+ *
+ * The unit is in the field name on purpose. An earlier bug in this project
+ * came from a number called `responseTime` being read as a page-load time, so
+ * anything measured in milliseconds now says so where it cannot be missed.
+ */
+export interface FieldTimeMetric {
+  /**
+   * The value three out of four visits did better than, in milliseconds.
+   *
+   * Not an average: Google judges a site on the 75th percentile, so this is a
+   * statement about nearly all visitors rather than a typical one.
+   */
+  percentileMs: number;
+  /** Google's rating for that value. Taken from the API, not calculated here. */
+  category: PerformanceRating;
+}
+
+/**
+ * Cumulative Layout Shift from real visitors.
+ *
+ * Separate from the timing metrics because CLS is a unitless score, not a
+ * duration. Giving it its own type makes it impossible to write it into a
+ * millisecond field by mistake.
+ */
+export interface FieldShiftMetric {
+  /** The 75th-percentile layout-shift score. Around 0.1 is good, 0.25 is poor. */
+  percentile: number;
+  category: PerformanceRating;
+}
+
+/**
+ * What real visitors actually experienced, from the Chrome UX Report.
+ *
+ * This is the data Google ranks on. It is the truth about the site, and it is
+ * kept strictly apart from the lab data below — a single number labelled
+ * "LCP" that could have come from either source would be misleading in a way
+ * that is very hard to spot in a client report.
+ */
+export interface FieldPerformance {
+  status: FieldDataStatus;
+  /**
+   * The address these real-visitor figures belong to, in Google's own words.
+   *
+   * Read from the field block's own `id` — never from the lab run's final URL.
+   * The two normally agree, but they are separate statements by Google about
+   * separate measurements, and borrowing one to label the other would be a
+   * guess dressed up as a reading.
+   *
+   * When `scope` is "origin" this is the whole site, not a page.
+   * Null when Google's reply does not say.
+   */
+  measuredUrl: string | null;
+  /**
+   * Whether these figures describe THIS PAGE or the whole SITE.
+   *
+   * Google falls back to site-wide data when one page has too little traffic
+   * of its own. Reporting that as page data would be wrong, so which one it
+   * is gets recorded.
+   */
+  scope: "page" | "origin" | null;
+  /** Google's overall verdict for the address. */
+  overall: PerformanceRating | null;
+  /** Largest Contentful Paint — when the biggest thing on screen appears. */
+  lcp: FieldTimeMetric | null;
+  /** Interaction to Next Paint — how quickly the page answers a tap or click. */
+  inp: FieldTimeMetric | null;
+  /** Cumulative Layout Shift — how much the page jumps about while loading. */
+  cls: FieldShiftMetric | null;
+  /** First Contentful Paint — when anything at all appears. */
+  fcp: FieldTimeMetric | null;
+  /** Time to First Byte — when the server started replying. */
+  ttfb: FieldTimeMetric | null;
+  /** Why the data could not be read, when status is "error". */
+  error: string | null;
+}
+
+/**
+ * One simulated page load in Google's own datacentre.
+ *
+ * Repeatable and useful for diagnosis, but nobody experienced it. Where the
+ * two disagree, the field data above is what matters — this is a laboratory
+ * result, not a measurement of the client's actual visitors.
+ */
+export interface LabPerformance {
+  status: "found" | "error";
+  /**
+   * The address Google's test browser actually loaded.
+   *
+   * Read from `lighthouseResult.finalUrl`, which is where the simulation ended
+   * up after any redirects Google followed and we did not. It describes THIS
+   * SECTION only — the field figures above carry their own address.
+   *
+   * Null when the run produced nothing, or when Google's reply does not say.
+   */
+  measuredUrl: string | null;
+  /** Lighthouse's performance score, 0–100. */
+  score: number | null;
+  /** Largest Contentful Paint, in milliseconds. */
+  lcpMs: number | null;
+  /** First Contentful Paint, in milliseconds. */
+  fcpMs: number | null;
+  /**
+   * Total Blocking Time — how long the page was frozen and unable to respond.
+   * The lab's stand-in for INP, because a simulation cannot tap anything.
+   */
+  tbtMs: number | null;
+  /** Speed Index — how quickly the page visibly fills in. */
+  speedIndexMs: number | null;
+  /** Cumulative Layout Shift, as a score rather than a time. */
+  cls: number | null;
+  /** Why the run could not be read, when status is "error". */
+  error: string | null;
+}
+
+export interface PerformanceData {
+  status: PerformanceStatus;
+  /**
+   * Which device was simulated. Mobile only for now — it is what Google ranks
+   * on, and running both would double the time and quota for a second opinion
+   * the client's ranking does not depend on.
+   */
+  strategy: "mobile";
+  /**
+   * The address we asked Google to measure.
+   *
+   * Always the address the rest of this audit is about, so the speed section
+   * can be lined up against the others.
+   */
+  requestedUrl: string;
+  /*
+   * There is deliberately no `measuredUrl` here.
+   *
+   * WHY: Google follows redirects we did not. Asked for https://www.bbc.co.uk/
+   * it reported on https://www.bbc.com/ — a different domain. But the lab run
+   * and the real-visitor figures are separate measurements that Google labels
+   * separately, so a single address at this level would inevitably be used to
+   * describe both. Each section carries its own `measuredUrl` instead, and
+   * `requestedUrl` above is the only address this whole audit asked about.
+   */
+  /**
+   * Why the check failed, in a form code can branch on.
+   *
+   * `message` says the same thing in English, but nothing later should have to
+   * read English to find out that Google timed out rather than replied with
+   * nonsense. Null whenever the check succeeded.
+   */
+  failureReason: PerformanceFailureReason | null;
+  field: FieldPerformance;
+  lab: LabPerformance;
+  /** What this check cannot tell you, so a gap is never read as a result. */
+  notInspected: string[];
+  /** A plain-language summary for a person reading the report. */
+  message: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -613,8 +1065,14 @@ export interface AuditData {
    */
   technical: TechnicalData | null;
 
-  /** Speed / Core Web Vitals. Module not built yet. */
-  performance: NotYetImplemented;
+  /**
+   * Speed and Core Web Vitals, from Google PageSpeed Insights.
+   *
+   * Always an object, never null: the check is opt-in, so a report has to be
+   * able to say WHY there are no numbers here. Its own `status` field
+   * separates "nobody asked for it" from "we asked and it failed".
+   */
+  performance: PerformanceData;
   /** Security headers and mixed content. */
   security: SecurityData;
   /**
@@ -638,6 +1096,14 @@ export interface AuditData {
    * Empty until the severity-rules module is built.
    */
   findings: Finding[];
+  /**
+   * Checks that could not run on this audit.
+   *
+   * Sits beside `findings` rather than inside it: a skipped check is never a
+   * problem and never a pass. Kept so a report can say what it could not look
+   * at, instead of leaving a silent gap that reads as a clean result.
+   */
+  skippedChecks: SkippedCheck[];
 
   /**
    * True when the audit's overall time budget ran out before every check
@@ -660,6 +1126,77 @@ export interface AuditData {
  * how fast it replied. Throwing that away would discard a real measurement.
  * It is absent when we never reached the site at all.
  */
+/**
+ * What POST /api/audit/performance returns.
+ *
+ * Separate from AuditResponse because the speed check is now its own request.
+ * A failed check still answers ok:true with a PerformanceData explaining
+ * itself — ok:false is reserved for never reaching the check at all (a bad
+ * address, or too many requests).
+ */
+export type PerformanceResponse =
+  | {
+      ok: true;
+      data: PerformanceData;
+      /**
+       * The speed rules, graded on the server by the same engine the audit
+       * uses. The browser displays these; it never decides a severity, a
+       * threshold, or whether a site is slow.
+       */
+      findings: Finding[];
+      /** Speed checks that could not run, kept apart from the findings. */
+      skippedChecks: SkippedCheck[];
+    }
+  | { ok: false; error: string };
+
+/** One crawled page, measured and graded on its own. */
+export interface PageAudit {
+  /** The address we ended up reading, after any redirects. */
+  url: string;
+  /**
+   * Exactly the same shape a single-page audit produces.
+   *
+   * Deliberately not a reduced "page summary" type: a reader debugging why a
+   * site-level finding named a page needs the measurements behind it, and a
+   * second, smaller shape would be a second thing to keep in step.
+   */
+  data: AuditData;
+}
+
+/** Findings that describe the site rather than any one page. */
+export interface SiteFindingsSummary {
+  /** One finding per rule outcome, each naming the pages it was found on. */
+  findings: Finding[];
+  /** Checks that could not run somewhere on the site. Never findings. */
+  skippedChecks: SkippedCheck[];
+  /** How many pages were read and had rules run against them. */
+  evaluatedPages: number;
+}
+
+/**
+ * A whole-site audit.
+ *
+ * `data` is the ENTRY PAGE, in the exact shape single-page audits have always
+ * used, so everything built before crawling reads it unchanged. Everything
+ * about the wider site sits beside it rather than replacing it.
+ */
+export interface SiteAuditResult {
+  /** The entry page. The Phase 3 shape, unchanged. */
+  data: AuditData;
+  /** Findings aggregated across every page the crawl read. */
+  site: SiteFindingsSummary;
+  /** Every page, individually, for detail and for debugging. */
+  pages: PageAudit[];
+  /**
+   * How the crawl went.
+   *
+   * Carries `complete` and `stoppedBecause`, which are what stop a crawl that
+   * halted at a limit from being read as a whole-site audit. Not a finding and
+   * not a severity: a limit we imposed is not a fault of the website.
+   */
+  crawl: SiteCrawlSummary;
+}
+
 export type AuditResponse =
   | { ok: true; data: AuditData }
   | {
@@ -677,3 +1214,53 @@ export type AuditResponse =
        */
       certificateProblem?: CertificateProblem;
     };
+
+/** POST /api/audit — the audit has been accepted, not finished. */
+export type AuditStartResponse =
+  | { ok: true; jobId: string }
+  | { ok: false; error: string };
+
+/** GET /api/audit/status */
+export type AuditStatusResponse =
+  | {
+      ok: true;
+      jobId: string;
+      status: "queued" | "running" | "completed" | "partial";
+      progress: JobProgressView;
+    }
+  | { ok: false; jobId: string; status: "failed"; error: string }
+  | { ok: false; error: string };
+
+/** GET /api/audit/result */
+export type AuditResultResponse =
+  | {
+      ok: true;
+      jobId: string;
+      status: "completed" | "partial";
+      result: SiteAuditResult;
+    }
+  | {
+      ok: false;
+      jobId: string;
+      status: "queued" | "running";
+      error: string;
+    }
+  | { ok: false; jobId: string; status: "failed"; error: string }
+  | { ok: false; error: string };
+
+/**
+ * What a poll may see about a crawl in flight.
+ *
+ * Counts only. There is no percentage here because there is no honest
+ * denominator: a crawl discovers more of a site as it reads it, so "12 of 40
+ * discovered" is a fact and "30% complete" is a guess.
+ */
+export interface JobProgressView {
+  discovered: number;
+  queued: number;
+  evaluated: number;
+  unavailable: number;
+  skippedNonHtml: number;
+  robotsExcluded: number;
+  complete: boolean;
+}

@@ -15,6 +15,7 @@ import {
   resetRateLimits,
   DEFAULT_LIMIT,
   MAX_LIMIT,
+  GLOBAL_LIMIT,
 } from "./rateLimit.ts";
 
 /**
@@ -270,4 +271,183 @@ test("callers with no identifying header share one allowance", () => {
 
   for (let i = 0; i < 10; i++) checkRateLimit(key);
   assert.equal(checkRateLimit(key).allowed, false);
+});
+
+// ---------------------------------------------------------------------------
+// THE CEILING NO HEADER CAN GET OUT FROM UNDER
+//
+// The per-caller limit is keyed on an address read from `x-forwarded-for`, and
+// that header is set by the client. A script that changes it on every request
+// is a new caller every time, so its own allowance never runs out — one line
+// of code, and the limit is gone.
+//
+// So there is a second limit, counted across every caller together. These
+// tests are what stop it being quietly removed or made configurable.
+// ---------------------------------------------------------------------------
+
+/** A request as the route receives one, with whatever headers a caller sent. */
+const requestWith = (headers: Record<string, string>) =>
+  new Request("https://audit.test/api/audit", { method: "POST", headers });
+
+test("one caller still gets exactly their own allowance", () => {
+  // Unchanged behaviour, restated here so the ceiling cannot be blamed for a
+  // caller being cut off early.
+  for (let i = 0; i < DEFAULT_LIMIT; i += 1) {
+    const result = checkRateLimit("198.51.100.7");
+    assert.equal(result.allowed, true, `request ${i + 1} of ${DEFAULT_LIMIT}`);
+    assert.equal(result.scope, "caller");
+  }
+
+  const blocked = checkRateLimit("198.51.100.7");
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.scope, "caller");
+  assert.equal(blocked.limit, DEFAULT_LIMIT);
+});
+
+test("a blocked caller stays blocked, and does not extend their own lockout", () => {
+  const at = Date.now();
+  for (let i = 0; i < DEFAULT_LIMIT; i += 1) checkRateLimit("198.51.100.8", at);
+
+  const first = checkRateLimit("198.51.100.8", at + 1_000);
+  const second = checkRateLimit("198.51.100.8", at + 2_000);
+
+  assert.equal(first.allowed, false);
+  assert.equal(second.allowed, false);
+  // The wait shrinks as the window slides. It must never grow because they
+  // knocked again.
+  assert.ok(second.retryAfterSeconds <= first.retryAfterSeconds);
+});
+
+test("changing X-Forwarded-For does NOT buy unlimited audits", () => {
+  /*
+   * The bug, stated as a test. Every request here looks like a different
+   * caller and every one of them passes its own allowance untouched. Without
+   * the ceiling this loop would return `allowed` two hundred times.
+   */
+  let allowed = 0;
+  for (let i = 0; i < 200; i += 1) {
+    const caller = callerKey(requestWith({ "x-forwarded-for": `203.0.113.${i % 256}` }));
+    if (checkRateLimit(caller).allowed) allowed += 1;
+  }
+
+  assert.equal(allowed, GLOBAL_LIMIT, "the ceiling held, whatever the header said");
+  assert.ok(allowed < 200);
+});
+
+test("the spoofer is refused by the GLOBAL limit, not their own", () => {
+  const fresh = (i: number) => callerKey(requestWith({ "x-forwarded-for": `203.0.113.${i}` }));
+
+  for (let i = 0; i < GLOBAL_LIMIT; i += 1) checkRateLimit(fresh(i));
+
+  const next = checkRateLimit(fresh(GLOBAL_LIMIT + 1));
+  assert.equal(next.allowed, false);
+  assert.equal(next.scope, "global", "this caller has done nothing individually");
+  assert.equal(next.limit, GLOBAL_LIMIT);
+  assert.ok(next.retryAfterSeconds >= 1);
+});
+
+test("many honest callers together cannot exceed the ceiling either", () => {
+  // Four separate addresses, each politely inside its own allowance of ten.
+  const callers = ["198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4"];
+  let allowed = 0;
+
+  for (let round = 0; round < DEFAULT_LIMIT; round += 1) {
+    for (const caller of callers) {
+      if (checkRateLimit(caller).allowed) allowed += 1;
+    }
+  }
+
+  assert.equal(allowed, GLOBAL_LIMIT);
+  assert.ok(allowed < callers.length * DEFAULT_LIMIT, "the sum of allowances is not available");
+});
+
+test("requests arriving at the same instant cannot race past the ceiling", () => {
+  /*
+   * Every one of these is stamped with the SAME millisecond, which is the
+   * closest thing to simultaneous arrival that this limiter can see. The whole
+   * check-and-record is synchronous — there is no await inside it — so the
+   * second request runs only after the first has finished writing, and no two
+   * can both read the same last free slot.
+   */
+  const at = Date.now();
+  const results = Array.from({ length: 100 }, (_, i) =>
+    checkRateLimit(`203.0.113.${i}`, at),
+  );
+
+  assert.equal(results.filter((r) => r.allowed).length, GLOBAL_LIMIT);
+});
+
+test("interleaving callers does not let anyone slip through", () => {
+  const at = Date.now();
+  let allowed = 0;
+  for (let i = 0; i < 90; i += 1) {
+    // Round-robin between three addresses, all in the same millisecond.
+    if (checkRateLimit(`198.51.100.${i % 3}`, at).allowed) allowed += 1;
+  }
+
+  assert.equal(allowed, GLOBAL_LIMIT);
+});
+
+test("a refused request does not spend the global budget", () => {
+  const at = Date.now();
+
+  // One caller uses their ten, then knocks twenty more times and is refused.
+  for (let i = 0; i < DEFAULT_LIMIT; i += 1) checkRateLimit("198.51.100.9", at);
+  for (let i = 0; i < 20; i += 1) checkRateLimit("198.51.100.9", at);
+
+  // Those refusals cost nothing, so the rest of the ceiling is still there
+  // for everybody else. Charging them would let one blocked caller lock out
+  // the whole server.
+  let allowed = 0;
+  for (let i = 0; i < 100; i += 1) {
+    if (checkRateLimit(`203.0.113.${i}`, at).allowed) allowed += 1;
+  }
+
+  assert.equal(allowed, GLOBAL_LIMIT - DEFAULT_LIMIT);
+});
+
+test("the ceiling slides rather than resetting on the minute", () => {
+  const at = Date.now();
+  for (let i = 0; i < GLOBAL_LIMIT; i += 1) checkRateLimit(`203.0.113.${i}`, at);
+
+  assert.equal(checkRateLimit("198.51.100.20", at + 59_000).allowed, false, "still inside");
+  assert.equal(checkRateLimit("198.51.100.20", at + 61_000).allowed, true, "window passed");
+});
+
+test("the ceiling is not configurable by the environment", () => {
+  /*
+   * A limit that exists because the other one can be evaded is worth nothing
+   * if it can be switched off the same way. The override raises one caller's
+   * allowance; it must not raise the total.
+   */
+  process.env.AUDIT_RATE_LIMIT_PER_MINUTE = String(MAX_LIMIT);
+
+  let allowed = 0;
+  for (let i = 0; i < 200; i += 1) {
+    if (checkRateLimit(`203.0.113.${i % 256}`).allowed) allowed += 1;
+  }
+
+  assert.equal(allowed, Math.max(GLOBAL_LIMIT, MAX_LIMIT));
+  assert.ok(allowed < 200);
+});
+
+test("the ceiling never sits below a single caller's own allowance", () => {
+  // Otherwise raising the per-caller limit for local testing would block that
+  // caller before their own limit was reached, which reads as a bug.
+  process.env.AUDIT_RATE_LIMIT_PER_MINUTE = String(MAX_LIMIT);
+
+  for (let i = 0; i < MAX_LIMIT; i += 1) {
+    assert.equal(checkRateLimit("198.51.100.30").allowed, true, `request ${i + 1}`);
+  }
+});
+
+test("a 429 still carries a usable Retry-After, whichever limit refused it", () => {
+  const at = Date.now();
+  for (let i = 0; i < GLOBAL_LIMIT; i += 1) checkRateLimit(`203.0.113.${i}`, at);
+
+  const global = checkRateLimit("198.51.100.40", at);
+  assert.equal(global.allowed, false);
+  assert.equal(global.scope, "global");
+  assert.ok(global.retryAfterSeconds >= 1 && global.retryAfterSeconds <= 60);
+  assert.equal(global.remaining, 0);
 });

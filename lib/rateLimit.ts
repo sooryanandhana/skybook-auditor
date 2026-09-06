@@ -96,8 +96,37 @@ function configuredLimit(): number {
   return parsed;
 }
 
+/**
+ * The most audits this server will start in a minute, whoever asks.
+ *
+ * WHY A SECOND LIMIT EXISTS AT ALL. The per-caller limit is keyed on the
+ * caller's address, and that address is read from `x-forwarded-for` — a header
+ * the client sets. With nothing but a proxy header telling us who is who, a
+ * script that changes it on every request is a new caller every time and never
+ * reaches any limit at all. That is not a theoretical hole: it is one line of
+ * code, and it spends a metered Google quota today and paid API credit later.
+ *
+ * This ceiling is counted across every caller together, so no header can move
+ * a request out from under it. It is deliberately NOT configurable — a limit
+ * that exists because the other one can be evaded is worth nothing if it can
+ * be turned off the same way.
+ *
+ * Three times the per-caller default, so several honest people sharing one
+ * machine or one office address can each use their full allowance without
+ * meeting it, while a runaway script stops here instead of running all night.
+ */
+export const GLOBAL_LIMIT = 30;
+
 /** When each caller's recent requests happened. */
 const recentRequests = new Map<string, number[]>();
+
+/**
+ * When ANY request happened, regardless of who made it.
+ *
+ * A separate list rather than a sum over the map above, because the map is
+ * pruned of idle callers and a total taken from it would quietly shrink.
+ */
+let globalRequests: number[] = [];
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -106,6 +135,14 @@ export interface RateLimitResult {
   /** Seconds until the caller may try again. Only meaningful when blocked. */
   retryAfterSeconds: number;
   limit: number;
+  /**
+   * Which limit answered.
+   *
+   * "caller" is this caller's own allowance. "global" is the server-wide
+   * ceiling, which means other traffic used the budget up — worth telling
+   * apart when reading logs, and worth not blaming the caller for.
+   */
+  scope: "caller" | "global";
 }
 
 /**
@@ -117,26 +154,64 @@ export interface RateLimitResult {
  */
 export function checkRateLimit(caller: string, now: number = Date.now()): RateLimitResult {
   const limit = configuredLimit();
+  /*
+   * Never below the per-caller limit. The override can raise a single caller's
+   * allowance for local testing, and a ceiling underneath it would block that
+   * caller before their own limit was reached — which reads as a bug rather
+   * than as a limit. In production the override is ignored, so this is 30.
+   */
+  const ceiling = Math.max(GLOBAL_LIMIT, limit);
   const windowStart = now - WINDOW_MS;
 
   const previous = recentRequests.get(caller) ?? [];
   const withinWindow = previous.filter((at) => at > windowStart);
+  const globalWithinWindow = globalRequests.filter((at) => at > windowStart);
+
+  /*
+   * RACE SAFETY: everything from here to the end of the function is
+   * synchronous. There is no await, so two requests arriving at once cannot
+   * interleave between the count and the record — the second one runs only
+   * after the first has finished writing. This is the same reasoning that lets
+   * the audit scheduler reserve its slot before starting any work, and it is
+   * the reason neither needs a lock.
+   */
 
   if (withinWindow.length >= limit) {
     // Keep the trimmed list so memory does not grow, but do not record this
-    // attempt — a blocked caller should not extend their own lockout.
+    // attempt — a blocked caller should not extend their own lockout. It does
+    // not touch the global count either: a refused request costs nothing, so
+    // it must not spend everyone else's budget.
     recentRequests.set(caller, withinWindow);
+    globalRequests = globalWithinWindow;
     const oldest = withinWindow[0];
     return {
       allowed: false,
       remaining: 0,
       retryAfterSeconds: Math.max(1, Math.ceil((oldest + WINDOW_MS - now) / 1000)),
       limit,
+      scope: "caller",
+    };
+  }
+
+  if (globalWithinWindow.length >= ceiling) {
+    // The caller has allowance left, but the server does not. Recorded against
+    // neither, for the same reason as above.
+    recentRequests.set(caller, withinWindow);
+    globalRequests = globalWithinWindow;
+    const oldest = globalWithinWindow[0];
+    return {
+      allowed: false,
+      remaining: 0,
+      retryAfterSeconds: Math.max(1, Math.ceil((oldest + WINDOW_MS - now) / 1000)),
+      limit: ceiling,
+      scope: "global",
     };
   }
 
   withinWindow.push(now);
   recentRequests.set(caller, withinWindow);
+  globalWithinWindow.push(now);
+  globalRequests = globalWithinWindow;
 
   // Occasionally clear out callers who have gone quiet, so the map does not
   // grow without bound on a long-running server.
@@ -147,6 +222,7 @@ export function checkRateLimit(caller: string, now: number = Date.now()): RateLi
     remaining: limit - withinWindow.length,
     retryAfterSeconds: 0,
     limit,
+    scope: "caller",
   };
 }
 
@@ -159,11 +235,19 @@ function pruneIdleCallers(windowStart: number): void {
 /**
  * Works out who is calling.
  *
- * NOTE ON TRUST: `x-forwarded-for` is set by proxies and can be forged by a
- * caller when the app is reached directly. That is acceptable here because
- * this limit exists to stop accidental runaway usage and casual abuse, not a
- * determined attacker. If this is ever placed behind a real proxy, only that
- * proxy's value should be trusted.
+ * NOTE ON TRUST: `x-forwarded-for` is set by proxies and CAN BE FORGED by a
+ * caller when the app is reached directly. Nothing here can tell a genuine
+ * proxy header from an invented one, so nothing here tries: a caller who
+ * changes the header on every request is a new caller every time, and their
+ * per-caller allowance never runs out.
+ *
+ * That is why this is not the only limit. `GLOBAL_LIMIT` is counted across all
+ * callers together and no header can move a request out from under it. This
+ * function decides who gets their own allowance; the ceiling decides how much
+ * the server will do in total.
+ *
+ * If this is ever placed behind a real proxy, only that proxy's value should
+ * be trusted, and this is the function to change.
  */
 export function callerKey(request: Request): string {
   const forwarded = request.headers.get("x-forwarded-for");
@@ -178,5 +262,6 @@ export function callerKey(request: Request): string {
 /** Test helper: forget all recorded requests and any warning already given. */
 export function resetRateLimits(): void {
   recentRequests.clear();
+  globalRequests = [];
   warnedAboutValue = null;
 }

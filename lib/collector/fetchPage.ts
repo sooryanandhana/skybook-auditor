@@ -71,6 +71,37 @@ export interface FetchedPage {
   uptime: UptimeCheck;
 }
 
+/**
+ * The reason given when a URL answered, but with something other than a page.
+ *
+ * A PDF, an image, a JSON feed. The server is healthy and the address is real —
+ * it simply is not a web page, which is a different fact from "we could not
+ * reach it". Named rather than written inline so a caller that needs to tell
+ * those apart compares a symbol instead of an English sentence that someone
+ * might one day reword.
+ */
+export const NOT_A_WEB_PAGE = "That address doesn't point to a web page.";
+
+/**
+ * The reason given when the server never said what it was sending.
+ *
+ * DELIBERATELY NOT `NOT_A_WEB_PAGE`, and that distinction is the whole point.
+ * A response carrying `Content-Type: application/pdf` is a statement by the
+ * server: this is not a page. A response carrying no Content-Type at all is
+ * the absence of a statement, and the two must not produce the same sentence.
+ *
+ * The wording says what was measured — the server did not declare a type — and
+ * what followed from it, rather than asserting anything about the address. The
+ * page is not read, because reading an undeclared body as HTML would be
+ * guessing; a browser sniffs, and this deliberately does not.
+ *
+ * Its own symbol, like NOT_A_WEB_PAGE, so a caller that needs to tell the two
+ * apart compares a constant rather than an English sentence someone may
+ * one day reword.
+ */
+export const UNDECLARED_CONTENT_TYPE =
+  "The server did not say what kind of file this address returns, so it was not read as a web page.";
+
 export type FetchPageResult =
   | { ok: true; page: FetchedPage }
   /**
@@ -180,13 +211,22 @@ export async function fetchPage(
    * fetch — so calling fetchPage on its own still cannot run forever.
    */
   deadline: Deadline = createDeadline(TOTAL_TIMEOUT_MS),
+  /**
+   * The most of one page body to read.
+   *
+   * Configurable so a caller that declares a response limit actually gets it.
+   * The crawler passes its own `maxResponseBytes`; before this it could set
+   * that value and be silently given the default instead — a limit the API
+   * advertised and did not honour.
+   */
+  maxBytes: number = MAX_BYTES,
 ): Promise<FetchPageResult> {
   const normalized = normalizeUrl(rawUrl);
   if (!normalized.ok) {
     return { ok: false, reason: normalized.reason, uptime: null };
   }
 
-  const first = await attemptFetch(normalized.url, deadline, false);
+  const first = await attemptFetch(normalized.url, deadline, false, undefined, maxBytes);
 
   // If we *guessed* https and simply couldn't connect, the site may only
   // support plain http. Retrying tells us something worth knowing, rather
@@ -209,7 +249,7 @@ export async function fetchPage(
     httpUrl.protocol = "http:";
     // Pass along why HTTPS failed, so a broken certificate is still reported
     // even though we ended up reading the page over plain HTTP.
-    const second = await attemptFetch(httpUrl, deadline, true, first.certificateProblem);
+    const second = await attemptFetch(httpUrl, deadline, true, first.certificateProblem, maxBytes);
     // Only prefer the http result if it actually worked.
     if (second.ok) return second;
   }
@@ -223,6 +263,7 @@ async function attemptFetch(
   deadline: Deadline,
   httpsUnavailable: boolean,
   certificateProblem?: CertificateProblem,
+  maxBytes: number = MAX_BYTES,
 ): Promise<FetchPageResult> {
   let currentUrl = startUrl;
   const redirectChain: string[] = [currentUrl.toString()];
@@ -315,13 +356,42 @@ async function attemptFetch(
       return { ok: false, reason: describeErrorStatus(response.status), uptime };
     }
 
-    // Make sure we got a web page, not a PDF or an image.
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!contentType.includes("html")) {
-      return { ok: false, reason: "That address doesn't point to a web page.", uptime };
+    /*
+     * WHAT KIND OF THING DID WE JUST RECEIVE? THREE ANSWERS, NOT TWO.
+     *
+     *   an HTML type      a web page. Read it.
+     *   another type      the server said this is a PDF, an image, a feed.
+     *                     Not a page, and it said so.
+     *   NO TYPE AT ALL    the server did not say. That is not the same fact.
+     *
+     * The third used to be folded into the second, so a response with no
+     * Content-Type was refused with "That address doesn't point to a web
+     * page" — a claim about the client's website resting on nothing but a
+     * header the server omitted. It may well be a page; browsers sniff and
+     * render it. We do not sniff, so what we honestly have is "we could not
+     * establish what this is", and that is what it now says.
+     *
+     * Both refusals return HERE, before the body is read, so an undeclared
+     * response is never parsed as HTML and never reaches the size cap — there
+     * is nothing to cap, because nothing is downloaded. The address has
+     * already passed the safety check for this hop, and nothing about that
+     * changes.
+     *
+     * The comparison is lower-cased because media types are case-insensitive
+     * and `TEXT/HTML` is a perfectly ordinary thing for a server to send. It
+     * used to be refused as not a web page.
+     */
+    const declaredType = response.headers.get("content-type");
+    if (declaredType === null || declaredType.trim() === "") {
+      return { ok: false, reason: UNDECLARED_CONTENT_TYPE, uptime };
     }
 
-    const body = await readCapped(response);
+    const contentType = declaredType;
+    if (!contentType.toLowerCase().includes("html")) {
+      return { ok: false, reason: NOT_A_WEB_PAGE, uptime };
+    }
+
+    const body = await readCapped(response, maxBytes);
     if (body === null) {
       return { ok: false, reason: "That page could not be read in full.", uptime };
     }
@@ -365,7 +435,7 @@ async function attemptFetch(
  * We read it in pieces rather than all at once, so an enormous file gets
  * abandoned early instead of being loaded into memory first.
  */
-async function readCapped(response: Response): Promise<Uint8Array | null> {
+async function readCapped(response: Response, maxBytes: number): Promise<Uint8Array | null> {
   if (!response.body) return new Uint8Array(0);
 
   const reader = response.body.getReader();
@@ -377,7 +447,7 @@ async function readCapped(response: Response): Promise<Uint8Array | null> {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.length;
-      if (total > MAX_BYTES) {
+      if (total > maxBytes) {
         await reader.cancel();
         return null;
       }

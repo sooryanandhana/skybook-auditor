@@ -1,0 +1,288 @@
+/**
+ * Tests for the in-memory job store.
+ *
+ * The properties that matter: a job's outcome is written exactly once, an
+ * expired job is gone rather than stale, and nothing here ever invents a state
+ * for something it no longer holds.
+ */
+import { strict as assert } from "node:assert";
+import test from "node:test";
+import {
+  createJobStore,
+  EMPTY_PROGRESS,
+  isTerminal,
+  JOB_TTL_MS,
+  type JobProgress,
+} from "./jobStore.ts";
+
+/** A store with a clock and ids the test drives by hand. */
+function storeAt(startMs = 0, ttlMs = 1_000) {
+  let value = startMs;
+  let counter = 0;
+  const store = createJobStore<{ tag: string }>({
+    ttlMs,
+    now: () => value,
+    newId: () => `job-${++counter}`,
+  });
+  return { store, advance: (ms: number) => (value += ms), now: () => value };
+}
+
+const progress = (overrides: Partial<JobProgress> = {}): JobProgress => ({
+  ...EMPTY_PROGRESS,
+  ...overrides,
+});
+
+// ---------------------------------------------------------------------------
+// Creating and reading
+// ---------------------------------------------------------------------------
+
+test("a new job starts queued, with nothing measured", () => {
+  const { store } = storeAt();
+  const job = store.create("https://example.com/");
+
+  assert.equal(job.status, "queued");
+  assert.equal(job.requestedUrl, "https://example.com/");
+  assert.equal(job.result, null);
+  assert.equal(job.error, null);
+  // Not a hopeful zero-of-something: nothing has happened yet.
+  assert.deepEqual(job.progress, EMPTY_PROGRESS);
+  assert.equal(job.progress.complete, false);
+});
+
+test("a job can be read back by its id", () => {
+  const { store } = storeAt();
+  const created = store.create("https://example.com/");
+
+  assert.equal(store.get(created.id)?.id, created.id);
+});
+
+test("every job gets its own id", () => {
+  const store = createJobStore<{ tag: string }>();
+  const ids = new Set(Array.from({ length: 20 }, () => store.create("https://x.test/").id));
+
+  assert.equal(ids.size, 20);
+});
+
+test("callers get a snapshot, never the store's own record", () => {
+  // Handing out the live object would let anything holding it rewrite a job's
+  // status by accident, and a route holding one across an await would read
+  // state that had changed underneath it.
+  const { store } = storeAt();
+  const created = store.create("https://example.com/");
+
+  created.status = "completed";
+  created.result = { tag: "forged" };
+  created.progress.evaluated = 999;
+
+  const stored = store.get(created.id);
+  assert.equal(stored?.status, "queued");
+  assert.equal(stored?.result, null);
+  assert.equal(stored?.progress.evaluated, 0);
+
+  // And the same for a read: mutating what get() returned changes nothing.
+  if (stored !== null && stored !== undefined) stored.status = "failed";
+  assert.equal(store.get(created.id)?.status, "queued");
+});
+
+test("an unknown id is null, not an invented job", () => {
+  const { store } = storeAt();
+
+  assert.equal(store.get("no-such-job"), null);
+  assert.equal(store.get(""), null);
+});
+
+// ---------------------------------------------------------------------------
+// Status transitions
+// ---------------------------------------------------------------------------
+
+test("queued to running to completed", () => {
+  const { store } = storeAt();
+  const { id } = store.create("https://example.com/");
+
+  store.markRunning(id);
+  assert.equal(store.get(id)?.status, "running");
+
+  store.finish(id, "completed", { tag: "done" });
+  assert.equal(store.get(id)?.status, "completed");
+  assert.deepEqual(store.get(id)?.result, { tag: "done" });
+});
+
+test("a partial crawl is its own terminal state, with its result kept", () => {
+  const { store } = storeAt();
+  const { id } = store.create("https://example.com/");
+
+  store.markRunning(id);
+  store.finish(id, "partial", { tag: "some-of-it" });
+
+  const job = store.get(id);
+  assert.equal(job?.status, "partial");
+  // The findings are real and are still there. What changed is the claim.
+  assert.deepEqual(job?.result, { tag: "some-of-it" });
+  assert.equal(job?.progress.complete, false, "partial is never complete");
+});
+
+test("completing sets progress.complete; partial does not", () => {
+  const { store } = storeAt();
+
+  const a = store.create("https://a.test/");
+  store.finish(a.id, "completed", { tag: "x" });
+  assert.equal(store.get(a.id)?.progress.complete, true);
+
+  const b = store.create("https://b.test/");
+  store.finish(b.id, "partial", { tag: "x" });
+  assert.equal(store.get(b.id)?.progress.complete, false);
+});
+
+test("a failed job keeps its message and holds no result", () => {
+  const { store } = storeAt();
+  const { id } = store.create("https://example.com/");
+
+  store.markRunning(id);
+  store.fail(id, "That website address could not be found.");
+
+  const job = store.get(id);
+  assert.equal(job?.status, "failed");
+  assert.equal(job?.error, "That website address could not be found.");
+  assert.equal(job?.result, null);
+});
+
+test("THE FIRST TERMINAL WRITE WINS", () => {
+  // A late error must not overwrite a good result, and a result must not
+  // overwrite a failure that already happened.
+  const { store } = storeAt();
+
+  const a = store.create("https://a.test/");
+  store.finish(a.id, "completed", { tag: "first" });
+  store.finish(a.id, "partial", { tag: "second" });
+  store.fail(a.id, "too late");
+  assert.equal(store.get(a.id)?.status, "completed");
+  assert.deepEqual(store.get(a.id)?.result, { tag: "first" });
+
+  const b = store.create("https://b.test/");
+  store.fail(b.id, "the real reason");
+  store.finish(b.id, "completed", { tag: "too late" });
+  assert.equal(store.get(b.id)?.status, "failed");
+  assert.equal(store.get(b.id)?.error, "the real reason");
+  assert.equal(store.get(b.id)?.result, null);
+});
+
+test("a terminal job stops accepting progress", () => {
+  const { store } = storeAt();
+  const { id } = store.create("https://example.com/");
+
+  store.finish(id, "completed", { tag: "x" });
+  store.setProgress(id, progress({ evaluated: 99 }));
+  store.markRunning(id);
+
+  assert.equal(store.get(id)?.status, "completed");
+  assert.equal(store.get(id)?.progress.evaluated, 0);
+});
+
+test("updating an unknown job does nothing and throws nothing", () => {
+  const { store } = storeAt();
+
+  store.markRunning("nope");
+  store.setProgress("nope", progress({ evaluated: 5 }));
+  store.finish("nope", "completed", { tag: "x" });
+  store.fail("nope", "x");
+
+  assert.equal(store.size, 0);
+});
+
+test("isTerminal names exactly the three states that never change again", () => {
+  assert.equal(isTerminal("queued"), false);
+  assert.equal(isTerminal("running"), false);
+  assert.equal(isTerminal("completed"), true);
+  assert.equal(isTerminal("partial"), true);
+  assert.equal(isTerminal("failed"), true);
+});
+
+// ---------------------------------------------------------------------------
+// Progress
+// ---------------------------------------------------------------------------
+
+test("progress is stored as given, and copied rather than shared", () => {
+  const { store } = storeAt();
+  const { id } = store.create("https://example.com/");
+
+  const live = progress({ discovered: 40, queued: 28, evaluated: 12 });
+  store.setProgress(id, live);
+  live.evaluated = 999;
+
+  assert.equal(store.get(id)?.progress.evaluated, 12);
+  assert.equal(store.get(id)?.progress.discovered, 40);
+});
+
+test("progress carries counts and never a percentage", () => {
+  // There is no honest denominator while a crawl is running, so there is no
+  // field here that could hold one.
+  assert.deepEqual(Object.keys(EMPTY_PROGRESS).sort(), [
+    "complete",
+    "discovered",
+    "evaluated",
+    "queued",
+    "robotsExcluded",
+    "skippedNonHtml",
+    "unavailable",
+  ]);
+});
+
+// ---------------------------------------------------------------------------
+// Expiry
+// ---------------------------------------------------------------------------
+
+test("a job disappears once its time is up", () => {
+  const { store, advance } = storeAt(0, 1_000);
+  const { id } = store.create("https://example.com/");
+
+  advance(999);
+  assert.notEqual(store.get(id), null);
+
+  advance(1);
+  assert.equal(store.get(id), null, "expired is gone, not stale");
+  assert.equal(store.size, 0);
+});
+
+test("work on a job keeps it alive", () => {
+  // A long crawl must not expire out from underneath itself.
+  const { store, advance } = storeAt(0, 1_000);
+  const { id } = store.create("https://example.com/");
+
+  for (let i = 0; i < 5; i += 1) {
+    advance(900);
+    store.setProgress(id, progress({ evaluated: i }));
+  }
+
+  advance(900);
+  assert.notEqual(store.get(id), null, "still alive after 4500ms of a 1000ms ttl");
+});
+
+test("a finished job stays readable for its full time, then goes", () => {
+  const { store, advance } = storeAt(0, 1_000);
+  const { id } = store.create("https://example.com/");
+  store.finish(id, "completed", { tag: "x" });
+
+  advance(999);
+  assert.equal(store.get(id)?.status, "completed");
+
+  advance(2);
+  assert.equal(store.get(id), null);
+});
+
+test("sweeping drops only the jobs that are actually expired", () => {
+  const { store, advance } = storeAt(0, 1_000);
+  const old = store.create("https://old.test/");
+  advance(600);
+  const fresh = store.create("https://fresh.test/");
+  advance(500);
+
+  store.sweep();
+
+  assert.equal(store.get(old.id), null);
+  assert.notEqual(store.get(fresh.id), null);
+  assert.equal(store.size, 1);
+});
+
+test("the default lifetime is half an hour", () => {
+  assert.equal(JOB_TTL_MS, 30 * 60 * 1000);
+});

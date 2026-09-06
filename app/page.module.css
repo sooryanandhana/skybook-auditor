@@ -130,6 +130,16 @@
   padding: 0.6rem 0.8rem;
 }
 
+/* One line of counts while a crawl runs. Deliberately plain: it reports
+   numbers, and there is no percentage because there is no honest denominator. */
+.progressLine {
+  font-size: 0.85rem;
+  color: #5b6779;
+  margin-top: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+
 .error {
   font-size: 0.92rem;
   color: #a3312a;
@@ -288,6 +298,64 @@
   margin-top: 0.15rem;
 }
 
+/* The fixed action attached to a finding. Muted, because the problem and the
+   evidence for it are what a reader scans first. */
+.remediation {
+  font-size: 0.85rem;
+  color: #5b6779;
+  margin-top: 0.35rem;
+}
+
+/* ---------- Checks that did not run ----------
+
+   Visually secondary on purpose. These are neither problems nor passes, so
+   they get no badge, no severity colour, and none of the card treatment the
+   findings above use. */
+.skipped {
+  margin-top: 1.5rem;
+  border-top: 1px solid #e6ebf2;
+  padding-top: 1rem;
+}
+
+.skippedHeading {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #5b6779;
+}
+
+.skippedIntro {
+  font-size: 0.82rem;
+  color: #7a8699;
+  margin-top: 0.2rem;
+}
+
+.skippedList {
+  list-style: none;
+  margin-top: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.skippedItem {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  /* Long rule ids and reasons wrap rather than widening the page. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.skippedId {
+  display: block;
+  color: #5b6779;
+  font-weight: 600;
+}
+
+.skippedReason {
+  display: block;
+  color: #7a8699;
+}
+
 /* ---------- Severity badges ---------- */
 
 .badge {
@@ -323,6 +391,186 @@
   color: #2f6b41;
 }
 
+
+/* ---------- Site-wide findings (Stage 4G) ---------- */
+
+.findingGroup {
+  margin-top: 1.4rem;
+}
+
+.groupHeading {
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: #16202e;
+  margin-bottom: 0.15rem;
+}
+
+.groupIntro {
+  font-size: 0.82rem;
+  color: #5b6779;
+  margin-bottom: 0.6rem;
+  max-width: 62ch;
+}
+
+.findingBody {
+  min-width: 0; /* lets long words wrap instead of stretching the card */
+}
+
+.findingMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  align-items: center;
+  margin: 0.25rem 0 0.4rem;
+  font-size: 0.78rem;
+}
+
+/* Scope is stated in words, so colour is never the only signal. */
+.scopeSite,
+.scopePage {
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.scopeSite {
+  background: #e4ecf8;
+  color: #24457d;
+}
+
+.scopePage {
+  background: #eceff3;
+  color: #4a5567;
+}
+
+.reach {
+  color: #5b6779;
+  font-variant-numeric: tabular-nums;
+}
+
+.affected {
+  margin-top: 0.55rem;
+}
+
+.affectedToggle {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: #24457d;
+  font-weight: 600;
+  padding: 0.15rem 0;
+}
+
+.affectedToggle:focus-visible {
+  outline: 2px solid #147ac3;
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.affectedSample {
+  font-weight: 400;
+  color: #5b6779;
+}
+
+.affectedList {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.affectedItem {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.35rem 0.5rem;
+  background: #f6f8fb;
+  border-radius: 6px;
+}
+
+.affectedUrl {
+  font-size: 0.8rem;
+  color: #16202e;
+  /* Long URLs wrap rather than pushing the card sideways. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.affectedEvidence {
+  font-size: 0.76rem;
+  color: #5b6779;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Crawl summary ---------- */
+
+.crawlComplete,
+.crawlPartial {
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  margin-top: 1rem;
+  border: 1px solid #d8e0ea;
+  background: #f6f8fb;
+}
+
+.crawlPartial {
+  border-color: #efdcae;
+  background: #fdf4e0;
+}
+
+.crawlHeading {
+  font-size: 0.9rem;
+  font-weight: 650;
+  color: #16202e;
+  margin-bottom: 0.25rem;
+}
+
+.crawlHeadline {
+  font-size: 0.85rem;
+  color: #16202e;
+  max-width: 68ch;
+}
+
+.crawlReason {
+  font-size: 0.82rem;
+  color: #5b6779;
+  margin-top: 0.25rem;
+  max-width: 68ch;
+}
+
+.crawlFacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.4rem;
+  margin-top: 0.7rem;
+}
+
+.crawlFact {
+  display: flex;
+  flex-direction: column;
+}
+
+.crawlFactLabel {
+  font-size: 0.72rem;
+  color: #5b6779;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.crawlFactValue {
+  font-size: 1.05rem;
+  font-weight: 650;
+  color: #16202e;
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+
+@media (max-width: 520px) {
+  .crawlFacts {
+    gap: 0.5rem 1rem;
+  }
+}
+
 /* ---------- Dark mode ---------- */
 
 @media (prefers-color-scheme: dark) {
@@ -335,8 +583,23 @@
   .emptyFindings,
   .factNote,
   .fact dt,
-  .uptime dt {
+  .uptime dt,
+  /* Added with the findings/skipped panels, and originally left out of this
+     list. On the dark background their light-mode grey (#5b6779) measured
+     3.5:1 against #0a0a0a — below the 4.5:1 WCAG AA needs for body text — so
+     the remediation line on every finding was harder to read than the evidence
+     directly above it. */
+  .remediation,
+  .skippedHeading,
+  .skippedIntro,
+  .skippedId,
+  .skippedReason {
     color: #9aa7be;
+  }
+
+  /* A light hairline is invisible on a near-black background. */
+  .skipped {
+    border-top-color: #22303f;
   }
 
   .input,
@@ -367,6 +630,10 @@
     border-color: #4a3c1c;
   }
 
+  .progressLine {
+    color: #9aa7be;
+  }
+
   .error {
     color: #e79288;
     background: #3a1f1c;
@@ -392,4 +659,398 @@
     background: #1e3327;
     color: #7cc396;
   }
+
+  /* ---------- Site-wide findings, dark ---------- */
+
+  .groupHeading,
+  .crawlHeading,
+  .crawlHeadline,
+  .crawlFactValue,
+  .affectedUrl {
+    color: #e6edf5;
+  }
+
+  .groupIntro,
+  .reach,
+  .affectedSample,
+  .affectedEvidence,
+  .crawlReason,
+  .crawlFactLabel {
+    color: #9aa7be;
+  }
+
+  .scopeSite {
+    background: #1d3557;
+    color: #cfe0fb;
+  }
+
+  .scopePage {
+    background: #232c39;
+    color: #c3ccdb;
+  }
+
+  .affectedToggle {
+    color: #7fb6ea;
+  }
+
+  .affectedItem {
+    background: #161d27;
+  }
+
+  .crawlComplete {
+    border-color: #22303f;
+    background: #141b24;
+  }
+
+  .crawlPartial {
+    border-color: #4a3d1c;
+    background: #241f12;
+  }
+
+}
+
+/* ---------------------------------------------------------------------------
+   Audit progress
+
+   A 30-60 second wait has to read as deliberate work rather than a hang. The
+   design does that with structure and copy, not motion: one small spinner per
+   phase, and nothing else moves.
+   --------------------------------------------------------------------------- */
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.progressPhase {
+  border: 1px solid color-mix(in srgb, var(--foreground) 12%, transparent);
+  border-radius: 12px;
+  padding: 1.25rem;
+  background: color-mix(in srgb, var(--foreground) 2%, transparent);
+}
+
+.phaseHead {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.phaseTitle {
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.phaseText {
+  margin-top: 0.25rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--foreground) 70%, transparent);
+}
+
+.phaseNote {
+  margin-top: 0.875rem;
+  padding-top: 0.875rem;
+  border-top: 1px solid color-mix(in srgb, var(--foreground) 10%, transparent);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--foreground) 60%, transparent);
+}
+
+.stageList {
+  list-style: none;
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.stage {
+  display: flex;
+  align-items: baseline;
+  gap: 0.625rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.stageIcon {
+  flex: none;
+  width: 1rem;
+  text-align: center;
+  color: color-mix(in srgb, var(--foreground) 40%, transparent);
+}
+
+.stageLabel {
+  color: color-mix(in srgb, var(--foreground) 78%, transparent);
+  /* Long stage names wrap rather than pushing the card sideways. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The state is written out as well as drawn, so it never depends on colour. */
+.stageState {
+  margin-left: auto;
+  flex: none;
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--foreground) 45%, transparent);
+}
+
+.progressStatus {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--foreground) 72%, transparent);
+  padding: 0 0.25rem;
+}
+
+.elapsed {
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--foreground) 50%, transparent);
+}
+
+.spinner {
+  flex: none;
+  width: 1.125rem;
+  height: 1.125rem;
+  margin-top: 0.125rem;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--brand) 25%, transparent);
+  border-top-color: var(--brand);
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/*
+  Reduced motion: the ring stays, so the active phase is still marked out, but
+  nothing rotates. The live region already carries the same information in
+  words, so nothing is lost by stopping the animation entirely.
+*/
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-top-color: color-mix(in srgb, var(--brand) 25%, transparent);
+    border-left-color: var(--brand);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Performance opt-in
+   --------------------------------------------------------------------------- */
+
+.toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  margin-top: 0.875rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.toggle input {
+  flex: none;
+  margin-top: 0.1875rem;
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+.toggle input:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.toggleNote {
+  display: block;
+  font-size: 0.8125rem;
+  color: color-mix(in srgb, var(--foreground) 58%, transparent);
+}
+
+/* ---------------------------------------------------------------------------
+   Performance results
+   --------------------------------------------------------------------------- */
+
+.completeBadge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--brand);
+  margin-bottom: 0.375rem;
+}
+
+.perfPanel {
+  margin-top: 1.75rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 12%, transparent);
+  border-radius: 12px;
+  padding: 1.25rem;
+}
+
+/*
+  A failed speed check is marked, but not in red. It is not an error in the
+  audit — the audit worked — and colouring it like one would make the whole
+  report look broken over a problem the client does not have.
+*/
+.perfUnavailable {
+  border-left: 3px solid color-mix(in srgb, var(--foreground) 30%, transparent);
+}
+
+.perfSummary {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  margin-top: 0.25rem;
+}
+
+.perfReason {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+}
+
+.perfMuted {
+  font-size: 0.875rem;
+  line-height: 1.6;
+  margin-top: 0.5rem;
+  color: color-mix(in srgb, var(--foreground) 65%, transparent);
+}
+
+.perfSplit {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.perfBlock {
+  border: 1px solid color-mix(in srgb, var(--foreground) 10%, transparent);
+  border-radius: 10px;
+  padding: 1rem;
+  min-width: 0;
+}
+
+.perfBlockTitle {
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.perfScope {
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--foreground) 58%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.perfScore {
+  margin-top: 0.75rem;
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.perfScoreOutOf {
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: color-mix(in srgb, var(--foreground) 55%, transparent);
+}
+
+.perfMetrics {
+  margin-top: 0.875rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.perfMetric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.perfMetric dt {
+  color: color-mix(in srgb, var(--foreground) 68%, transparent);
+}
+
+.perfMetric dd {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.perfRating {
+  font-size: 0.75rem;
+  color: color-mix(in srgb, var(--foreground) 55%, transparent);
+}
+
+.perfNotes {
+  margin-top: 1.25rem;
+  font-size: 0.875rem;
+}
+
+.perfNotes summary {
+  cursor: pointer;
+  color: color-mix(in srgb, var(--foreground) 68%, transparent);
+}
+
+.perfNotes summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.perfNotes ul {
+  margin-top: 0.625rem;
+  padding-left: 1.125rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--foreground) 68%, transparent);
+}
+
+.perfNotes li {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 30rem) {
+  .progressPhase,
+  .perfPanel {
+    padding: 1rem;
+  }
+
+  /* On a narrow screen the uppercase state label would squeeze the stage name
+     into a column of single words, so it drops below instead. */
+  .stage {
+    flex-wrap: wrap;
+  }
+
+  .stageState {
+    margin-left: 1.625rem;
+  }
+}
+
+/* The running speed check sits under a finished audit, so its heading matches
+   the other result headings rather than the loading UI above it. */
+.perfRunningTitle {
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* A metric Google did not return. Muted and non-numeric on purpose, so it
+   never reads as a score sitting alongside the real ones. */
+.perfNotReported {
+  font-size: 0.8125rem;
+  color: color-mix(in srgb, var(--foreground) 52%, transparent);
 }

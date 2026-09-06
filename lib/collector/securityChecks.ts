@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import { relTokens } from "./relTokens.ts";
 import type {
   CookieData,
   CookieInfo,
@@ -483,7 +484,8 @@ export function classifyLink(
 ): MixedContentKind | null {
   if (!rel) return null;
 
-  const tokens = rel.toLowerCase().trim().split(/\s+/);
+  // The shared reader, so this and the SEO canonical check cannot drift apart.
+  const tokens = relTokens(rel);
 
   if (tokens.includes("preload")) {
     // What a preload fetches is entirely decided by its `as` attribute.

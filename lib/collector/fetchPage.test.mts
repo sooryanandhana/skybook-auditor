@@ -15,6 +15,8 @@ import {
   classifyConnectionError,
   decodeHtml,
   describeErrorStatus,
+  NOT_A_WEB_PAGE,
+  UNDECLARED_CONTENT_TYPE,
 } from "./fetchPage.ts";
 import { createDeadline } from "./deadline.ts";
 
@@ -440,4 +442,198 @@ test("falls back to the <meta charset> tag when the header is silent", () => {
 test("falls back to UTF-8 when the declared encoding is unknown", () => {
   const bytes = new TextEncoder().encode("<html>hello</html>");
   assert.match(decodeHtml(bytes, "text/html; charset=not-a-real-encoding"), /hello/);
+});
+
+// ---------------------------------------------------------------------------
+// The caller's byte limit is honoured
+// ---------------------------------------------------------------------------
+
+test("a body over the caller's limit is refused, not silently truncated", async () => {
+  // A partly-read page would be graded as though it were the whole page —
+  // missing headings and images that are simply past the cut.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("x".repeat(50_000), {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    })) as typeof fetch;
+
+  try {
+    const result = await fetchPage("https://93.184.216.34/", createDeadline(5_000), 1_000);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /could not be read in full/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a body inside the caller's limit is read normally", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("<html><body>small</body></html>", {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    })) as typeof fetch;
+
+  try {
+    const result = await fetchPage("https://93.184.216.34/", createDeadline(5_000), 1_000_000);
+
+    assert.equal(result.ok, true);
+    if (result.ok) assert.match(result.page.html, /small/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// "IT IS NOT A PAGE" AND "THE SERVER DID NOT SAY" ARE DIFFERENT FACTS
+//
+// A response carrying `Content-Type: application/pdf` is a statement: this is
+// not a web page. A response carrying no Content-Type at all is the absence of
+// a statement. Both used to produce "That address doesn't point to a web
+// page", which asserts something about the client's website on the strength of
+// a header the server left out.
+//
+// `fetch` is replaced and the host is a public IP literal, so nothing here
+// contacts anything and no DNS query is needed.
+// ---------------------------------------------------------------------------
+
+const CT_HOST = "https://93.184.216.34";
+const CT_HTML = "<html><head><title>T</title></head><body><p>hello</p></body></html>";
+const realCtFetch = globalThis.fetch;
+
+async function fetchWithHeaders(
+  headers: Record<string, string> | null,
+  body = CT_HTML,
+  extra: { redirectFirst?: boolean } = {},
+) {
+  let hop = 0;
+  globalThis.fetch = (async () => {
+    hop += 1;
+    if (extra.redirectFirst && hop === 1) {
+      return new Response("", { status: 302, headers: { location: `${CT_HOST}/next` } });
+    }
+    /*
+     * The Response constructor INVENTS a Content-Type for a string body, so a
+     * fixture that simply omits the header is not testing a missing header at
+     * all. It has to be removed after the fact.
+     */
+    const response = new Response(body, { status: 200, headers: headers ?? {} });
+    if (headers === null) response.headers.delete("content-type");
+    return response;
+  }) as typeof fetch;
+
+  try {
+    return await fetchPage(`${CT_HOST}/`, createDeadline(10_000));
+  } finally {
+    globalThis.fetch = realCtFetch;
+  }
+}
+
+// --- a declared HTML type is read, whatever its spelling -------------------
+
+test("a declared HTML type is read as a page", async () => {
+  for (const value of [
+    "text/html",
+    "text/html; charset=utf-8",
+    "TEXT/HTML",
+    "Text/HTML; charset=UTF-8",
+    "application/xhtml+xml",
+  ]) {
+    const result = await fetchWithHeaders({ "content-type": value });
+    assert.equal(result.ok, true, value);
+    assert.equal(result.ok && result.page.contentType, value, "recorded exactly as sent");
+  }
+});
+
+test("an upper-cased type is no longer refused", async () => {
+  // Media types are case-insensitive, and `TEXT/HTML` used to be turned away
+  // as though the address were not a web page at all.
+  const result = await fetchWithHeaders({ "content-type": "TEXT/HTML" });
+
+  assert.equal(result.ok, true);
+  assert.ok(result.ok && result.page.html.includes("hello"));
+});
+
+// --- a declared NON-HTML type is still a statement we can repeat ------------
+
+test("a declared non-HTML type is still reported as not a web page", async () => {
+  for (const value of ["application/pdf", "image/png", "application/json", "text/plain"]) {
+    const result = await fetchWithHeaders({ "content-type": value });
+
+    assert.equal(result.ok, false, value);
+    assert.equal(!result.ok && result.reason, NOT_A_WEB_PAGE, value);
+  }
+});
+
+// --- NO type at all is its own answer --------------------------------------
+
+test("a missing Content-Type does NOT claim the address is not a web page", async () => {
+  const result = await fetchWithHeaders(null);
+
+  assert.equal(result.ok, false, "it is still not read as a page");
+  assert.equal(!result.ok && result.reason, UNDECLARED_CONTENT_TYPE);
+  assert.notEqual(!result.ok && result.reason, NOT_A_WEB_PAGE, "the two must stay apart");
+  // The sentence describes our own limit, not a fault in the website.
+  assert.match(!result.ok ? result.reason : "", /did not say/);
+});
+
+test("an empty Content-Type is treated as no Content-Type", async () => {
+  for (const value of ["", "   "]) {
+    const result = await fetchWithHeaders({ "content-type": value });
+    assert.equal(!result.ok && result.reason, UNDECLARED_CONTENT_TYPE, JSON.stringify(value));
+  }
+});
+
+test("an undeclared response is never read as a page", async () => {
+  // It must not become a successful audit of a page nobody confirmed existed.
+  const result = await fetchWithHeaders(null, "<html><body><h1>Looks like HTML</h1></body></html>");
+
+  assert.equal(result.ok, false, "looking like HTML is not being declared HTML");
+});
+
+test("an undeclared response is refused before its body is downloaded", async () => {
+  /*
+   * The size cap is not bypassed — there is nothing to cap, because the body is
+   * never read. Proved with a body that NEVER COMPLETES: if the fetch tried to
+   * read it, this test would hang instead of returning. A flag set inside the
+   * stream would prove nothing, because a stream fills its queue eagerly
+   * whether or not anybody is reading.
+   */
+  globalThis.fetch = (async () => {
+    const neverEnds = new ReadableStream({ pull() { /* never enqueues, never closes */ } });
+    const response = new Response(neverEnds, { status: 200 });
+    response.headers.delete("content-type");
+    return response;
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchPage(`${CT_HOST}/`, createDeadline(10_000));
+    assert.equal(!result.ok && result.reason, UNDECLARED_CONTENT_TYPE);
+  } finally {
+    globalThis.fetch = realCtFetch;
+  }
+});
+
+test("the answer comes from the FINAL response in a redirect chain", async () => {
+  // A redirect carries no content type of its own that matters; what counts is
+  // what the address we ended up at declared.
+  const undeclared = await fetchWithHeaders(null, CT_HTML, { redirectFirst: true });
+  assert.equal(!undeclared.ok && undeclared.reason, UNDECLARED_CONTENT_TYPE);
+
+  const declared = await fetchWithHeaders({ "content-type": "text/html" }, CT_HTML, {
+    redirectFirst: true,
+  });
+  assert.equal(declared.ok, true);
+  assert.equal(declared.ok && declared.page.redirectChain.length, 2, "the hop is still recorded");
+});
+
+test("an undeclared response still reports what the server DID tell us", async () => {
+  // The server answered, and that is a real measurement worth keeping.
+  const result = await fetchWithHeaders(null);
+
+  assert.ok(!result.ok && result.uptime !== null);
+  assert.equal(!result.ok && result.uptime?.isOnline, true);
+  assert.equal(!result.ok && result.uptime?.statusCode, 200);
 });

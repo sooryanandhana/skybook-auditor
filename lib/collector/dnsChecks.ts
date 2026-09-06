@@ -2,7 +2,13 @@ import { Resolver } from "node:dns/promises";
 import { isIP } from "node:net";
 import { isPublicAddress } from "./safety.ts";
 import type { Deadline } from "./deadline.ts";
-import type { DnsData, DnsRecordSet, EmailPolicyRecord, MxRecord } from "@/lib/types";
+import type {
+  DmarcPolicy,
+  DnsData,
+  DnsRecordSet,
+  EmailPolicyRecord,
+  MxRecord,
+} from "@/lib/types";
 
 /**
  * Looks up a domain's DNS records.
@@ -105,7 +111,7 @@ export async function runDnsChecks(hostname: string, deadline: Deadline): Promis
     ns,
     txt,
     spf: extractSpf(txt),
-    dmarc: await checkDmarc(dmarcHostname, lookups, deadline),
+    dmarc: await checkDmarc(emailDomain, lookups, deadline),
   };
 }
 
@@ -363,28 +369,211 @@ export function extractSpf(txt: DnsRecordSet<string>): EmailPolicyRecord {
  * derived one safe — they are different names and can resolve to different
  * addresses entirely.
  */
-async function checkDmarc(
-  dmarcHostname: string,
+export async function checkDmarc(
+  emailDomain: string,
   lookups: LookupCache,
   deadline: Deadline,
 ): Promise<DnsData["dmarc"]> {
-  const safety = await checkDnsNameIsSafe(dmarcHostname, lookups);
-  if (!safety.safe) {
-    return { hostname: dmarcHostname, status: "error", record: null, error: safety.reason };
+  const dmarcHostname = dmarcNameFor(emailDomain);
+
+  const direct = await readDmarcAt(dmarcHostname, lookups, deadline);
+
+  if (direct.status === "error") {
+    return {
+      hostname: dmarcHostname,
+      status: "error",
+      record: null,
+      error: direct.error,
+      appliesTo: emailDomain,
+      policyDomain: null,
+      inherited: false,
+      effectivePolicy: null,
+    };
   }
 
-  const txt = await lookup(() => lookups.resolveTxt(dmarcHostname), deadline);
-
-  if (txt.status === "error") {
-    return { hostname: dmarcHostname, status: "error", record: null, error: txt.error };
+  if (direct.status === "found") {
+    return {
+      hostname: dmarcHostname,
+      status: "found",
+      record: direct.record,
+      error: null,
+      appliesTo: emailDomain,
+      policyDomain: emailDomain,
+      inherited: false,
+      // A record on the domain itself governs that domain through `p=`.
+      // `sp=` is about its subdomains, and this is not one of them.
+      effectivePolicy: readPolicyTag(direct.record, "p"),
+      };
   }
+
+  /*
+   * No record of its own. That is NOT the end of the question.
+   *
+   * DMARC inherits: a subdomain with no record is covered by its
+   * organisational domain's, so stopping here reported "this domain publishes
+   * no DMARC record" about domains that are protected. Confirmed against a
+   * real site during the Phase 4 audit.
+   */
+  const parent = organisationalDomainFor(emailDomain);
+  if (parent === null) {
+    return {
+      hostname: dmarcHostname,
+      status: "absent",
+      record: null,
+      error: null,
+      appliesTo: emailDomain,
+      policyDomain: null,
+      inherited: false,
+      effectivePolicy: null,
+    };
+  }
+
+  const parentName = dmarcNameFor(parent);
+  const above = await readDmarcAt(parentName, lookups, deadline);
+
+  /*
+   * A FAILED PARENT LOOKUP IS NOT AN ABSENT POLICY.
+   *
+   * We established this domain has no record of its own, and then failed to
+   * find out whether one above it applies. That is "we do not know", and the
+   * whole point of the three states is that it must not collapse into
+   * "absent" — which is the sentence that becomes a finding.
+   */
+  if (above.status === "error") {
+    return {
+      hostname: parentName,
+      status: "error",
+      record: null,
+      error: above.error,
+      appliesTo: emailDomain,
+      policyDomain: null,
+      inherited: false,
+      effectivePolicy: null,
+    };
+  }
+
+  if (above.status === "absent") {
+    return {
+      hostname: dmarcHostname,
+      status: "absent",
+      record: null,
+      error: null,
+      appliesTo: emailDomain,
+      policyDomain: null,
+      inherited: false,
+      effectivePolicy: null,
+    };
+  }
+
+  return {
+    // The name we actually read the record from, so nothing has to guess.
+    hostname: parentName,
+    status: "found",
+    record: above.record,
+    error: null,
+    appliesTo: emailDomain,
+    policyDomain: parent,
+    inherited: true,
+    /*
+     * `sp=` is the tag that governs subdomains, so it wins here when the
+     * record sets one. Falling back to `p=` matches the specification: a
+     * record with no `sp=` applies its `p=` to subdomains too.
+     */
+    effectivePolicy: readPolicyTag(above.record, "sp") ?? readPolicyTag(above.record, "p"),
+  };
+}
+
+/** The name a domain's DMARC record lives at. */
+function dmarcNameFor(domain: string): string {
+  return `_dmarc.${domain}`;
+}
+
+/** One DMARC lookup, at one name. */
+type DmarcRead =
+  | { status: "found"; record: string }
+  | { status: "absent" }
+  /** `error` matches the record sets: a failure that carried no message is null. */
+  | { status: "error"; error: string | null };
+
+async function readDmarcAt(
+  name: string,
+  lookups: LookupCache,
+  deadline: Deadline,
+): Promise<DmarcRead> {
+  // A NEW hostname built from user input, so it gets its own safety check.
+  // The original domain passing does not make the derived one safe.
+  const safety = await checkDnsNameIsSafe(name, lookups);
+  if (!safety.safe) return { status: "error", error: safety.reason };
+
+  const txt = await lookup(() => lookups.resolveTxt(name), deadline);
+  if (txt.status === "error") return { status: "error", error: txt.error };
 
   // Same rule as SPF: a DMARC record begins with "v=DMARC1".
-  const dmarc = txt.records.find((record) => record.trim().toLowerCase().startsWith("v=dmarc1"));
+  const record = txt.records.find((r) => r.trim().toLowerCase().startsWith("v=dmarc1"));
+  return record === undefined ? { status: "absent" } : { status: "found", record: record.trim() };
+}
 
-  return dmarc
-    ? { hostname: dmarcHostname, status: "found", record: dmarc.trim(), error: null }
-    : { hostname: dmarcHostname, status: "absent", record: null, error: null };
+/**
+ * The domain one level up, when there is one worth asking about.
+ *
+ * WHAT THIS IS NOT: a public suffix lookup. Doing this properly means knowing
+ * that "example.co.uk" is a registrable domain while "co.uk" is not, and that
+ * knowledge lives in the Public Suffix List — a large, frequently-updated data
+ * file this project has deliberately not taken on as a dependency.
+ *
+ * So this is bounded instead of clever:
+ *
+ *   - ONE level only, never a walk to the root. DMARC itself only defines one
+ *     fallback, to the organisational domain, so a walk would be inventing a
+ *     lookup the specification does not describe.
+ *   - The parent must keep at least two labels, so a name can never be reduced
+ *     to a bare TLD.
+ *
+ * What that gets right and what it does not:
+ *
+ *   shop.example.com     -> example.com       correct
+ *   shop.example.co.uk   -> example.co.uk     correct
+ *   example.com          -> null              correct, nothing above it
+ *   example.co.uk        -> co.uk             a public suffix, asked in vain
+ *
+ * The last case is the unavoidable one, and it is harmless in the direction
+ * that matters: public suffixes do not publish DMARC records, so the lookup
+ * finds nothing and the answer stays "absent" — exactly what it was before.
+ * Verified against co.uk, com.au, org.uk, github.io, com and net.
+ *
+ * The one genuinely wrong case is a parent that IS a public suffix and DOES
+ * publish DMARC — blogspot.com is a real example. A record would then be
+ * reported as inherited when the specification says it does not apply. This is
+ * why `policyDomain` exists: the result always names the domain the record was
+ * read from, so the claim is about what was measured rather than about what we
+ * assumed.
+ */
+export function organisationalDomainFor(domain: string): string | null {
+  const labels = domain.split(".").filter((label) => label.length > 0);
+  // Three labels are needed for a parent of two to remain.
+  if (labels.length < 3) return null;
+  return labels.slice(1).join(".");
+}
+
+/**
+ * One policy tag out of a DMARC record, e.g. the "quarantine" in "sp=quarantine".
+ *
+ * Returns null when the tag is absent OR carries a value the specification
+ * does not define. An unrecognised policy is not "none": reading it as none
+ * would report that a record permits forged mail through, on the strength of a
+ * value we did not understand.
+ */
+export function readPolicyTag(record: string, tag: "p" | "sp"): DmarcPolicy | null {
+  for (const part of record.split(";")) {
+    const [rawName, ...rest] = part.split("=");
+    if (rawName === undefined || rest.length === 0) continue;
+    if (rawName.trim().toLowerCase() !== tag) continue;
+
+    const value = rest.join("=").trim().toLowerCase();
+    if (value === "none" || value === "quarantine" || value === "reject") return value;
+    return null;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +603,15 @@ function allUnknown(
     ns: unknown(),
     txt: unknown(),
     spf: { status: "error", record: null, error: reason },
-    dmarc: { hostname: dmarcHostname, status: "error", record: null, error: reason },
+    dmarc: {
+      hostname: dmarcHostname,
+      status: "error",
+      record: null,
+      error: reason,
+      appliesTo: emailDomain,
+      policyDomain: null,
+      inherited: false,
+      effectivePolicy: null,
+    },
   };
 }

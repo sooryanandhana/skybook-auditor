@@ -1,8 +1,10 @@
 // The .ts extension is required so Node can run the unit tests directly;
 // Next.js resolves it the same way.
 import { safeFetch } from "./safety.ts";
+import { findAllSitemapDirectives } from "./sitemap.ts";
+import { isPathAllowed, parseGroups, selectRules } from "./robots.ts";
 import { capDeadline, createDeadline, type Deadline } from "./deadline.ts";
-import type { TechnicalData } from "@/lib/types";
+import type { SiteFileStatus, TechnicalData } from "@/lib/types";
 
 /**
  * The total time ALL technical checks may take together.
@@ -66,21 +68,41 @@ export async function runTechnicalChecks(
   // A sitemap can be declared inside robots.txt. If it isn't, check the
   // conventional location before concluding there isn't one.
   const sitemapFromRobots = robots.text ? findSitemapDirective(robots.text) : null;
-  const sitemapUrl =
-    sitemapFromRobots ?? (await findDefaultSitemap(`${origin}/sitemap.xml`, deadline));
+
+  const sitemap =
+    sitemapFromRobots !== null
+      ? { status: "found" as const, url: sitemapFromRobots }
+      : await findDefaultSitemap(`${origin}/sitemap.xml`, deadline);
 
   return {
-    robotsTxtFound: robots.found,
-    robotsBlocksEverything: robots.text ? blocksEveryCrawler(robots.text) : false,
-    sitemapUrl,
+    robotsTxtStatus: robots.status,
+    /*
+     * False unless we actually read the file and it actually blocks everyone.
+     *
+     * Meaningless on its own when the status is "unavailable" — which is why
+     * the rule reading it consults the status first and declines to run rather
+     * than reporting a site as unblocked on the strength of a failed request.
+     */
+    robotsBlocksEverything: robots.text !== null && blocksEveryCrawler(robots.text),
+    sitemapStatus: sitemap.status,
+    sitemapUrl: sitemap.url,
   };
 }
 
+/**
+ * Reads /robots.txt, and says which of three things happened.
+ *
+ * EVERY BRANCH BELOW CHOOSES BETWEEN "absent" AND "unavailable" DELIBERATELY,
+ * because the difference is the difference between a fact about the client's
+ * website and a fact about our own request. Only the server saying so makes a
+ * file absent; everything else means we did not find out.
+ */
 async function fetchRobotsTxt(
   url: string,
   deadline: Deadline,
-): Promise<{ found: boolean; text: string | null }> {
-  if (deadline.expired()) return { found: false, text: null };
+): Promise<{ status: SiteFileStatus; text: string | null }> {
+  // No time left to look. We know nothing about this file.
+  if (deadline.expired()) return { status: "unavailable", text: null };
 
   try {
     // safeFetch, not fetch: a site can redirect /robots.txt anywhere it likes,
@@ -90,97 +112,129 @@ async function fetchRobotsTxt(
       signal: deadline.signal(),
     });
 
-    // Many sites answer 404 here, which simply means "no robots.txt".
-    if (!response || !response.ok) return { found: false, text: null };
+    // Nothing came back at all: a timeout, a refused connection, too many
+    // redirects, or an address the safety check declined.
+    if (!response) return { status: "unavailable", text: null };
+
+    // The server answered and said there is no such file. That IS knowledge.
+    if (response.status === 404 || response.status === 410) {
+      return { status: "absent", text: null };
+    }
+
+    // A 5xx, a 403, a 429 — the server has one, or might, and would not show
+    // us. Reporting "no robots.txt" here would be inventing an answer.
+    if (!response.ok) return { status: "unavailable", text: null };
 
     /*
      * Some sites serve their homepage for any unknown path, so a "robots.txt"
-     * that is actually HTML means there is no real robots.txt.
+     * that is actually HTML means there is no real robots.txt. The server
+     * answered successfully, so this is a genuine absence.
      */
     const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("html")) return { found: false, text: null };
+    if (contentType.includes("html")) return { status: "absent", text: null };
 
     const text = await readCapped(response, MAX_ROBOTS_BYTES);
-    if (text === null) return { found: false, text: null };
+    // Too large to read, or the body failed part-way. It exists; we did not
+    // manage to read it, so we cannot say what it contains.
+    if (text === null) return { status: "unavailable", text: null };
 
-    return { found: true, text };
+    return { status: "found", text };
   } catch {
-    return { found: false, text: null };
+    return { status: "unavailable", text: null };
   }
 }
 
 /**
- * Whether robots.txt tells every crawler to stay off the whole site.
+ * The search engines this rule speaks for.
  *
- * We only look at the `User-agent: *` group, since a rule aimed at one
- * specific crawler doesn't block search engines generally.
+ * The finding says "blocks all search engines", so it has to be true of the
+ * engines a client cares about rather than of some abstract crawler. Each one
+ * is resolved through the robots file's own group selection, so a file naming
+ * none of them falls through to `User-agent: *` exactly as a real crawler
+ * would — and a file that names one gets that group's answer instead.
  *
- * Two details the format requires:
+ * Deliberately short. These two account for essentially all search traffic a
+ * small business sees, and a longer list would not change any answer this rule
+ * gives: an engine with no group of its own always inherits the wildcard.
+ */
+const SEARCH_ENGINE_AGENTS = ["googlebot", "bingbot"] as const;
+
+/**
+ * Whether robots.txt tells every search engine to stay off the whole site.
  *
- * 1. Consecutive User-agent lines share the rules that follow them, so
- *      User-agent: *
- *      User-agent: Googlebot
- *      Disallow: /
- *    blocks everyone. Treating each line as starting a fresh group would
- *    miss this.
+ * THIS USES THE CRAWLER'S OWN PARSER, AND THAT IS THE POINT OF THE FUNCTION.
  *
- * 2. An `Allow:` rule alongside `Disallow: /` carves out an exception, so the
- *    site is not entirely blocked.
+ * It used to scan the file itself, line by line, and it got a common shape
+ * wrong:
+ *
+ *     User-agent: *
+ *     Disallow: /
+ *
+ *     User-agent: AhrefsBot
+ *     Disallow: /admin
+ *
+ * That file hides the entire site from Google, which has no group of its own
+ * and so falls into the wildcard. The old scanner discarded what the wildcard
+ * group had said the moment it met another `User-agent` line, and reported
+ * nothing — on a file shape that is common, because sites routinely add groups
+ * for SEO crawlers. A staging site left with `Disallow: /` passed the audit.
+ *
+ * It also did not understand `Disallow: /*`, which matches every path.
+ *
+ * Both failures came from the same cause: a second implementation of a
+ * question the codebase had already answered correctly. `parseGroups`,
+ * `selectRules` and `isPathAllowed` are what the crawler obeys when deciding
+ * whether it may fetch a page, and they handle groups, precedence, `*` and `$`
+ * between them. Now the rule and the crawler read the same file the same way,
+ * and cannot disagree about it.
+ *
+ * The one thing added on top is the ALLOW EXCEPTION: a group carrying any
+ * `Allow:` rule has carved something out, so the site is not entirely blocked
+ * even though its root is. That is a property of the parsed rules rather than
+ * a second reading of the text.
  */
 export function blocksEveryCrawler(robotsTxt: string): boolean {
-  let inWildcardGroup = false;
-  let lastLineWasUserAgent = false;
-  let sawDisallowAll = false;
-  let sawAllowInGroup = false;
+  const groups = parseGroups(robotsTxt);
 
-  for (const rawLine of robotsTxt.split(/\r?\n/)) {
-    // Strip comments and surrounding space.
-    const line = rawLine.split("#")[0].trim();
-    if (!line) continue;
+  return SEARCH_ENGINE_AGENTS.every((agent) => {
+    // Exactly the group a real crawler of that name would obey, wildcard
+    // fallback included.
+    const rules = selectRules(groups, agent);
 
-    const separator = line.indexOf(":");
-    if (separator === -1) continue;
-    const field = line.slice(0, separator).trim().toLowerCase();
-    const value = line.slice(separator + 1).trim();
+    // Nothing addressed to it at all means nothing forbids it.
+    if (rules.length === 0) return false;
 
-    if (field === "user-agent") {
-      // A User-agent line directly after another one joins the same group
-      // rather than starting a new one.
-      inWildcardGroup = lastLineWasUserAgent
-        ? inWildcardGroup || value === "*"
-        : value === "*";
-      lastLineWasUserAgent = true;
-      if (!inWildcardGroup) {
-        sawDisallowAll = false;
-        sawAllowInGroup = false;
-      }
-      continue;
-    }
+    // An exception anywhere in the group means some of the site is reachable.
+    if (rules.some((rule) => rule.allow)) return false;
 
-    lastLineWasUserAgent = false;
-    if (!inWildcardGroup) continue;
-
-    if (field === "disallow" && value === "/") sawDisallowAll = true;
-    // "Allow:" with an empty value means nothing; any real path is an exception.
-    if (field === "allow" && value.length > 0) sawAllowInGroup = true;
-  }
-
-  return sawDisallowAll && !sawAllowInGroup;
+    return !isPathAllowed(rules, "/");
+  });
 }
 
-/** Reads a `Sitemap:` line from robots.txt, if there is one. */
+/**
+ * Reads a `Sitemap:` line from robots.txt, if there is one.
+ *
+ * The audit records ONE sitemap address, because the question it answers is
+ * "does this site have a sitemap". The crawler needs every one of them, so the
+ * line-reading itself lives in `sitemap.ts` and this takes the first — one
+ * definition of what a Sitemap: directive looks like, used by both.
+ */
 export function findSitemapDirective(robotsTxt: string): string | null {
-  for (const rawLine of robotsTxt.split(/\r?\n/)) {
-    const line = rawLine.split("#")[0].trim();
-    const match = line.match(/^sitemap\s*:\s*(\S+)/i);
-    if (match) return match[1];
-  }
-  return null;
+  return findAllSitemapDirectives(robotsTxt)[0] ?? null;
 }
 
-/** Checks whether the conventional /sitemap.xml exists. */
-async function findDefaultSitemap(url: string, deadline: Deadline): Promise<string | null> {
-  if (deadline.expired()) return null;
+/**
+ * Checks whether the conventional /sitemap.xml exists.
+ *
+ * Carries the same three-state answer as robots.txt, and for the same reason:
+ * a HEAD request that times out told us nothing, and reporting "no sitemap"
+ * would be a claim about the client's website drawn from our own failure.
+ */
+async function findDefaultSitemap(
+  url: string,
+  deadline: Deadline,
+): Promise<{ status: SiteFileStatus; url: string | null }> {
+  if (deadline.expired()) return { status: "unavailable", url: null };
 
   try {
     // HEAD asks only "does this exist?" without downloading the file, which
@@ -211,15 +265,21 @@ async function findDefaultSitemap(url: string, deadline: Deadline): Promise<stri
       });
     }
 
-    if (!response || !response.ok) return null;
+    if (!response) return { status: "unavailable", url: null };
+
+    if (response.status === 404 || response.status === 410) {
+      return { status: "absent", url: null };
+    }
+
+    if (!response.ok) return { status: "unavailable", url: null };
 
     // Again, a site serving HTML here has no real sitemap.
     const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("html")) return null;
+    if (contentType.includes("html")) return { status: "absent", url: null };
 
-    return url;
+    return { status: "found", url };
   } catch {
-    return null;
+    return { status: "unavailable", url: null };
   }
 }
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { FieldPerformance, LabPerformance, PerformanceData } from "@/lib/types";
+import { fieldOverallText, strategyLabel } from "@/lib/report/measurementsView";
 import styles from "./page.module.css";
 
 /**
@@ -73,7 +74,7 @@ export function PerformancePanel({
 
       <div className={styles.perfSplit}>
         <FieldBlock field={performance.field} />
-        <LabBlock lab={performance.lab} />
+        <LabBlock lab={performance.lab} strategy={performance.strategy} />
       </div>
 
       {performance.notInspected.length > 0 && (
@@ -92,6 +93,8 @@ export function PerformancePanel({
 
 /** What real visitors experienced. This is what Google ranks on. */
 function FieldBlock({ field }: { field: FieldPerformance }) {
+  const overall = fieldOverallText(field);
+
   return (
     <div className={styles.perfBlock}>
       <h4 className={styles.perfBlockTitle}>Real visitors</h4>
@@ -117,6 +120,23 @@ function FieldBlock({ field }: { field: FieldPerformance }) {
               : "Figures for this page"}
             {field.measuredUrl && <> · {field.measuredUrl}</>}
           </p>
+          {/*
+            GOOGLE'S OWN VERDICT, repeated rather than worked out.
+
+            It is not derived from the metrics below it and never from the
+            simulated score in the next block — those answer different
+            questions, and a site can be rated fast by its real visitors while
+            a throttled simulation scores it badly.
+
+            Absent when Google gave no overall category, which happens even
+            alongside individual metrics. Nothing is shown rather than a
+            category being inferred from the parts.
+          */}
+          {overall !== null && (
+            <p className={styles.perfOverall}>
+              Overall experience: <strong>{overall}</strong>
+            </p>
+          )}
           <dl className={styles.perfMetrics}>
             {/*
               missing="Not reported" rather than a bare dash: a reader cannot
@@ -161,7 +181,17 @@ function FieldBlock({ field }: { field: FieldPerformance }) {
 }
 
 /** One simulated load. Useful for diagnosis; nobody experienced it. */
-function LabBlock({ lab }: { lab: LabPerformance }) {
+function LabBlock({ lab, strategy }: { lab: LabPerformance; strategy: PerformanceData["strategy"] }) {
+  /*
+   * WHICH DEVICE WAS SIMULATED, read from the data rather than assumed.
+   *
+   * This line used to end with the word "mobile", typed in. A score shown
+   * without it is one a client reasonably reads as describing their desktop
+   * site, and a hardcoded label would go on saying mobile if the collector
+   * ever ran another way.
+   */
+  const device = strategyLabel(strategy);
+
   return (
     <div className={styles.perfBlock}>
       <h4 className={styles.perfBlockTitle}>Simulated load</h4>
@@ -171,7 +201,8 @@ function LabBlock({ lab }: { lab: LabPerformance }) {
       ) : (
         <>
           <p className={styles.perfScope}>
-            Google&rsquo;s test browser, mobile
+            Google&rsquo;s test browser
+            {device && <> · {device}</>}
             {lab.measuredUrl && <> · {lab.measuredUrl}</>}
           </p>
           {lab.score !== null && (

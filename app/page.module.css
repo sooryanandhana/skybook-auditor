@@ -219,6 +219,39 @@
   gap: 0.7rem;
 }
 
+/* The structured crawl facts, under the coverage counts. Same label/value
+   shape as the measured facts, kept a little quieter so the counts above stay
+   the headline. */
+.crawlDetail {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid #e6ebf2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+/* Folded away: the limits explain a partial crawl rather than describing the
+   website, so they are available without being in the way. */
+.limits {
+  margin-top: 0.8rem;
+}
+
+.limitsToggle {
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #5b6779;
+}
+
+.limitsToggle:hover {
+  color: #16202e;
+}
+
+.limits[open] .limitsToggle {
+  margin-bottom: 0.6rem;
+}
+
 .factList {
   border: 1px solid #d8e0ea;
   border-radius: 10px;
@@ -298,12 +331,51 @@
   margin-top: 0.15rem;
 }
 
-/* The fixed action attached to a finding. Muted, because the problem and the
-   evidence for it are what a reader scans first. */
+/* The fixed action attached to a finding.
+
+   It used to be muted to match the evidence above it, which made the two read
+   as one block of grey. The evidence says what was measured; this says what to
+   do, and the reader needs to tell them apart at a glance. Set off with a rule
+   and a label rather than a colour, so the distinction survives greyscale. */
 .remediation {
   font-size: 0.85rem;
+  color: #16202e;
+  margin-top: 0.5rem;
+  padding-left: 0.6rem;
+  border-left: 2px solid #d7e0ec;
+}
+
+.remediationLabel {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: #5b6779;
-  margin-top: 0.35rem;
+  margin-bottom: 0.1rem;
+}
+
+/* The severity split under the findings heading. The number takes the
+   severity's own colour, and the word beside it carries the same meaning for
+   anyone who cannot use the colour. */
+.severitySummary {
+  font-size: 0.88rem;
+  color: #5b6779;
+  margin-top: 0.2rem;
+}
+
+.severityCount {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.severityDivider {
+  color: #9aa7be;
+}
+
+/* The coverage detail, moved below the findings. */
+.coverage {
+  margin-top: 1.6rem;
 }
 
 /* ---------- Checks that did not run ----------
@@ -371,6 +443,13 @@
   text-align: center;
 }
 
+.severityCount.critical,
+.severityCount.high,
+.severityCount.medium {
+  background: none;
+  padding: 0;
+}
+
 .critical {
   background: #f7dedb;
   color: #a3312a;
@@ -403,6 +482,31 @@
   font-weight: 650;
   color: #16202e;
   margin-bottom: 0.15rem;
+}
+
+/* A category heading inside a scope. Quieter than the scope heading above it,
+   so the hierarchy reads scope first, subject second, finding third. */
+.categoryGroup {
+  margin-top: 1rem;
+}
+
+.categoryHeading {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #5b6779;
+  margin-bottom: 0.45rem;
+}
+
+/* The several reasons one check can be skipped for. Bulleted so two reasons
+   read as two reasons rather than one run-on sentence. */
+.skippedReasons {
+  list-style: disc;
+  margin: 0.15rem 0 0 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
 }
 
 .groupIntro {
@@ -662,6 +766,7 @@
 
   /* ---------- Site-wide findings, dark ---------- */
 
+  .perfOverall,
   .groupHeading,
   .crawlHeading,
   .crawlHeadline,
@@ -670,6 +775,25 @@
     color: #e6edf5;
   }
 
+  /* The crawl-detail divider needs the same lift as the other hairlines. */
+  .crawlDetail {
+    border-top-color: #232a35;
+  }
+
+  .limitsToggle:hover {
+    color: #e6edf5;
+  }
+
+  .remediation {
+    color: #e6edf5;
+    border-left-color: #2b3546;
+  }
+
+  .remediationLabel,
+  .severitySummary,
+  .severityDivider,
+  .categoryHeading,
+  .limitsToggle,
   .groupIntro,
   .reach,
   .affectedSample,
@@ -962,6 +1086,14 @@
   font-size: 0.875rem;
   font-weight: 400;
   color: color-mix(in srgb, var(--foreground) 55%, transparent);
+}
+
+/* Google verdict on real visits. Given weight, because it is the one line in
+   the speed panel that describes what people actually experienced. */
+.perfOverall {
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+  color: #16202e;
 }
 
 .perfMetrics {

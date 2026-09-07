@@ -27,6 +27,21 @@ import {
   siteFileText,
   type FindingScope,
 } from "@/lib/report/siteFindingsView";
+import {
+  certificateFacts,
+  contentFacts,
+  crawlLimitFacts,
+  dmarcFacts,
+  dnsFacts,
+  groupByCategory,
+  crawlCountTiles,
+  crawlStateFacts,
+  groupSkippedByReason,
+  headingCountText,
+  severityCounts,
+  skippedCheckCount,
+  spfFacts,
+} from "@/lib/report/measurementsView";
 import type { SiteCrawlSummary } from "@/lib/collector/crawlSite";
 import type {
   AuditData,
@@ -415,7 +430,9 @@ export default function HomePage() {
         This is state, not a finding: it carries no severity, because a limit
         we imposed is not a fault of the website.
       */}
-      {siteResult !== null && <CrawlSummary crawl={siteResult.crawl} />}
+      {siteResult !== null && (
+        <CrawlSummary crawl={siteResult.crawl} />
+      )}
 
       {error && (
         <div className={styles.error}>
@@ -591,6 +608,10 @@ function Results({
         ]}
       />
 
+      {siteResult !== null && (
+        <CoverageDetail crawl={siteResult.crawl} technical={siteResult.data.technical} />
+      )}
+
       {/*
         Its own section, with its own state. The audit above is complete and
         readable whatever this is doing.
@@ -648,58 +669,143 @@ function FindingsSection({
    */
   const { site, page } = partitionByScope(ordered);
 
+  /*
+   * The severity split, counted from the findings the server graded.
+   *
+   * "Findings (11)" was the only number on the page, and it is the wrong
+   * one: one critical among ten mediums is a different conversation from
+   * eleven mediums. Nothing here decides a severity — it counts values the
+   * rules set, and skipped checks are not among them.
+   */
+  const counts = severityCounts(findings);
+
+  // Grouped by REASON, so three certificate checks skipped for the same
+  // reason read as one sentence rather than three identical ones.
+  const skippedGroups = groupSkippedByReason(skipped);
+
   return (
     <>
       <h3 className={styles.findingsHeading}>Findings ({findings.length})</h3>
 
+      {counts.length > 0 && (
+        <p className={styles.severitySummary}>
+          {counts.map((entry, index) => (
+            <span key={entry.severity}>
+              {index > 0 && <span className={styles.severityDivider}> · </span>}
+              <span className={`${styles.severityCount} ${styles[entry.severity]}`}>
+                {entry.count}
+              </span>{" "}
+              {entry.label}
+            </span>
+          ))}
+        </p>
+      )}
+
       {summary && <p className={styles.emptyFindings}>{summary}</p>}
 
       {site.length > 0 && (
-        <section className={styles.findingGroup} aria-labelledby="site-findings">
-          <h4 id="site-findings" className={styles.groupHeading}>
-            {SITE_FINDINGS_HEADING} ({site.length})
-          </h4>
-          <p className={styles.groupIntro}>{SITE_FINDINGS_INTRO}</p>
-          <ul className={styles.findings}>
-            {site.map((finding) => (
-              <FindingCard key={finding.id} finding={finding} scope="site" />
-            ))}
-          </ul>
-        </section>
+        <ScopedFindings
+          id="site-findings"
+          heading={SITE_FINDINGS_HEADING}
+          intro={SITE_FINDINGS_INTRO}
+          findings={site}
+          scope="site"
+        />
       )}
 
       {page.length > 0 && (
-        <section className={styles.findingGroup} aria-labelledby="page-findings">
-          <h4 id="page-findings" className={styles.groupHeading}>
-            {PAGE_FINDINGS_HEADING} ({page.length})
-          </h4>
-          <p className={styles.groupIntro}>{PAGE_FINDINGS_INTRO}</p>
-          <ul className={styles.findings}>
-            {page.map((finding) => (
-              <FindingCard key={finding.id} finding={finding} scope="page" />
-            ))}
-          </ul>
-        </section>
+        <ScopedFindings
+          id="page-findings"
+          heading={PAGE_FINDINGS_HEADING}
+          intro={PAGE_FINDINGS_INTRO}
+          findings={page}
+          scope="page"
+        />
       )}
 
       {showsSkippedPanel(state) && (
         <section className={styles.skipped}>
+          {/*
+            GROUPED BY CHECK, because one check can genuinely be skipped for
+            two reasons — cookie flags are moot on an HTTP page, and there is
+            nothing to look at on a page that set no cookies. Both are true and
+            the aggregator deliberately keeps both.
+
+            Listed flat, the same check appeared twice and read like a bug in
+            the report. Grouping is presentation only: every reason survives,
+            and two are never merged into a sentence neither of them said. The
+            count is of CHECKS, which is what the heading names.
+          */}
           <h4 className={styles.skippedHeading}>
-            {SKIPPED_HEADING} ({skipped.length})
+            {SKIPPED_HEADING} ({skippedCheckCount(skipped)})
           </h4>
           <p className={styles.skippedIntro}>{SKIPPED_INTRO}</p>
           <ul className={styles.skippedList}>
-            {skipped.map((check) => (
-              <li key={`${check.ruleId} ${check.reason}`} className={styles.skippedItem}>
-                <span className={styles.skippedId}>{check.ruleId}</span>
-                {/* The server own reason, verbatim. Never reworded here. */}
-                <span className={styles.skippedReason}>{check.reason}</span>
+            {skippedGroups.map((group) => (
+              <li key={group.reason} className={styles.skippedItem}>
+                {/* The rules' own written titles, not their identifiers. */}
+                <span className={styles.skippedId}>{group.checks.join(" · ")}</span>
+                {/* The server's own reason, verbatim. Never reworded here. */}
+                <span className={styles.skippedReason}>{group.reason}</span>
               </li>
             ))}
           </ul>
         </section>
       )}
     </>
+  );
+}
+
+/**
+ * One scope's findings, gathered under the subject each rule declared.
+ *
+ * Eleven findings in one list is a list nobody reads. `category` was on every
+ * finding already — set by the rule, carried through aggregation untouched —
+ * and was the one field the page ignored.
+ *
+ * THE SCOPE SPLIT COMES FIRST AND STILL DOES. Category grouping happens inside
+ * a scope, never across one, so a site-wide fact about a certificate is never
+ * shown among page-level ones.
+ *
+ * Ordering is `groupByCategory`'s, where it is tested: worst first at the group
+ * level too, so grouping cannot bury a critical security problem under a run of
+ * medium SEO ones. Nothing here reads or sets a severity.
+ */
+function ScopedFindings({
+  id,
+  heading,
+  intro,
+  findings,
+  scope,
+}: {
+  id: string;
+  heading: string;
+  intro: string;
+  findings: Finding[];
+  scope: FindingScope;
+}) {
+  const categories = groupByCategory(findings);
+
+  return (
+    <section className={styles.findingGroup} aria-labelledby={id}>
+      <h4 id={id} className={styles.groupHeading}>
+        {heading} ({findings.length})
+      </h4>
+      <p className={styles.groupIntro}>{intro}</p>
+
+      {categories.map((group) => (
+        <div key={group.category} className={styles.categoryGroup}>
+          <h5 className={styles.categoryHeading}>
+            {group.label} ({group.findings.length})
+          </h5>
+          <ul className={styles.findings}>
+            {group.findings.map((finding) => (
+              <FindingCard key={finding.id} finding={finding} scope={scope} />
+            ))}
+          </ul>
+        </div>
+      ))}
+    </section>
   );
 }
 
@@ -734,8 +840,19 @@ function FindingCard({ finding, scope }: { finding: Finding; scope: FindingScope
         </p>
 
         <p className={styles.evidence}>{finding.evidence}</p>
-        {/* The fixed action declared by the rule, not written by an AI. */}
-        <p className={styles.remediation}>{finding.remediation}</p>
+
+        {/*
+          The fixed action declared by the rule, not written by an AI.
+
+          Labelled and set apart, because it and the evidence used to be two
+          grey paragraphs of the same size — and a reader could not tell what
+          was measured from what to do about it. The label carries the
+          distinction in words, so it does not rest on the styling alone.
+        */}
+        <p className={styles.remediation}>
+          <span className={styles.remediationLabel}>What to do</span>
+          {finding.remediation}
+        </p>
 
         {scope === "page" && hasAffectedList(finding) && (
           <details className={styles.affected}>
@@ -798,6 +915,68 @@ function CrawlSummary({ crawl }: { crawl: SiteCrawlSummary }) {
           </div>
         ))}
       </dl>
+
+    </section>
+  );
+}
+
+/**
+ * How much of the site was seen, and what the crawl met on the way.
+ *
+ * BELOW THE FINDINGS, DELIBERATELY. This began life inside the coverage banner
+ * at the top and grew to about seven hundred pixels, which pushed the first
+ * finding thirteen hundred pixels down the page — undoing the earlier decision
+ * that put findings first. It is reference material: it explains why coverage
+ * is what it is, which is a question a reader has after seeing the findings,
+ * not before.
+ *
+ * The numbers use the same compact tiles as the coverage counts above. The
+ * states that carry a caveat stay as rows, because "Could not be checked" in a
+ * tile beside "416" would read as a count.
+ */
+function CoverageDetail({
+  crawl,
+  technical,
+}: {
+  crawl: SiteCrawlSummary;
+  technical: AuditData["technical"];
+}) {
+  return (
+    <section className={styles.coverage} aria-labelledby="coverage-detail">
+      <h3 id="coverage-detail" className={styles.findingsHeading}>
+        Crawl coverage
+      </h3>
+      <p className={styles.groupIntro}>
+        How the crawl found its way around the site, measured once.
+      </p>
+
+      <dl className={styles.crawlFacts}>
+        {crawlCountTiles(crawl).map((tile) => (
+          <div key={tile.label} className={styles.crawlFact}>
+            <dt className={styles.crawlFactLabel}>{tile.label}</dt>
+            <dd className={styles.crawlFactValue}>{tile.value}</dd>
+          </div>
+        ))}
+      </dl>
+
+      <dl className={styles.crawlDetail}>
+        {crawlStateFacts(crawl, technical).map((row) => (
+          <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+        ))}
+      </dl>
+
+      {/*
+        Folded away: the limits explain a partial result rather than describing
+        the website, so they are available without being in the way.
+      */}
+      <details className={styles.limits}>
+        <summary className={styles.limitsToggle}>Audit limits</summary>
+        <dl className={styles.factList}>
+          {crawlLimitFacts(crawl.limits).map((row) => (
+            <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+          ))}
+        </dl>
+      </details>
     </section>
   );
 }
@@ -833,7 +1012,13 @@ function MeasuredFacts({ data }: { data: AuditData }) {
           <Fact
             label="Certificate problem"
             value={certificateProblemLabel(fetch.certificateProblem)}
-            note="Observed while connecting. A full certificate check is not implemented yet."
+            /*
+             * The note used to end "a full certificate check is not implemented
+             * yet", which stopped being true when the certificate collector
+             * shipped. Its findings are below, and its measurements are in
+             * their own section further down.
+             */
+            note="Seen while connecting. The certificate itself is read separately, below."
           />
         )}
         {fetch.wasRedirected && (
@@ -843,6 +1028,14 @@ function MeasuredFacts({ data }: { data: AuditData }) {
             note={fetch.redirectChain.join(" → ")}
           />
         )}
+        {/*
+          Page-level, and about the page that was audited. The character count
+          is reported and not judged — the threshold that decides when a page
+          is too thin to grade headings by lives in the rules, and stays there.
+        */}
+        {contentFacts(seo).map((row) => (
+          <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+        ))}
         <Fact
           label="Page title"
           value={seo.titleText ?? "— none —"}
@@ -858,7 +1051,14 @@ function MeasuredFacts({ data }: { data: AuditData }) {
         <Fact
           label="Main heading (h1)"
           value={seo.h1Count === 0 ? "— none —" : seo.h1Texts.join(" · ")}
-          note={`${seo.h1Count} found`}
+          /*
+           * `h1Texts` can be SHORTER than `h1Count`: an empty <h1></h1> is an
+           * element carrying no text, so it appears in the count and not in the
+           * list. The note used to read "2 found" beside a single heading and
+           * left the reader to spot the discrepancy; it now says outright how
+           * many carried no text.
+           */
+          note={headingCountText(seo.h1Count, seo.h1Texts)}
         />
         <Fact
           label="Subheadings"
@@ -899,6 +1099,51 @@ function MeasuredFacts({ data }: { data: AuditData }) {
               : siteFileText(technical.sitemapStatus, technical.sitemapUrl ?? "Found")
           }
         />
+      </dl>
+
+      {/*
+        THE CERTIFICATE AND THE DOMAIN'S RECORDS.
+
+        All of this was measured on every audit and displayed on none of them.
+        The only way a certificate reached a reader was by being broken enough
+        to produce a finding, so a valid one and an unread one looked exactly
+        alike: like nothing at all.
+
+        Every row is a measured value written out by `measurementsView`, which
+        is where the wording lives and where it is tested. Nothing is graded
+        here — that already happened, in the rules, and its conclusions are in
+        the findings above.
+
+        SITE-SCOPED, and said so. The facts above describe the page that was
+        audited; these describe the whole domain and were measured once.
+      */}
+      <h3 className={styles.findingsHeading}>Certificate</h3>
+      {/*
+        Deliberately says nothing about a TLS connection. A site served over
+        plain HTTP presents no certificate and opens no such connection, and an
+        intro claiming one would contradict the row directly beneath it.
+      */}
+      <p className={styles.groupIntro}>Measured once, for the whole site.</p>
+      <dl className={styles.factList}>
+        {certificateFacts(data.ssl).map((row) => (
+          <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+        ))}
+      </dl>
+
+      <h3 className={styles.findingsHeading}>Domain and email records</h3>
+      <p className={styles.groupIntro}>
+        One set of records for the whole domain, looked up once.
+      </p>
+      <dl className={styles.factList}>
+        {dnsFacts(data.dns).map((row) => (
+          <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+        ))}
+        {spfFacts(data.dns).map((row) => (
+          <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+        ))}
+        {dmarcFacts(data.dns).map((row) => (
+          <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+        ))}
       </dl>
 
       <h3 className={styles.findingsHeading}>Security</h3>

@@ -12,10 +12,11 @@ import assert from "node:assert/strict";
 import {
   blocksEveryCrawler,
   findSitemapDirective,
-  runTechnicalChecks,
+  runTechnicalChecks as runTechnicalChecksImpl,
 } from "./technicalChecks.ts";
-import { createDeadline } from "./deadline.ts";
-import { parseRobots } from "./robots.ts";
+import { createDeadline, type Deadline } from "./deadline.ts";
+import { fetchRobots, parseRobots, robotsMeasurement } from "./robots.ts";
+import type { TechnicalData } from "@/lib/types";
 import fs from "node:fs";
 
 test("detects a site blocking all crawlers", () => {
@@ -138,6 +139,26 @@ const xml = (status = 200) =>
 
 function sitemapRequests(): string[] {
   return requests.filter((r) => r.includes("/sitemap.xml"));
+}
+
+
+/**
+ * The technical checks as the AUDIT runs them.
+ *
+ * This module no longer fetches robots.txt. The crawler reads it once, before
+ * anything is queued, and hands the measurement on -- which is what stops one
+ * audit holding two answers about the same file. These tests drive that same
+ * pair on one shared clock, so every state asserted below is a state
+ * production actually produces, and the classification of a 404, a 5xx or a
+ * timeout is exercised where it now lives.
+ */
+async function runTechnicalChecks(
+  pageUrl: string,
+  budget: number | Deadline = 10_000,
+): Promise<TechnicalData> {
+  const deadline = typeof budget === "number" ? createDeadline(budget) : budget;
+  const robots = robotsMeasurement(await fetchRobots({ site: new URL(pageUrl), deadline }));
+  return runTechnicalChecksImpl(pageUrl, robots, deadline);
 }
 
 test("all requests together stay inside ONE shared budget", async () => {
@@ -283,7 +304,14 @@ test("given the audit's clock, the checks still keep their OWN budget", async ()
   // An audit deadline far larger than the technical checks' own budget.
   const auditDeadline = createDeadline(30_000);
   const startedAt = Date.now();
-  await runTechnicalChecks(PAGE, auditDeadline);
+  /*
+   * The module directly, not the audit pair above.
+   *
+   * This test is about THIS module's own budget. Reading robots.txt is no
+   * longer part of it -- the crawler does that, on the crawl's clock -- so
+   * measuring the pair would time two budgets and answer a different question.
+   */
+  await runTechnicalChecksImpl(PAGE, { status: "absent" }, auditDeadline);
   const elapsed = Date.now() - startedAt;
 
   assert.ok(
@@ -596,4 +624,69 @@ test("the rule keeps no robots parser of its own", () => {
 
   assert.ok(!/split\(\/\\r\?\\n\//.test(body), "no line splitting of its own");
   assert.ok(/parseGroups|selectRules|isPathAllowed/.test(body), "it uses the shared parser");
+});
+
+// ---------------------------------------------------------------------------
+// ONE MEASUREMENT, NOT TWO
+//
+// This module used to fetch robots.txt for itself while the crawler fetched it
+// for the rules. Two requests for one file can come back differently, and the
+// report then said both: "no robots.txt" in one panel, "robots.txt could not
+// be checked" in the other. One is a claim about the client's website and the
+// other is a claim about our own request.
+// ---------------------------------------------------------------------------
+
+test("the robots status is the measurement handed in, never a second opinion", async () => {
+  // Any request for robots.txt here would be a second opinion, so the stub
+  // answers only the sitemap and records everything.
+  mockFetch(async (_method, url) => (url.includes("/sitemap.xml") ? notFound() : notFound()));
+
+  const cases = [
+    { given: { status: "found" as const, text: "" }, expected: "found" },
+    { given: { status: "absent" as const }, expected: "absent" },
+    { given: { status: "unavailable" as const }, expected: "unavailable" },
+  ];
+
+  for (const situation of cases) {
+    requests = [];
+    const result = await runTechnicalChecksImpl(PAGE, situation.given, 5_000);
+
+    assert.equal(result.robotsTxtStatus, situation.expected, situation.expected);
+    assert.equal(
+      requests.filter((r) => r.includes("/robots.txt")).length,
+      0,
+      "robots.txt must not be fetched here at all",
+    );
+  }
+});
+
+test("an unreadable robots.txt never becomes a blocked-site verdict", async () => {
+  mockFetch(async () => notFound());
+
+  const result = await runTechnicalChecksImpl(PAGE, { status: "unavailable" }, 5_000);
+
+  assert.equal(result.robotsTxtStatus, "unavailable");
+  assert.equal(
+    result.robotsBlocksEverything,
+    false,
+    "there is no text to read, so nothing may be concluded from it",
+  );
+});
+
+test("the Sitemap: line is read from the crawler's copy, with no second request", async () => {
+  mockFetch(async () => notFound());
+
+  const result = await runTechnicalChecksImpl(
+    PAGE,
+    { status: "found", text: "Sitemap: https://example.com/from-robots.xml" },
+    5_000,
+  );
+
+  assert.equal(result.sitemapUrl, "https://example.com/from-robots.xml");
+  assert.equal(result.sitemapStatus, "found");
+  assert.equal(
+    requests.filter((r) => r.includes("/robots.txt")).length,
+    0,
+    "the text was already in hand",
+  );
 });

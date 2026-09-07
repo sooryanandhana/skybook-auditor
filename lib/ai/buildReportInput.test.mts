@@ -1875,7 +1875,9 @@ test("measurements.dns and its record sets have exactly these keys", () => {
   const mx = measured.mx;
   assert.equal(mx.knowledge, "value");
   if (mx.knowledge !== "value") return;
-  assert.deepEqual(keysOf(mx.value), ["count", "hosts"]);
+  assert.deepEqual(keysOf(mx.value), ["acceptsMail", "count", "hosts"]);
+  assert.equal(mx.value.acceptsMail, true);
+  if (!mx.value.acceptsMail) return;
   assert.deepEqual(keysOf(mx.value.hosts[0]), ["originalLength", "text", "truncated"]);
   assert.ok(!serialise(measured).includes("priority"), "priorities are not carried");
 });
@@ -2050,7 +2052,7 @@ const ALLOWED_KEYS = new Set([
   "certificate", "hostname", "daysUntilExpiry", "validTo", "issuer", "trusted",
   "problem", "coversHostname", "hostnameMatch", "protocol", "altNameCount",
   // dns and email
-  "dns", "emailDomain", "a", "aaaa", "mx", "ns", "count", "hosts", "email",
+  "dns", "emailDomain", "a", "aaaa", "mx", "ns", "count", "hosts", "acceptsMail", "email",
   "appliesTo", "spf", "dmarc", "record", "policyDomain", "inherited",
   "effectivePolicy",
   // site files
@@ -2467,4 +2469,215 @@ test("a page whose only headings are empty has no texts and no truncation", () =
   assert.deepEqual(input.measurements.page.h1Texts, []);
   assert.equal(input.measurements.page.h1Count, 3);
   assert.equal(input.measurements.page.h1TextsTruncated, false);
+});
+
+// ---------------------------------------------------------------------------
+// A DOMAIN THAT ACCEPTS NO EMAIL
+//
+// RFC 7505: a single MX pointing at the root says so. The resolver returns it
+// as an empty exchange, and projected as an ordinary record it read as "one
+// mail server, name blank" -- one server, when the domain published none.
+// ---------------------------------------------------------------------------
+
+const mxRecords = (records: Array<{ exchange: string; priority: number }>): DnsData =>
+  dns({ mx: foundRecords(records) });
+
+test("a null MX is not one mail server with a blank name", () => {
+  const input = buildAIReportInput(
+    result({ data: auditData({ dns: mxRecords([{ exchange: "", priority: 0 }]) }) }),
+  );
+
+  const mx = input.measurements.dns.mx;
+  assert.equal(mx.knowledge, "value", "the lookup succeeded, so this is measured");
+  if (mx.knowledge !== "value") return;
+  assert.equal(mx.value.acceptsMail, false);
+  assert.ok(!("count" in mx.value), "there is no count to read");
+  assert.ok(!("hosts" in mx.value), "and no server to name");
+  assert.ok(
+    !serialise(mx).includes("count"),
+    "the mail measurement may not carry a count of servers",
+  );
+});
+
+test("a root target written as a dot is the same statement", () => {
+  const input = buildAIReportInput(
+    result({ data: auditData({ dns: mxRecords([{ exchange: ".", priority: 0 }]) }) }),
+  );
+
+  const mx = input.measurements.dns.mx;
+  assert.equal(mx.knowledge, "value");
+  if (mx.knowledge !== "value") return;
+  assert.equal(mx.value.acceptsMail, false);
+});
+
+test("ordinary mail servers are carried as before", () => {
+  const input = buildAIReportInput(
+    result({
+      data: auditData({
+        dns: mxRecords([
+          { exchange: "mail.example.com", priority: 10 },
+          { exchange: "backup.example.com", priority: 20 },
+        ]),
+      }),
+    }),
+  );
+
+  const mx = input.measurements.dns.mx;
+  assert.equal(mx.knowledge, "value");
+  if (mx.knowledge !== "value") return;
+  assert.equal(mx.value.acceptsMail, true);
+  if (!mx.value.acceptsMail) return;
+  assert.equal(mx.value.count, 2);
+  assert.deepEqual(
+    mx.value.hosts.map((host) => host.text),
+    ["mail.example.com", "backup.example.com"],
+  );
+});
+
+test("a root target alongside real servers is reported as the servers", () => {
+  /*
+   * The specification requires a null MX to stand alone. A domain publishing
+   * one beside real servers has published something contradictory, and the
+   * honest reading is the records it actually has rather than a conclusion
+   * drawn from the broken one.
+   */
+  const input = buildAIReportInput(
+    result({
+      data: auditData({
+        dns: mxRecords([
+          { exchange: "", priority: 0 },
+          { exchange: "mail.example.com", priority: 10 },
+        ]),
+      }),
+    }),
+  );
+
+  const mx = input.measurements.dns.mx;
+  assert.equal(mx.knowledge, "value");
+  if (mx.knowledge !== "value") return;
+  assert.equal(mx.value.acceptsMail, true);
+  if (!mx.value.acceptsMail) return;
+  assert.equal(mx.value.count, 2);
+});
+
+test("a domain publishing no MX at all is absent, not a null MX", () => {
+  const input = buildAIReportInput(
+    result({ data: auditData({ dns: dns({ mx: absentRecords() }) }) }),
+  );
+
+  const mx = input.measurements.dns.mx;
+  assert.equal(knowledgeOf(mx), "confirmed-absent");
+  assert.ok(!("value" in mx), "an absent record set states nothing about mail routing");
+});
+
+test("an MX lookup that failed is not a domain that accepts no email", () => {
+  const input = buildAIReportInput(
+    result({ data: auditData({ dns: dns({ mx: erroredRecords("SERVFAIL") }) }) }),
+  );
+
+  const mx = input.measurements.dns.mx;
+  assert.equal(knowledgeOf(mx), "unknown");
+  assert.equal(stateOf(mx), "error");
+  assert.ok(!("value" in mx));
+  assert.ok(
+    !serialise(input).includes("acceptsMail"),
+    "a failed lookup may not answer the question either way",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ROBOTS.TXT: ONE MEASUREMENT, ONE ANSWER
+//
+// The file is read once, by the crawler. The site-file checks are handed that
+// measurement. These assert the contract can no longer hold two answers.
+// ---------------------------------------------------------------------------
+
+/** The audit result a site with this robots state actually produces. */
+const withRobots = (
+  fileStatus: TechnicalData["robotsTxtStatus"],
+  crawlStatus: SiteCrawlSummary["robots"]["status"],
+  enforced: boolean,
+): SiteAuditResult =>
+  result({
+    data: auditData({
+      technical: {
+        robotsTxtStatus: fileStatus,
+        robotsBlocksEverything: false,
+        sitemapStatus: "absent",
+        sitemapUrl: null,
+      },
+    }),
+    crawl: crawl({ robots: { status: crawlStatus, enforced, excluded: 0 } }),
+  });
+
+test("robots.txt read: every consumer sees it was read", () => {
+  const input = buildAIReportInput(withRobots("found", "rules", true));
+
+  assert.equal(knowledgeOf(input.measurements.siteFiles.robotsTxt), "value");
+  assert.equal(input.coverage.robots.status, "rules");
+  assert.equal(input.coverage.robots.enforced, true);
+});
+
+test("robots.txt genuinely absent: every consumer may say so", () => {
+  const input = buildAIReportInput(withRobots("absent", "absent", true));
+
+  assert.equal(knowledgeOf(input.measurements.siteFiles.robotsTxt), "confirmed-absent");
+  assert.equal(input.coverage.robots.status, "absent");
+  assert.equal(
+    input.coverage.robots.enforced,
+    true,
+    "a site with no rules has had all of its rules respected",
+  );
+});
+
+test("robots.txt unreadable: no consumer may call it absent", () => {
+  /*
+   * THE EXACT FAILURE THIS FIX EXISTS FOR. The report showed "robots.txt could
+   * not be checked" in one panel and "robots.txt not found" in another, about
+   * the same file, in the same audit. One is a claim about our own request and
+   * the other is a claim about the client's website.
+   */
+  const input = buildAIReportInput(withRobots("unavailable", "unavailable", false));
+
+  assert.equal(knowledgeOf(input.measurements.siteFiles.robotsTxt), "unknown");
+  assert.equal(stateOf(input.measurements.siteFiles.robotsTxt), "unavailable");
+  assert.notEqual(
+    knowledgeOf(input.measurements.siteFiles.robotsTxt),
+    "confirmed-absent",
+    "an unreadable file is not a missing one",
+  );
+  assert.equal(input.coverage.robots.status, "unavailable");
+  assert.equal(input.coverage.robots.enforced, false);
+});
+
+test("the contract cannot hold both answers about robots.txt at once", () => {
+  /*
+   * Reads the two consumers of the one measurement and asserts they agree, for
+   * every state the engine can produce. Before the fix this combination was
+   * reachable: coverage "unavailable" beside knowledge "confirmed-absent".
+   */
+  const cases = [
+    { file: "found" as const, crawl: "rules" as const, enforced: true, permitsClaim: true },
+    { file: "found" as const, crawl: "empty" as const, enforced: true, permitsClaim: true },
+    { file: "absent" as const, crawl: "absent" as const, enforced: true, permitsClaim: true },
+    { file: "unavailable" as const, crawl: "unavailable" as const, enforced: false, permitsClaim: false },
+  ];
+
+  for (const situation of cases) {
+    const input = buildAIReportInput(
+      withRobots(situation.file, situation.crawl, situation.enforced),
+    );
+    const knowledge = knowledgeOf(input.measurements.siteFiles.robotsTxt);
+    const coverageSaysUnreadable = input.coverage.robots.status === "unavailable";
+
+    assert.equal(
+      knowledge === "confirmed-absent" || knowledge === "value",
+      situation.permitsClaim,
+      situation.crawl,
+    );
+    assert.ok(
+      !(coverageSaysUnreadable && knowledge === "confirmed-absent"),
+      "coverage saying it was unreadable while the measurement calls it absent",
+    );
+  }
 });

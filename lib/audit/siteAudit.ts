@@ -26,6 +26,7 @@ import { dedupKey, normalizeCrawlUrl } from "../collector/crawlUrl.ts";
 import { runSeoChecks } from "../collector/seoChecks.ts";
 import { runSecurityChecks } from "../collector/securityChecks.ts";
 import { runTechnicalChecks } from "../collector/technicalChecks.ts";
+import type { RobotsMeasurement } from "../collector/robots.ts";
 import { runSslChecks, DEFAULT_HTTPS_PORT } from "../collector/sslChecks.ts";
 import { runDnsChecks } from "../collector/dnsChecks.ts";
 import {
@@ -68,6 +69,7 @@ async function measureSite(
   entryUrl: string,
   servedOverHttps: boolean,
   deadline: Deadline,
+  robots: RobotsMeasurement,
 ): Promise<SiteChecks> {
   const url = new URL(entryUrl);
   // A site on a non-standard port presents its certificate there, not on 443.
@@ -75,7 +77,7 @@ async function measureSite(
 
   let technical: TechnicalData | null = null;
   if (!deadline.expired()) {
-    technical = await runTechnicalChecks(entryUrl, deadline);
+    technical = await runTechnicalChecks(entryUrl, robots, deadline);
   }
 
   const siteDeadline = capDeadline(deadline, SITE_CHECKS_BUDGET_MS);
@@ -103,7 +105,12 @@ export interface SiteAuditOptions {
    * "evaluated once" and "never evaluated" look identical when the answer is
    * silence.
    */
-  siteChecksImpl?: (entryUrl: string, servedOverHttps: boolean, deadline: Deadline) => Promise<SiteChecks>;
+  siteChecksImpl?: (
+    entryUrl: string,
+    servedOverHttps: boolean,
+    deadline: Deadline,
+    robots: RobotsMeasurement,
+  ) => Promise<SiteChecks>;
   deadline?: Deadline;
   /** Passed through to the crawler untouched. */
   crawl?: Omit<Parameters<typeof crawlSite>[0], "requestedUrl" | "onProgress">;
@@ -161,6 +168,9 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<SiteAudit
     entry.finalUrl,
     entry.servedOverHttps,
     deadline,
+    // The crawler already read robots.txt. Handing its measurement on is what
+    // keeps one audit from holding two answers about the same file.
+    crawl.robots,
   );
 
   const normalized = normalizeUrl(options.requestedUrl);

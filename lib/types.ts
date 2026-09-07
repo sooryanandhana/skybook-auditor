@@ -255,9 +255,20 @@ export interface SeoData {
    * decline to judge rather than report half a dozen problems that are not
    * there.
    *
-   * Head-based facts below — title, meta description, canonical, lang,
-   * viewport — do not depend on it. They are served in the markup either way
-   * and are judged on their own.
+   * HEAD-BASED FACTS BELOW — title, meta description, canonical, lang,
+   * viewport — ARE MEASURED INDEPENDENTLY OF IT. A tag present in the served
+   * markup is present, and nothing about the body changes that.
+   *
+   * Their ABSENCE is a different claim, and it IS gated on this number. A page
+   * that builds itself in the browser commonly sets its own head tags at
+   * runtime, so their absence from the served markup is not evidence they are
+   * missing from the page. The rules that would report one as missing decline
+   * to run when the body is too thin to judge by, and say so in
+   * `skippedChecks` rather than leaving a silent gap.
+   *
+   * `fromServedHead` in `lib/rules/selectors.ts` is where that happens and is
+   * authoritative; it shares this same threshold deliberately, so there is one
+   * notion of "too little was served to judge by" rather than two.
    *
    * Excludes script, style, noscript and template contents: none of it is ever
    * shown to a visitor.

@@ -51,7 +51,7 @@ import {
   type AIReportInput,
   type AIReportLabPerformance,
   type AIReportLimit,
-  type AIReportMailServers,
+  type AIReportMailRouting,
   type AIReportMixedContent,
   type AIReportPageMeasurements,
   type AIReportPerformance,
@@ -71,6 +71,7 @@ import {
 import type { SiteCrawlSummary } from "../collector/crawlSite.ts";
 import type {
   AuditData,
+  MxRecord,
   DnsRecordSet,
   EmailPolicyRecord,
   FieldPerformance,
@@ -587,6 +588,35 @@ function toCertificate(ssl: SslData): AIMeasurement<AIReportCertificate> {
   });
 }
 
+/**
+ * Where a domain routes its mail, or that it has published that it takes none.
+ *
+ * RFC 7505: a single MX pointing at the root says the domain accepts no email.
+ * The resolver hands that back as an empty exchange, so projected as an
+ * ordinary record it read as "one mail server whose name is blank" -- one
+ * server, when the domain published none. The report already tells these
+ * apart; this is the same reading, in the contract's own terms.
+ *
+ * ONLY WHEN IT IS THE SOLE RECORD, which is what the specification requires.
+ * A domain publishing a root target alongside real servers has published
+ * something contradictory, and the honest projection of that is the records it
+ * actually has rather than a conclusion drawn from the broken one.
+ */
+function toMailRouting(records: MxRecord[]): AIReportMailRouting {
+  const isRoot = (exchange: string) => {
+    const name = exchange.trim();
+    return name === "" || name === ".";
+  };
+
+  if (records.length === 1 && isRoot(records[0].exchange)) return { acceptsMail: false };
+
+  return {
+    acceptsMail: true,
+    count: records.length,
+    hosts: records.slice(0, MAX_LIST_ITEMS).map((record) => siteText(record.exchange)),
+  };
+}
+
 function toDnsMeasurements(dns: AuditData["dns"]): AIReportDnsMeasurements {
   const count = (records: unknown[]): AIReportRecordCount => ({ count: records.length });
 
@@ -595,13 +625,7 @@ function toDnsMeasurements(dns: AuditData["dns"]): AIReportDnsMeasurements {
     emailDomain: dns.emailDomain,
     a: fromDnsRecordSet(dns.a, count),
     aaaa: fromDnsRecordSet(dns.aaaa, count),
-    mx: fromDnsRecordSet(
-      dns.mx,
-      (records): AIReportMailServers => ({
-        count: records.length,
-        hosts: records.slice(0, MAX_LIST_ITEMS).map((record) => siteText(record.exchange)),
-      }),
-    ),
+    mx: fromDnsRecordSet(dns.mx, toMailRouting),
     ns: fromDnsRecordSet(dns.ns, count),
     /*
      * `txt` is deliberately absent. It is the whole of a domain's TXT records,

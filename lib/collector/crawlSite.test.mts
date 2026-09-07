@@ -214,7 +214,7 @@ test("a crawl produces no findings at all — that is not this layer's job", asy
   const fetcher = scriptedFetch(() => FAILED("gone"));
   const result = await crawl({ requestedUrl: SITE, fetchImpl: fetcher.impl });
 
-  assert.deepEqual(Object.keys(result).sort(), ["attempts", "pages", "summary"]);
+  assert.deepEqual(Object.keys(result).sort(), ["attempts", "pages", "robots", "summary"]);
   const asRecord: Record<string, unknown> = { ...result };
   assert.equal(asRecord.findings, undefined);
   assert.equal(asRecord.skippedChecks, undefined);
@@ -1283,7 +1283,7 @@ test("an unreachable sitemap is not a failure and not a finding", async () => {
 
   assert.equal(result.summary.unavailable.length, 0, "a missing sitemap is not a broken page");
   assert.equal(result.summary.complete, true);
-  assert.deepEqual(Object.keys(result).sort(), ["attempts", "pages", "summary"]);
+  assert.deepEqual(Object.keys(result).sort(), ["attempts", "pages", "robots", "summary"]);
 });
 
 test("a truncated sitemap still contributes the entries it did contain", async () => {
@@ -1477,7 +1477,7 @@ test("a disallowed page is not a finding and not an evaluated page", async () =>
   assert.equal(result.summary.evaluated, 1, "only the home page");
   assert.equal(result.pages.length, 1);
   assert.equal(result.attempts.length, 1);
-  assert.deepEqual(Object.keys(result).sort(), ["attempts", "pages", "summary"]);
+  assert.deepEqual(Object.keys(result).sort(), ["attempts", "pages", "robots", "summary"]);
   assert.deepEqual(
     Object.keys(result.summary.robots).sort(),
     ["enforced", "excluded", "status"],
@@ -2033,7 +2033,7 @@ test("truncated discovery is still not a finding", async () => {
 
   assert.equal(summary.complete, false);
   assert.equal(summary.unavailable.length, 0, "a bound we set is not the site's fault");
-  assert.deepEqual(Object.keys(rest).sort(), ["attempts", "pages"]);
+  assert.deepEqual(Object.keys(rest).sort(), ["attempts", "pages", "robots"]);
 });
 
 test("sitemap pages are fetched through fetchPage like any other page", async () => {
@@ -2279,7 +2279,7 @@ test("discovery adds no findings — it only produces more crawl work", async ()
 
   const result = await crawl({ requestedUrl: SITE, fetchImpl: fetcher.impl });
 
-  assert.deepEqual(Object.keys(result).sort(), ["attempts", "pages", "summary"]);
+  assert.deepEqual(Object.keys(result).sort(), ["attempts", "pages", "robots", "summary"]);
   assert.equal(result.summary.unavailable.length, 0);
   // A mailto: link and an outbound link are normal markup, not faults.
   assert.equal(result.attempts.every((a) => a.outcome === "evaluated"), true);
@@ -3334,4 +3334,74 @@ test("template exclusion happens in the extractor, not by filtering addresses", 
 
   assert.match(extractor, /\$\("template"\)\.remove\(\)/, "the extractor drops the element");
   assert.ok(!/\{\{|placeholder/i.test(crawler), "the crawler recognises no placeholder syntax");
+});
+
+// ---------------------------------------------------------------------------
+// THE ONE ROBOTS.TXT MEASUREMENT LEAVES WITH THE CRAWL
+//
+// The site-file checks used to fetch this file for themselves. Two requests
+// for one file can come back differently, and one report then carried both
+// answers: "no robots.txt" beside "robots.txt could not be checked". The
+// crawl now hands its measurement on, so these assert that what leaves is
+// what was actually read.
+// ---------------------------------------------------------------------------
+
+test("the crawl hands on the robots.txt it actually read", async () => {
+  const fetcher = siteFetch({ [SITE]: linksTo() });
+  const rules = "User-agent: *\nDisallow: /admin/";
+
+  const result = await crawlSite_({
+    requestedUrl: SITE,
+    fetchImpl: fetcher.impl,
+    sitemapFetchImpl: robotsAnd(rules).impl,
+  });
+
+  assert.deepEqual(result.robots, { status: "found", text: rules });
+  assert.equal(
+    result.summary.robots.status,
+    "rules",
+    "and the summary still reports in its own vocabulary",
+  );
+});
+
+test("a robots.txt the server says is not there leaves as absent", async () => {
+  const fetcher = siteFetch({ [SITE]: linksTo() });
+
+  const result = await crawlSite_({
+    requestedUrl: SITE,
+    fetchImpl: fetcher.impl,
+    sitemapFetchImpl: robotsAnd(null).impl,
+  });
+
+  assert.deepEqual(result.robots, { status: "absent" });
+});
+
+test("a robots.txt that could not be read never leaves as absent", async () => {
+  const fetcher = siteFetch({ [SITE]: linksTo() });
+  const unreachable: SitemapFetcher = async () => ({ ok: false, reason: "unavailable" });
+
+  const result = await crawlSite_({
+    requestedUrl: SITE,
+    fetchImpl: fetcher.impl,
+    sitemapFetchImpl: unreachable,
+  });
+
+  assert.deepEqual(result.robots, { status: "unavailable" });
+  assert.notEqual(
+    result.robots.status,
+    "absent",
+    "everything downstream reads this, and none of it may claim the file is missing",
+  );
+});
+
+test("an empty robots.txt leaves as read, with the text it had", async () => {
+  const fetcher = siteFetch({ [SITE]: linksTo() });
+
+  const result = await crawlSite_({
+    requestedUrl: SITE,
+    fetchImpl: fetcher.impl,
+    sitemapFetchImpl: robotsAnd("").impl,
+  });
+
+  assert.deepEqual(result.robots, { status: "found", text: "" });
 });

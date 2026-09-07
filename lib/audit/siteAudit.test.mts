@@ -22,6 +22,8 @@ import { createJobStore } from "../jobs/jobStore.ts";
 import { statusAnswer, resultAnswer, JOB_NOT_FOUND, NOT_READY } from "../jobs/jobResponses.ts";
 import { AUDIT_RULES, PAGE_RULES, SITE_RULES } from "../rules/all.ts";
 import type { CrawlResult, CrawlProgress } from "../collector/crawlSite.ts";
+import { runTechnicalChecks } from "../collector/technicalChecks.ts";
+import type { RobotsMeasurement, RobotsStatus } from "../collector/robots.ts";
 import type { FetchedPage } from "../collector/fetchPage.ts";
 import type {
   DnsData,
@@ -67,6 +69,9 @@ function page(url: string, html = ORDINARY_PAGE): FetchedPage {
 function crawlResult(overrides: Partial<CrawlResult> = {}): CrawlResult {
   const pages = overrides.pages ?? [page(SITE)];
   return {
+    // The one robots.txt measurement, read by the crawl and handed on to the
+    // site checks. Nothing else in the audit reads that file.
+    robots: overrides.robots ?? { status: "absent" },
     pages,
     attempts: overrides.attempts ?? pages.map((p) => ({
       url: p.finalUrl,
@@ -1056,4 +1061,102 @@ test("site facts reach the rules exactly as injected", () => {
   assert.equal(fixture.trusted, true);
   assert.equal(fixture.problem, null);
   assert.equal(fixture.certificate?.coversHostname, true);
+});
+
+// ---------------------------------------------------------------------------
+// ROBOTS.TXT IS MEASURED ONCE
+//
+// The crawler reads the file before it queues anything, and the site checks
+// are handed that measurement rather than fetching it again. Two requests for
+// one file can come back differently, and one audit then held two answers:
+// "no robots.txt" beside "robots.txt could not be checked", about the same
+// file, in the same report.
+// ---------------------------------------------------------------------------
+
+test("the site checks are handed the crawl's own robots measurement", async () => {
+  const states: RobotsMeasurement[] = [
+    { status: "found", text: "User-agent: *\nDisallow:" },
+    { status: "absent" },
+    { status: "unavailable" },
+  ];
+
+  for (const robots of states) {
+    let handed: RobotsMeasurement | undefined;
+    await runSiteAudit({
+      requestedUrl: SITE,
+      crawlImpl: crawlReturning(crawlResult({ robots })).impl,
+      siteChecksImpl: async (_url, _https, _deadline, given) => {
+        handed = given;
+        return healthySite();
+      },
+    });
+
+    assert.deepEqual(handed, robots, robots.status);
+  }
+});
+
+test("an unreadable robots.txt never reaches the report as absent", async () => {
+  /*
+   * THE EXACT FAILURE THIS EXISTS FOR. The crawl said the file could not be
+   * read while the site checks, having fetched it separately, said the server
+   * had told them it was not there. Both statements were in one report.
+   */
+  const result = await runSiteAudit({
+    requestedUrl: SITE,
+    crawlImpl: crawlReturning(crawlResult({ robots: { status: "unavailable" } })).impl,
+    // The real projection, so the status is derived rather than asserted.
+    siteChecksImpl: async (_url, _https, deadline, robots) => ({
+      technical: await runTechnicalChecks(SITE, robots, deadline),
+      ssl: healthySsl(),
+      dns: healthyDns(),
+    }),
+  });
+
+  assert.equal(result.data.technical?.robotsTxtStatus, "unavailable");
+  assert.notEqual(
+    result.data.technical?.robotsTxtStatus,
+    "absent",
+    "a file we could not read is not a file the site does not have",
+  );
+  assert.equal(
+    result.data.technical?.robotsBlocksEverything,
+    false,
+    "and nothing may be concluded from text we never saw",
+  );
+});
+
+test("the two robots states in a result can no longer disagree", async () => {
+  const pairs: Array<{ robots: RobotsMeasurement; crawlStatus: RobotsStatus }> = [
+    { robots: { status: "found", text: "" }, crawlStatus: "empty" },
+    { robots: { status: "absent" }, crawlStatus: "absent" },
+    { robots: { status: "unavailable" }, crawlStatus: "unavailable" },
+  ];
+
+  for (const pair of pairs) {
+    const crawl = crawlResult({ robots: pair.robots });
+    crawl.summary.robots = {
+      status: pair.crawlStatus,
+      enforced: pair.crawlStatus !== "unavailable",
+      excluded: 0,
+    };
+
+    const result = await runSiteAudit({
+      requestedUrl: SITE,
+      crawlImpl: crawlReturning(crawl).impl,
+      siteChecksImpl: async (_url, _https, deadline, robots) => ({
+        technical: await runTechnicalChecks(SITE, robots, deadline),
+        ssl: healthySsl(),
+        dns: healthyDns(),
+      }),
+    });
+
+    const fileSaysUnreadable = result.data.technical?.robotsTxtStatus === "unavailable";
+    const crawlSaysUnreadable = result.crawl.robots.status === "unavailable";
+
+    assert.equal(
+      fileSaysUnreadable,
+      crawlSaysUnreadable,
+      `one panel would say ${result.data.technical?.robotsTxtStatus} while the other says ${result.crawl.robots.status}`,
+    );
+  }
 });

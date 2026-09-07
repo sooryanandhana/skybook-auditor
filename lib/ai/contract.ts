@@ -682,12 +682,36 @@ export interface AIReportRecordCount {
   readonly count: number;
 }
 
-/** The domain's mail servers. */
-export interface AIReportMailServers {
-  readonly count: number;
-  /** The mail hostnames, capped at MAX_LIST_ITEMS. */
-  readonly hosts: readonly AIText[];
-}
+/**
+ * Where the domain routes its email, or that it has said it takes none.
+ *
+ * A DISCRIMINATED UNION BECAUSE OF RFC 7505. A domain that accepts no email
+ * says so by publishing a single MX record pointing at the root, which arrives
+ * from the resolver as an empty exchange with preference 0. Projected as an
+ * ordinary record it became "one mail server, name blank" -- and one mail
+ * server is the opposite of what the domain published. Plenty of domains that
+ * only serve a website do exactly this, `example.com` among them.
+ *
+ * Read `acceptsMail` before anything else here. Nothing else is a count.
+ */
+export type AIReportMailRouting =
+  | {
+      /**
+       * The domain publishes a null MX. It states that it accepts no email.
+       *
+       * A MEASURED FACT, not a judgement: it is what the record says. Whether
+       * a domain ought to accept email is not this audit's business, and there
+       * is no finding for it.
+       */
+      readonly acceptsMail: false;
+    }
+  | {
+      readonly acceptsMail: true;
+      /** How many mail servers the domain publishes. Always at least one. */
+      readonly count: number;
+      /** The mail hostnames, capped at MAX_LIST_ITEMS. */
+      readonly hosts: readonly AIText[];
+    };
 
 export interface AIReportDnsMeasurements {
   /** The host serving the website. */
@@ -702,7 +726,7 @@ export interface AIReportDnsMeasurements {
   readonly emailDomain: string;
   readonly a: AIMeasurement<AIReportRecordCount>;
   readonly aaaa: AIMeasurement<AIReportRecordCount>;
-  readonly mx: AIMeasurement<AIReportMailServers>;
+  readonly mx: AIMeasurement<AIReportMailRouting>;
   readonly ns: AIMeasurement<AIReportRecordCount>;
 }
 

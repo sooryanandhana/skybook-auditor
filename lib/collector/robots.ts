@@ -94,6 +94,44 @@ export interface RobotsPolicy {
   isAllowed(url: URL | string): boolean;
 }
 
+/**
+ * THE ONE ROBOTS.TXT MEASUREMENT, restated for everything that reports on it.
+ *
+ * The file is fetched exactly once per audit, by the crawler, before anything
+ * is queued. Everything else that has something to say about robots.txt --
+ * sitemap discovery, the site-file checks, the report, the AI contract -- is
+ * handed this rather than going and looking again.
+ *
+ * WHY THAT MATTERS MORE THAN THE SAVED REQUEST. Two fetches of one file can
+ * disagree: a 404 on the first and a timeout on the second are different
+ * answers to the same question, and the report then said both at once, "this
+ * site has no robots.txt" beside "robots.txt could not be checked". One is a
+ * claim about the client's website and the other is a claim about our own
+ * request, and the whole project turns on not confusing them. With one
+ * measurement the disagreement cannot arise.
+ *
+ * A DISCRIMINATED UNION, so only "found" carries text. "absent" and
+ * "unavailable" have no text to offer and cannot pretend to.
+ *
+ * The crawler's four states collapse to three here:
+ *
+ *   rules / empty  -> found. We read it; it either carried rules or did not.
+ *   absent         -> absent. The server told us there is none.
+ *   unavailable    -> unavailable. We did not find out, and nothing may say
+ *                     otherwise.
+ */
+export type RobotsMeasurement =
+  | { status: "found"; text: string }
+  | { status: "absent" | "unavailable" };
+
+/** Projects the policy the crawler holds into the measurement everyone reads. */
+export function robotsMeasurement(policy: RobotsPolicy): RobotsMeasurement {
+  if (policy.status === "unavailable") return { status: "unavailable" };
+  if (policy.status === "absent") return { status: "absent" };
+  // "rules" and "empty" both mean the file was read, so the text is there.
+  return { status: "found", text: policy.text ?? "" };
+}
+
 /** A policy that permits everything, for when there are no rules to apply. */
 function permissive(status: RobotsStatus, text: string | null): RobotsPolicy {
   return {

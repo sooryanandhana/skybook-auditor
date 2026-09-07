@@ -2,7 +2,12 @@
 // Next.js resolves it the same way.
 import { safeFetch } from "./safety.ts";
 import { findAllSitemapDirectives } from "./sitemap.ts";
-import { isPathAllowed, parseGroups, selectRules } from "./robots.ts";
+import {
+  isPathAllowed,
+  parseGroups,
+  selectRules,
+  type RobotsMeasurement,
+} from "./robots.ts";
 import { capDeadline, createDeadline, type Deadline } from "./deadline.ts";
 import type { SiteFileStatus, TechnicalData } from "@/lib/types";
 
@@ -19,9 +24,6 @@ const TOTAL_BUDGET_MS = 10_000;
 
 const USER_AGENT = "SkybookAuditBot/1.0 (+website audit tool)";
 
-/** robots.txt files are small; anything larger is not worth reading. */
-const MAX_ROBOTS_BYTES = 512_000;
-
 /**
  * The shared countdown now lives in its own module, because the page fetch
  * uses the same one — that is what keeps a whole audit inside one budget
@@ -31,8 +33,9 @@ const MAX_ROBOTS_BYTES = 512_000;
 /**
  * Checks the site-level files search engines look for.
  *
- * These live at fixed addresses (/robots.txt, /sitemap.xml) rather than in the
- * page's HTML, so they need their own requests.
+ * These live at fixed addresses rather than in the page's HTML. Only the
+ * sitemap is requested here: robots.txt arrives already measured, because the
+ * crawler read it before it queued anything and one file gets one answer.
  *
  * The hostname was already safety-checked before the main page was fetched,
  * and we only build URLs on that same origin — so no new address is being
@@ -40,6 +43,17 @@ const MAX_ROBOTS_BYTES = 512_000;
  */
 export async function runTechnicalChecks(
   pageUrl: string,
+  /**
+   * robots.txt, ALREADY MEASURED.
+   *
+   * Not fetched here, and there is no code path left that could. The crawler
+   * reads the file once before it queues anything and hands the result on;
+   * this module reports on that measurement and finds the Sitemap: lines in
+   * the same text. Fetching it a second time is how one audit came to say
+   * both "no robots.txt" and "robots.txt could not be checked" about the same
+   * file, so the second request is gone rather than reconciled.
+   */
+  robots: RobotsMeasurement,
   /**
    * The audit's clock, or a number of milliseconds to run on its own.
    * Sharing the audit's clock is what keeps the whole audit inside one budget.
@@ -63,11 +77,11 @@ export async function runTechnicalChecks(
       ? createDeadline(budget)
       : capDeadline(budget, TOTAL_BUDGET_MS);
 
-  const robots = await fetchRobotsTxt(`${origin}/robots.txt`, deadline);
-
   // A sitemap can be declared inside robots.txt. If it isn't, check the
-  // conventional location before concluding there isn't one.
-  const sitemapFromRobots = robots.text ? findSitemapDirective(robots.text) : null;
+  // conventional location before concluding there isn't one. The text is the
+  // crawler's copy, so this reads the same file the rules were taken from.
+  const sitemapFromRobots =
+    robots.status === "found" ? findSitemapDirective(robots.text) : null;
 
   const sitemap =
     sitemapFromRobots !== null
@@ -83,65 +97,10 @@ export async function runTechnicalChecks(
      * the rule reading it consults the status first and declines to run rather
      * than reporting a site as unblocked on the strength of a failed request.
      */
-    robotsBlocksEverything: robots.text !== null && blocksEveryCrawler(robots.text),
+    robotsBlocksEverything: robots.status === "found" && blocksEveryCrawler(robots.text),
     sitemapStatus: sitemap.status,
     sitemapUrl: sitemap.url,
   };
-}
-
-/**
- * Reads /robots.txt, and says which of three things happened.
- *
- * EVERY BRANCH BELOW CHOOSES BETWEEN "absent" AND "unavailable" DELIBERATELY,
- * because the difference is the difference between a fact about the client's
- * website and a fact about our own request. Only the server saying so makes a
- * file absent; everything else means we did not find out.
- */
-async function fetchRobotsTxt(
-  url: string,
-  deadline: Deadline,
-): Promise<{ status: SiteFileStatus; text: string | null }> {
-  // No time left to look. We know nothing about this file.
-  if (deadline.expired()) return { status: "unavailable", text: null };
-
-  try {
-    // safeFetch, not fetch: a site can redirect /robots.txt anywhere it likes,
-    // including at a private address. Every hop is safety-checked.
-    const response = await safeFetch(url, {
-      headers: { "User-Agent": USER_AGENT },
-      signal: deadline.signal(),
-    });
-
-    // Nothing came back at all: a timeout, a refused connection, too many
-    // redirects, or an address the safety check declined.
-    if (!response) return { status: "unavailable", text: null };
-
-    // The server answered and said there is no such file. That IS knowledge.
-    if (response.status === 404 || response.status === 410) {
-      return { status: "absent", text: null };
-    }
-
-    // A 5xx, a 403, a 429 — the server has one, or might, and would not show
-    // us. Reporting "no robots.txt" here would be inventing an answer.
-    if (!response.ok) return { status: "unavailable", text: null };
-
-    /*
-     * Some sites serve their homepage for any unknown path, so a "robots.txt"
-     * that is actually HTML means there is no real robots.txt. The server
-     * answered successfully, so this is a genuine absence.
-     */
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("html")) return { status: "absent", text: null };
-
-    const text = await readCapped(response, MAX_ROBOTS_BYTES);
-    // Too large to read, or the body failed part-way. It exists; we did not
-    // manage to read it, so we cannot say what it contains.
-    if (text === null) return { status: "unavailable", text: null };
-
-    return { status: "found", text };
-  } catch {
-    return { status: "unavailable", text: null };
-  }
 }
 
 /**
@@ -281,36 +240,4 @@ async function findDefaultSitemap(
   } catch {
     return { status: "unavailable", url: null };
   }
-}
-
-/** Reads a response body up to a byte limit, returning null if it exceeds it. */
-async function readCapped(response: Response, maxBytes: number): Promise<string | null> {
-  if (!response.body) return "";
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.length;
-      if (total > maxBytes) {
-        await reader.cancel();
-        return null;
-      }
-      chunks.push(value);
-    }
-  } catch {
-    return null;
-  }
-
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return new TextDecoder("utf-8").decode(merged);
 }

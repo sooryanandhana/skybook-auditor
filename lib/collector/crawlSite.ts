@@ -46,7 +46,13 @@ import {
   type SitemapFetcher,
   type SitemapLimits,
 } from "./sitemap.ts";
-import { fetchRobots, type RobotsPolicy, type RobotsStatus } from "./robots.ts";
+import {
+  fetchRobots,
+  robotsMeasurement,
+  type RobotsMeasurement,
+  type RobotsPolicy,
+  type RobotsStatus,
+} from "./robots.ts";
 import {
   createFrontier,
   DEFAULT_CRAWL_LIMITS,
@@ -124,6 +130,15 @@ export interface SiteCrawlSummary extends CrawlSummary {
 
 export interface CrawlResult {
   summary: SiteCrawlSummary;
+  /**
+   * The site's robots.txt, read once here and handed on.
+   *
+   * IN-PROCESS ONLY. It carries the file's text, so it stays out of the
+   * summary and never reaches the browser or the AI contract. The site-file
+   * checks read this instead of fetching the same file a second time, which
+   * is what stops one audit reporting two different answers about it.
+   */
+  robots: RobotsMeasurement;
   /** Every page fetched and read as HTML, in the order they were visited. */
   pages: FetchedPage[];
   /** Every attempt, including the ones that produced nothing to audit. */
@@ -387,7 +402,7 @@ export async function crawlSite(options: CrawlOptions): Promise<CrawlResult> {
       // Already read for its rules; this is the same file. The STATE travels
       // with it, so a robots.txt we could not read cannot be mistaken for one
       // that simply declared no sitemaps.
-      robots: robotsForDiscovery(robots),
+      robots: robotsMeasurement(robots),
     });
 
     sitemapDiscovery = declared.discovery;
@@ -622,28 +637,8 @@ export async function crawlSite(options: CrawlOptions): Promise<CrawlResult> {
     },
     pages,
     attempts,
+    robots: robotsMeasurement(robots),
   };
-}
-
-/**
- * Restates the robots policy in the terms sitemap discovery needs.
- *
- * The crawler's four states collapse to three here, because discovery only
- * cares whether there was a file to read `Sitemap:` lines out of:
- *
- *   rules / empty  -> found. We read it; it either named sitemaps or did not.
- *   absent         -> absent. There was nothing to declare them, and nothing
- *                     has been missed.
- *   unavailable    -> unavailable. It may have named sitemaps we will now
- *                     never look for, so discovery cannot call itself whole.
- */
-function robotsForDiscovery(
-  robots: RobotsPolicy,
-): { status: "found"; text: string } | { status: "absent" | "unavailable" } {
-  if (robots.status === "unavailable") return { status: "unavailable" };
-  if (robots.status === "absent") return { status: "absent" };
-  // "rules" and "empty" both mean the file was read, so the text is there.
-  return { status: "found", text: robots.text ?? "" };
 }
 
 /**

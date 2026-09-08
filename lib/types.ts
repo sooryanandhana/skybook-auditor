@@ -1296,3 +1296,63 @@ export interface JobProgressView {
   robotsExcluded: number;
   complete: boolean;
 }
+
+/*
+ * Type-only, like the crawl summary above, so nothing is imported at runtime.
+ * Both names are provider-neutral: the explanation contract is the shape any
+ * model must answer in, and the failure list is about asking rather than about
+ * who was asked. Neither module loads an SDK, and a client component importing
+ * this file therefore pulls in no provider code at all.
+ */
+import type { AIExplanation } from "./ai/explanation";
+import type { ExplanationFailureReason } from "./ai/explanationOutcome";
+
+/**
+ * What POST /api/audit/explain returns.
+ *
+ * SHAPED SO THE BROWSER CANNOT MISTAKE COMMENTARY FOR MEASUREMENT. There is no
+ * severity here, no score, no count and no denominator. Every explanation
+ * names a `ruleId` and carries three pieces of writing; the finding it belongs
+ * to is already on screen, measured and graded by our own code, and stays the
+ * source of truth for everything else about it.
+ *
+ * `ok: false` is reserved for never getting as far as asking — an unknown job,
+ * an audit still running. A model that was asked and could not answer is
+ * `ok: true` with `state: "not-explained"`, because the question "is there
+ * commentary?" was answered perfectly well: there is not, and here is why.
+ * That is the same distinction the speed check draws, for the same reason.
+ *
+ * NOTHING A PROVIDER SAID REACHES HERE. No response body, no headers, no
+ * status line, no exception. `message` is a sentence written in this
+ * repository for a person to read.
+ */
+export type AuditExplanationResponse =
+  | {
+      ok: true;
+      jobId: string;
+      state: "explained";
+      /** Written with every finding in view. May be empty if none survived. */
+      executiveSummary: string;
+      /** Validator-approved prose only. Each names a finding that really fired. */
+      explanations: AIExplanation[];
+      /** True when the validator dropped at least one entry. */
+      partial: boolean;
+      /**
+       * How many entries were dropped.
+       *
+       * A COUNT, NEVER THE REASONS. A rejection reason quotes the model's own
+       * text back, and none of what a model wrote may reach a report except
+       * through the fields above.
+       */
+      rejectedCount: number;
+    }
+  | {
+      ok: true;
+      jobId: string;
+      state: "not-explained";
+      reason: ExplanationFailureReason;
+      /** Safe to show. Written here, never anywhere else. */
+      message: string;
+    }
+  | { ok: false; jobId: string; error: string }
+  | { ok: false; error: string };

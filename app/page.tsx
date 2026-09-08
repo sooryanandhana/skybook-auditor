@@ -43,8 +43,10 @@ import {
   spfFacts,
 } from "@/lib/report/measurementsView";
 import type { SiteCrawlSummary } from "@/lib/collector/crawlSite";
+import type { AIExplanation } from "@/lib/ai/explanation";
 import type {
   AuditData,
+  AuditExplanationResponse,
   AuditResultResponse,
   AuditStartResponse,
   AuditStatusResponse,
@@ -135,6 +137,17 @@ export default function HomePage() {
       performanceAbortRef.current?.abort();
     };
   }, []);
+  /*
+   * The written commentary, and whether it is still being written.
+   *
+   * A SEPARATE PIECE OF STATE FROM THE AUDIT, deliberately. The report above
+   * is complete and on screen before this is even asked for, and nothing here
+   * can empty, reorder or re-grade it. Null means "not asked yet or still
+   * being written" and never means "the site is fine".
+   */
+  const [explanation, setExplanation] = useState<AuditExplanationResponse | null>(null);
+  const [explanationRunning, setExplanationRunning] = useState(false);
+
   const [result, setResult] = useState<AuditData | null>(null);
   const [error, setError] = useState<string | null>(null);
   // A failed audit can still have measured something — see AuditResponse.
@@ -160,6 +173,8 @@ export default function HomePage() {
     setPerformanceRunning(false);
     setPerformanceFindings([]);
     setPerformanceSkipped([]);
+    setExplanation(null);
+    setExplanationRunning(false);
 
     try {
       /*
@@ -274,7 +289,23 @@ export default function HomePage() {
        * split, so it must not be awaited before showing the results above.
        */
       if (includePerformance) {
-        void startPerformance(payload.result.data.fetch.finalUrl, runId, jobId);
+        /*
+         * The commentary waits for the speed check, and only for that.
+         *
+         * The server composes what the model sees from what it measured, and
+         * the speed figures arrive last. Asking before they land would produce
+         * a report that says the speed check is pending -- which is true, and
+         * useless, and permanent, because the answer is asked for once.
+         *
+         * `startPerformance` handles its own failures and never rejects, so
+         * this runs whether the speed check succeeded or not. A speed check
+         * that failed is still a measured state the writing may describe.
+         */
+        void startPerformance(payload.result.data.fetch.finalUrl, runId, jobId).then(() => {
+          void startExplanation(jobId, runId);
+        });
+      } else {
+        void startExplanation(jobId, runId);
       }
     } catch {
       if (runIdRef.current !== runId) return;
@@ -340,6 +371,49 @@ export default function HomePage() {
       );
     } finally {
       if (runIdRef.current === runId) setPerformanceRunning(false);
+    }
+  }
+
+  /**
+   * Asks the server, once, for the writing that goes beside the report.
+   *
+   * ONE REQUEST, AND NO RETRY. The server hands out a single claim per audit,
+   * so asking again would be answered from what it already has -- but there is
+   * no reason to ask again at all, and a retry here would be the beginning of
+   * a loop that spends money.
+   *
+   * THE BROWSER NEVER TALKS TO A MODEL. It sends a job id to this server and
+   * receives prose that has already been validated against the audit. There is
+   * no key here, no provider client, and nothing to configure.
+   */
+  async function startExplanation(jobId: string, runId: number) {
+    setExplanationRunning(true);
+
+    try {
+      const response = await fetch(
+        `/api/audit/explain?jobId=${encodeURIComponent(jobId)}`,
+        { method: "POST" },
+      );
+
+      const payload: AuditExplanationResponse = await response.json();
+      if (runIdRef.current !== runId || stoppedRef.current) return;
+
+      setExplanation(payload);
+    } catch {
+      /*
+       * Not reaching this server is not a failure of the audit, which is
+       * already on screen. It is recorded as the one thing we actually know.
+       */
+      if (runIdRef.current !== runId) return;
+      setExplanation({
+        ok: true,
+        jobId,
+        state: "not-explained",
+        reason: "network",
+        message: "Could not reach the commentary service on this server.",
+      });
+    } finally {
+      if (runIdRef.current === runId) setExplanationRunning(false);
     }
   }
 
@@ -465,6 +539,8 @@ export default function HomePage() {
           performanceRunning={performanceRunning}
           performanceFindings={performanceFindings}
           performanceSkipped={performanceSkipped}
+          explanation={explanation}
+          explanationRunning={explanationRunning}
         />
       )}
     </main>
@@ -523,6 +599,8 @@ function Results({
   performanceRunning,
   performanceFindings,
   performanceSkipped,
+  explanation,
+  explanationRunning,
 }: {
   data: AuditData;
   /** The whole-site audit, when a crawl produced one. */
@@ -531,7 +609,25 @@ function Results({
   performanceRunning: boolean;
   performanceFindings: Finding[];
   performanceSkipped: SkippedCheck[];
+  /** The server's answer about the writing. Null until it has answered. */
+  explanation: AuditExplanationResponse | null;
+  explanationRunning: boolean;
 }) {
+  /*
+   * ruleId -> the writing about that rule.
+   *
+   * Built from the server's list, which the validator already checked against
+   * the audit. A lookup rather than a merge: the finding is rendered from the
+   * server's measurement exactly as before, and the writing is shown beside it
+   * only when the id matches something that actually fired. An entry naming a
+   * rule not on screen therefore renders nothing at all -- there is no card
+   * for it to appear on.
+   */
+  const explanations = new Map<string, AIExplanation>(
+    explanation !== null && explanation.ok && explanation.state === "explained"
+      ? explanation.explanations.map((entry) => [entry.ruleId, entry])
+      : [],
+  );
   return (
     <section className={styles.results}>
       <div className={styles.summary}>
@@ -601,6 +697,8 @@ function Results({
         itself, so the concatenation is not — FindingsSection reorders them by
         the severity it was given. Ordering by a severity is not deciding one.
       */}
+      <AiSummaryPanel answer={explanation} running={explanationRunning} />
+
       <FindingsSection
         /*
          * The WHOLE SITE when a crawl produced one, not just the entry page.
@@ -615,6 +713,7 @@ function Results({
           ...(siteResult?.site.skippedChecks ?? data.skippedChecks),
           ...performanceSkipped,
         ]}
+        explanations={explanations}
       />
 
       {siteResult !== null && (
@@ -651,9 +750,12 @@ function Results({
 function FindingsSection({
   findings,
   skipped,
+  explanations,
 }: {
   findings: Finding[];
   skipped: SkippedCheck[];
+  /** Written commentary by rule id. Empty when there is none, which is fine. */
+  explanations: Map<string, AIExplanation>;
 }) {
   const state = findingsState(findings.length, skipped.length);
   const summary = findingsSummary(state);
@@ -719,6 +821,7 @@ function FindingsSection({
           intro={SITE_FINDINGS_INTRO}
           findings={site}
           scope="site"
+          explanations={explanations}
         />
       )}
 
@@ -729,6 +832,7 @@ function FindingsSection({
           intro={PAGE_FINDINGS_INTRO}
           findings={page}
           scope="page"
+          explanations={explanations}
         />
       )}
 
@@ -786,12 +890,14 @@ function ScopedFindings({
   intro,
   findings,
   scope,
+  explanations,
 }: {
   id: string;
   heading: string;
   intro: string;
   findings: Finding[];
   scope: FindingScope;
+  explanations: Map<string, AIExplanation>;
 }) {
   const categories = groupByCategory(findings);
 
@@ -809,7 +915,12 @@ function ScopedFindings({
           </h5>
           <ul className={styles.findings}>
             {group.findings.map((finding) => (
-              <FindingCard key={finding.id} finding={finding} scope={scope} />
+              <FindingCard
+                key={finding.id}
+                finding={finding}
+                scope={scope}
+                explanation={explanations.get(finding.id)}
+              />
             ))}
           </ul>
         </div>
@@ -824,7 +935,16 @@ function ScopedFindings({
  * Every number and every sentence comes from the server. The only decisions
  * made here are which of them to show and where to put it.
  */
-function FindingCard({ finding, scope }: { finding: Finding; scope: FindingScope }) {
+function FindingCard({
+  finding,
+  scope,
+  explanation,
+}: {
+  finding: Finding;
+  scope: FindingScope;
+  /** Writing about this finding, when there is any. Never a measurement. */
+  explanation?: AIExplanation;
+}) {
   const reach = affectedView(finding);
 
   return (
@@ -885,8 +1005,112 @@ function FindingCard({ finding, scope }: { finding: Finding; scope: FindingScope
             </ul>
           </details>
         )}
+
+        {/*
+          The writing, LAST and clearly labelled.
+
+          Below the evidence and the fixed action on purpose: what was measured
+          and what the rule says to do about it come first, and this explains
+          them. It carries no badge, no count and no denominator, because there
+          is no field in the contract it arrives on that could hold one.
+        */}
+        {explanation !== undefined && <FindingExplanation explanation={explanation} />}
       </div>
     </li>
+  );
+}
+
+/**
+ * What a model wrote about one finding.
+ *
+ * PLAIN TEXT ONLY. Every string here is rendered as text by React, which
+ * escapes it; nothing uses `dangerouslySetInnerHTML`, no link is built from
+ * it, and no part of it is ever put in an href or a style. The words
+ * originated with a model that was shown text taken off somebody else's
+ * website, so they are treated as text and nothing else.
+ *
+ * NONE OF THIS IS A MEASUREMENT and the labels say so. The severity, the
+ * counts, the evidence and the action above were all decided by our own code
+ * and are unaffected by anything here.
+ */
+function FindingExplanation({ explanation }: { explanation: AIExplanation }) {
+  return (
+    <div className={styles.aiExplanation}>
+      <p className={styles.aiLabel}>AI explanation</p>
+      <p className={styles.aiText}>{explanation.explanation}</p>
+
+      <p className={styles.aiSubLabel}>Why it matters</p>
+      <p className={styles.aiText}>{explanation.businessImpact}</p>
+
+      <p className={styles.aiSubLabel}>Suggested next step</p>
+      <p className={styles.aiText}>{explanation.recommendation}</p>
+    </div>
+  );
+}
+
+/**
+ * The written summary of the whole audit, and only ever a real one.
+ *
+ * NOTHING IS INVENTED HERE. With no answer yet the panel says it is being
+ * written; with an answer that produced no writing it says so and why; with an
+ * empty summary it renders nothing at all rather than filling the space.
+ *
+ * IT CANNOT OVERRIDE THE REPORT. It sits above the findings and describes
+ * them; every severity, count and measurement on this page comes from the
+ * audit and is rendered whether this panel says anything or not.
+ */
+function AiSummaryPanel({
+  answer,
+  running,
+}: {
+  answer: AuditExplanationResponse | null;
+  running: boolean;
+}) {
+  if (running || answer === null) {
+    return (
+      <section className={styles.aiPanel} aria-live="polite">
+        <p className={styles.aiPanelHeading}>AI summary</p>
+        <p className={styles.aiPending}>Writing a summary of these findings…</p>
+      </section>
+    );
+  }
+
+  if (!answer.ok || answer.state === "not-explained") {
+    /*
+     * A sentence the server wrote, shown as it was written.
+     *
+     * It never contains a provider's own words, a status line or an exception,
+     * and it never says anything about the website. The audit above is
+     * complete either way, and the wording is chosen so a reader cannot
+     * mistake a missing paragraph for a missing check.
+     */
+    const message = answer.ok ? answer.message : answer.error;
+
+    return (
+      <section className={styles.aiPanel}>
+        <p className={styles.aiPanelHeading}>AI summary</p>
+        <p className={styles.aiUnavailable}>{message}</p>
+        <p className={styles.aiUnavailableNote}>
+          Every finding below was measured and graded by this tool, and is
+          unaffected.
+        </p>
+      </section>
+    );
+  }
+
+  if (answer.executiveSummary.trim() === "") return null;
+
+  return (
+    <section className={styles.aiPanel}>
+      <p className={styles.aiPanelHeading}>AI summary</p>
+      <p className={styles.aiSummary}>{answer.executiveSummary}</p>
+      <p className={styles.aiPanelNote}>
+        Written by AI from the findings below. The findings, their severities
+        and every number in this report were measured by this tool.
+        {answer.partial &&
+          ` ${answer.rejectedCount} explanation${answer.rejectedCount === 1 ? " was" : "s were"} not usable and ${answer.rejectedCount === 1 ? "was" : "were"} left out.`}
+      </p>
+    </section>
   );
 }
 

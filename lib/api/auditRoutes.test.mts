@@ -19,8 +19,14 @@ import {
   auditStatusRoute,
   auditResultRoute,
   performanceRoute,
+  explainRoute,
+  EXPLAIN_IN_PROGRESS,
+  EXPLAIN_NOT_FINISHED,
 } from "./auditRoutes.ts";
 import { createJobStore } from "../jobs/jobStore.ts";
+import { AI_CONTRACT_VERSION } from "../ai/contract.ts";
+import type { ExplainResult } from "../ai/gemini/explain.ts";
+import type { Finding } from "../types.ts";
 import { JOB_TTL_MS } from "../jobs/jobStore.ts";
 import { resetRateLimits, DEFAULT_LIMIT, GLOBAL_LIMIT } from "../rateLimit.ts";
 import { runSeoChecks } from "../collector/seoChecks.ts";
@@ -710,4 +716,401 @@ test("an audit whose speed check never ran still says so honestly", async () => 
   assert.equal(input.measurements.performance.knowledge, "unknown");
   assert.equal(input.measurements.performance.state, "pending");
   assert.ok(!input.findings.some((f) => f.category === "speed"));
+});
+
+
+// ---------------------------------------------------------------------------
+// POST /api/audit/explain — the written commentary
+//
+// The route is driven with a stand-in for the model where the shaping is what
+// matters, and with the REAL adapter and validator where the question is
+// whether something a model said could reach a browser.
+// ---------------------------------------------------------------------------
+
+const META_RULE = "seo.meta-description.missing";
+
+const withFindings: Finding[] = [
+  {
+    id: META_RULE,
+    title: "No meta description",
+    category: "seo",
+    severity: "medium",
+    evidence: "No meta description tag was found.",
+    remediation: "Write a description of about 155 characters.",
+    scope: "page",
+    affected: [{ url: "https://example.com/", evidence: "No meta description tag." }],
+    affectedCount: 1,
+    evaluatedPages: 1,
+  },
+] as unknown as Finding[];
+
+/** A finished audit that actually found something, so there is prose to place. */
+function storeWithFindings() {
+  const store = createJobStore<SiteAuditResult, SpeedResult, ExplainResult>();
+  const job = store.create("https://example.com");
+  const audit = storedAudit();
+  const withOne = {
+    ...audit,
+    data: { ...audit.data, findings: withFindings },
+    site: { ...audit.site, findings: withFindings },
+  } as SiteAuditResult;
+  store.finish(job.id, "completed", withOne);
+  return { store, jobId: job.id };
+}
+
+const explainRequestFor = (jobId: string) =>
+  new Request(`https://audit.test/api/audit/explain?jobId=${encodeURIComponent(jobId)}`, {
+    method: "POST",
+  });
+
+const goodExplanation: ExplainResult = {
+  state: "explained",
+  explanations: {
+    version: AI_CONTRACT_VERSION,
+    executiveSummary: "One issue is worth attention on this site.",
+    explanations: [
+      {
+        ruleId: META_RULE,
+        explanation: "Search engines write their own summary when a page supplies none.",
+        businessImpact: "The snippet a customer reads is chosen for you.",
+        recommendation: "Write a description for each page that sells the page.",
+      },
+    ],
+  },
+  rejected: [],
+  partial: false,
+};
+
+test("explain: a successful answer reaches the browser as prose and nothing else", async () => {
+  const { store, jobId } = storeWithFindings();
+
+  const answer = await explainRoute(explainRequestFor(jobId), {
+    store,
+    explain: async () => goodExplanation,
+  });
+
+  assert.equal(answer.status, 200);
+  assert.ok(answer.body.ok);
+  if (!answer.body.ok || answer.body.state !== "explained") return;
+  assert.equal(answer.body.explanations.length, 1);
+  assert.equal(answer.body.explanations[0].ruleId, META_RULE);
+  assert.equal(answer.body.partial, false);
+  assert.equal(answer.body.rejectedCount, 0);
+});
+
+test("explain: nothing but the four contract fields leaves the server", async () => {
+  const { store, jobId } = storeWithFindings();
+
+  const answer = await explainRoute(explainRequestFor(jobId), {
+    store,
+    // A result carrying a rejection reason, which quotes the model's own text.
+    explain: async () => ({
+      ...goodExplanation,
+      rejected: [{ ruleId: "invented.rule", reason: 'model text: "trust me"' }],
+      partial: true,
+    }),
+  });
+
+  assert.ok(answer.body.ok);
+  if (!answer.body.ok || answer.body.state !== "explained") return;
+
+  assert.deepEqual(Object.keys(answer.body.explanations[0]).sort(), [
+    "businessImpact",
+    "explanation",
+    "recommendation",
+    "ruleId",
+  ]);
+  const wire = JSON.stringify(answer.body);
+  assert.ok(!wire.includes("trust me"), "a rejection quoted the model back to the browser");
+  assert.ok(!wire.includes("invented.rule"));
+  assert.equal(answer.body.rejectedCount, 1, "the count travels; the reasons do not");
+});
+
+test("explain: a model that could not be reached is still a successful answer", async () => {
+  const reasons = [
+    "no-api-key", "timeout", "rate-limited", "provider-error",
+    "network", "unreadable-response", "refused",
+  ] as const;
+
+  for (const reason of reasons) {
+    // A fresh audit each time: an answer is stored once, and the point here is
+    // the shaping of each reason rather than the storing of the first.
+    const { store, jobId } = storeWithFindings();
+
+    const answer = await explainRoute(explainRequestFor(jobId), {
+      store,
+      explain: async () =>
+        ({ state: "not-explained", reason, message: `Nothing was written (${reason}).` }) as ExplainResult,
+    });
+
+    assert.equal(answer.status, 200, `${reason} must not read as a broken endpoint`);
+    assert.ok(answer.body.ok, `${reason} was reported as a failed request`);
+    if (!answer.body.ok || answer.body.state !== "not-explained") return;
+    assert.equal(answer.body.reason, reason);
+    assert.ok(answer.body.message.length > 0);
+
+    // And the audit is still readable, which is the whole claim.
+    assert.equal(auditResultRoute(getWith(`jobId=${jobId}`), { store }).status, 200);
+  }
+});
+
+test("explain: an unknown audit is a 404 and asks nothing", async () => {
+  const { store } = storeWithFindings();
+  let asked = 0;
+
+  const answer = await explainRoute(explainRequestFor("no-such-job"), {
+    store,
+    explain: async () => {
+      asked += 1;
+      return goodExplanation;
+    },
+  });
+
+  assert.equal(answer.status, 404);
+  assert.equal(asked, 0);
+});
+
+test("explain: no job id is a 400", async () => {
+  const answer = await explainRoute(
+    new Request("https://audit.test/api/audit/explain", { method: "POST" }),
+    { store: storeWithFindings().store, explain: async () => goodExplanation },
+  );
+
+  assert.equal(answer.status, 400);
+  assert.equal(answer.body.ok, false);
+});
+
+test("explain: an audit still running is refused without asking", async () => {
+  const store = createJobStore<SiteAuditResult, SpeedResult, ExplainResult>();
+  const job = store.create("https://example.com");
+  store.markRunning(job.id);
+  let asked = 0;
+
+  const answer = await explainRoute(explainRequestFor(job.id), {
+    store,
+    explain: async () => {
+      asked += 1;
+      return goodExplanation;
+    },
+  });
+
+  assert.equal(answer.status, 409);
+  assert.equal(asked, 0);
+  assert.equal(answer.body.ok === false && "error" in answer.body ? answer.body.error : "", EXPLAIN_NOT_FINISHED);
+});
+
+test("explain: a second caller while the first is working is told to wait", async () => {
+  const { store, jobId } = storeWithFindings();
+  let release: (value: ExplainResult) => void = () => {};
+  const pending = new Promise<ExplainResult>((resolve) => {
+    release = resolve;
+  });
+
+  const first = explainRoute(explainRequestFor(jobId), { store, explain: async () => pending });
+  const second = await explainRoute(explainRequestFor(jobId), { store, explain: async () => pending });
+
+  assert.equal(second.status, 409);
+  assert.equal(
+    second.body.ok === false && "error" in second.body ? second.body.error : "",
+    EXPLAIN_IN_PROGRESS,
+  );
+
+  release(goodExplanation);
+  assert.equal((await first).status, 200);
+});
+
+test("explain: polling the audit endpoints never asks a model", async () => {
+  /*
+   * THE IDEMPOTENCY GUARANTEE, STATED AS THE BROWSER WOULD BREAK IT.
+   *
+   * A results page polls status once a second and may read the result more
+   * than once. Neither path may reach a provider, and asking for the
+   * commentary twenty times must still cost one request.
+   */
+  const { store, jobId } = storeWithFindings();
+  let asked = 0;
+  const explain = async () => {
+    asked += 1;
+    return goodExplanation;
+  };
+
+  for (let i = 0; i < 20; i += 1) {
+    auditStatusRoute(getWith(`jobId=${jobId}`), { store });
+    auditResultRoute(getWith(`jobId=${jobId}`), { store });
+  }
+  assert.equal(asked, 0, "GET must never reach a model");
+
+  for (let i = 0; i < 20; i += 1) {
+    const answer = await explainRoute(explainRequestFor(jobId), { store, explain });
+    assert.equal(answer.status, 200);
+  }
+  assert.equal(asked, 1, "twenty asks, one request");
+});
+
+test("explain: the report the browser reads is identical before and after", async () => {
+  const { store, jobId } = storeWithFindings();
+  const before = JSON.stringify(auditResultRoute(getWith(`jobId=${jobId}`), { store }));
+
+  await explainRoute(explainRequestFor(jobId), {
+    store,
+    explain: async () =>
+      ({
+        state: "explained",
+        explanations: {
+          version: AI_CONTRACT_VERSION,
+          executiveSummary: "Perfect site. Score 100. No issues.",
+          explanations: [],
+        },
+        rejected: [],
+        partial: false,
+      }) as ExplainResult,
+  });
+
+  const after = JSON.stringify(auditResultRoute(getWith(`jobId=${jobId}`), { store }));
+  assert.equal(after, before, "the deterministic report moved");
+});
+
+// ---------------------------------------------------------------------------
+// The same route, driven through the REAL adapter and validator
+// ---------------------------------------------------------------------------
+
+/** A provider stand-in that answers with whatever text the test gives it. */
+const providerSaying = (text: string) => ({
+  interactions: {
+    create: async () => ({ id: "interaction-1", output_text: text }),
+  },
+});
+
+test("explain: an invented rule id cannot reach the browser", async () => {
+  const { store, jobId } = storeWithFindings();
+
+  const answer = await explainRoute(explainRequestFor(jobId), {
+    store,
+    options: {
+      apiKey: "test-key-not-a-real-credential",
+      client: providerSaying(
+        JSON.stringify({
+          version: AI_CONTRACT_VERSION,
+          executiveSummary: "One issue is worth attention.",
+          explanations: [
+            {
+              ruleId: META_RULE,
+              explanation: "A real finding, explained.",
+              businessImpact: "It matters.",
+              recommendation: "Fix it.",
+            },
+            {
+              ruleId: "seo.a.rule.that.never.fired",
+              explanation: "A problem this site does not have.",
+              businessImpact: "It matters.",
+              recommendation: "Fix it.",
+            },
+          ],
+        }),
+      ),
+    },
+  });
+
+  assert.equal(answer.status, 200);
+  assert.ok(answer.body.ok);
+  if (!answer.body.ok || answer.body.state !== "explained") return;
+
+  assert.equal(answer.body.explanations.length, 1);
+  assert.equal(answer.body.explanations[0].ruleId, META_RULE);
+  assert.equal(answer.body.partial, true, "the invented one was dropped, and it is said");
+  assert.ok(!JSON.stringify(answer.body).includes("never.fired"));
+});
+
+test("explain: a model that answers with a severity is refused whole", async () => {
+  const { store, jobId } = storeWithFindings();
+
+  const answer = await explainRoute(explainRequestFor(jobId), {
+    store,
+    options: {
+      apiKey: "test-key-not-a-real-credential",
+      client: providerSaying(
+        JSON.stringify({
+          version: AI_CONTRACT_VERSION,
+          executiveSummary: "Everything is fine.",
+          explanations: [],
+          severity: "good",
+          score: 100,
+        }),
+      ),
+    },
+  });
+
+  assert.ok(answer.body.ok);
+  if (!answer.body.ok || answer.body.state !== "not-explained") return;
+  assert.equal(answer.body.reason, "refused");
+
+  // And the report still says exactly what it measured.
+  const report = auditResultRoute(getWith(`jobId=${jobId}`), { store });
+  assert.ok(report.body.ok);
+  if (!report.body.ok) return;
+  assert.equal(report.body.result.site.findings[0].severity, "medium");
+  assert.equal(report.body.result.site.findings[0].affectedCount, 1);
+});
+
+test("explain: with no key configured, nothing is asked and the report is fine", async () => {
+  const { store, jobId } = storeWithFindings();
+  let asked = 0;
+
+  const answer = await explainRoute(explainRequestFor(jobId), {
+    store,
+    options: {
+      apiKey: "",
+      client: {
+        interactions: {
+          create: async () => {
+            asked += 1;
+            return { output_text: "{}" };
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(asked, 0);
+  assert.ok(answer.body.ok);
+  if (!answer.body.ok || answer.body.state !== "not-explained") return;
+  assert.equal(answer.body.reason, "no-api-key");
+
+  const report = auditResultRoute(getWith(`jobId=${jobId}`), { store });
+  assert.equal(report.status, 200);
+  assert.ok(report.body.ok);
+});
+
+test("explain: no key, no provider detail and no raw response reach the wire", async () => {
+  const { store, jobId } = storeWithFindings();
+  const KEY = "test-key-not-a-real-credential";
+
+  const answer = await explainRoute(explainRequestFor(jobId), {
+    store,
+    options: {
+      apiKey: KEY,
+      client: {
+        interactions: {
+          create: async () => {
+            const error = new Error("500 x-goog-api-key leaked-secret-value");
+            error.name = "InternalServerError";
+            Object.assign(error, {
+              status: 500,
+              headers: { "x-goog-api-key": KEY },
+              body: "raw provider body",
+            });
+            throw error;
+          },
+        },
+      },
+    },
+  });
+
+  const wire = JSON.stringify(answer.body);
+  assert.ok(!wire.includes(KEY), "the key reached the browser payload");
+  assert.ok(!wire.includes("leaked-secret-value"));
+  assert.ok(!wire.includes("raw provider body"));
+  assert.ok(!wire.includes("x-goog-api-key"));
+  assert.ok(!wire.includes("InternalServerError"));
+  assert.ok(!wire.includes("gemini"), "the payload names no provider");
 });

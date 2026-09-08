@@ -13,6 +13,7 @@ import {
   type SiteAuditOptions,
 } from "../audit/siteAudit.ts";
 import type { SiteAuditResult, SpeedResult } from "../types";
+import type { ExplainResult } from "../ai/gemini/explain.ts";
 
 /**
  * One store for the whole server process.
@@ -31,8 +32,12 @@ const GLOBAL_KEY = "__skybookAuditJobs";
  * The speed check is measured in its own request, so its result arrives after
  * the audit has already finished. It is attached rather than merged into the
  * terminal write, which stays first-write-wins.
+ *
+ * The third slot holds the AI commentary, which is written later still --
+ * from the audit and that measurement together. A TYPE-ONLY import, so the
+ * provider it came from is erased at build time and nothing here loads an SDK.
  */
-export type AuditJobStore = JobStore<SiteAuditResult, SpeedResult>;
+export type AuditJobStore = JobStore<SiteAuditResult, SpeedResult, ExplainResult>;
 
 type GlobalWithJobs = typeof globalThis & {
   [GLOBAL_KEY]?: AuditJobStore;
@@ -40,7 +45,7 @@ type GlobalWithJobs = typeof globalThis & {
 
 export function auditJobs(): AuditJobStore {
   const holder = globalThis as GlobalWithJobs;
-  holder[GLOBAL_KEY] ??= createJobStore<SiteAuditResult, SpeedResult>();
+  holder[GLOBAL_KEY] ??= createJobStore<SiteAuditResult, SpeedResult, ExplainResult>();
   return holder[GLOBAL_KEY];
 }
 

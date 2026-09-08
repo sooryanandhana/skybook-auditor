@@ -30,12 +30,14 @@ import { runRules } from "../rules/runner.ts";
 import { SPEED_RULES } from "../rules/all.ts";
 import { PERFORMANCE_BUDGET_MS } from "../budgets.ts";
 import { auditJobs, startAudit, type AuditJobStore, type StartAuditOptions } from "../jobs/auditJobs.ts";
-import { statusAnswer, resultAnswer } from "../jobs/jobResponses.ts";
+import { statusAnswer, resultAnswer, JOB_NOT_FOUND, NO_JOB_ID } from "../jobs/jobResponses.ts";
+import { explainJob, type ExplainJobDeps } from "../audit/explainJob.ts";
 import type {
   SpeedResult,
   AuditResultResponse,
   AuditStartResponse,
   AuditStatusResponse,
+  AuditExplanationResponse,
   PerformanceResponse,
 } from "../types";
 
@@ -243,4 +245,97 @@ export async function performanceRoute(
       body: { ok: false, error: "The speed check failed unexpectedly." },
     };
   }
+}
+
+
+/** Said when commentary is asked for before there is an audit to write about. */
+export const EXPLAIN_NOT_FINISHED =
+  "This audit is still running, so there is nothing to write about yet.";
+
+/** Said when another request is already asking. Nothing is asked twice. */
+export const EXPLAIN_IN_PROGRESS =
+  "The written commentary is already being prepared. Ask again in a moment.";
+
+/**
+ * POST /api/audit/explain?jobId=... — the written commentary for one audit.
+ *
+ * A POST BECAUSE IT MAY CAUSE WORK, and the status and result endpoints must
+ * not. Polling asks GET /status; nothing on that path can reach a model, which
+ * is what stops a page left open from spending a request a second.
+ *
+ * SEPARATE FROM /api/audit FOR THE SAME REASON THE SPEED CHECK IS. The report
+ * is already on screen and readable before this is asked, so a slow model
+ * costs a paragraph that has not arrived yet rather than a page that has not
+ * loaded. The AI budget is the adapter's own and is never the audit's.
+ *
+ * ASKED AT MOST ONCE PER AUDIT. The store hands out a single claim, so calling
+ * this ten times produces one provider request and nine reads of the answer.
+ *
+ * NOT RATE-LIMITED SEPARATELY, and it does not need to be: one audit can only
+ * ever produce one request here, and starting audits is already limited.
+ *
+ * THE BROWSER SENDS A JOB ID AND NOTHING ELSE. There is no body to read, so
+ * there is nothing a client could put in one — every word the model is shown
+ * was measured by this server.
+ */
+export async function explainRoute(
+  request: Request,
+  deps: { store?: AuditJobStore } & ExplainJobDeps = {},
+): Promise<ApiResult<AuditExplanationResponse>> {
+  const store = deps.store ?? auditJobs();
+  const jobId = jobIdFrom(request);
+  if (jobId === "") return { status: 400, body: { ok: false, error: NO_JOB_ID } };
+
+  const outcome = await explainJob(jobId, store, deps);
+
+  if (!outcome.ok) {
+    if (outcome.reason === "unknown-job") {
+      return { status: 404, body: { ok: false, jobId, error: JOB_NOT_FOUND } };
+    }
+    if (outcome.reason === "in-progress") {
+      // 409: the request is fine, the resource is not ready to answer it.
+      return { status: 409, body: { ok: false, jobId, error: EXPLAIN_IN_PROGRESS } };
+    }
+    return { status: 409, body: { ok: false, jobId, error: EXPLAIN_NOT_FINISHED } };
+  }
+
+  const result = outcome.result;
+
+  if (result.state === "not-explained") {
+    /*
+     * 200, DELIBERATELY. The audit succeeded and this endpoint answered the
+     * question it was asked. A model that could not be reached is not a broken
+     * endpoint, and it is emphatically not a problem with the website.
+     */
+    return {
+      status: 200,
+      body: { ok: true, jobId, state: "not-explained", reason: result.reason, message: result.message },
+    };
+  }
+
+  /*
+   * BUILT FIELD BY FIELD, never spread.
+   *
+   * The adapter's result also carries the validator's rejection list, and a
+   * rejection reason quotes the model's own text back. Copying the object
+   * would put that in a browser payload the day somebody adds a field. Only
+   * the four contract fields and a count leave here.
+   */
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      jobId,
+      state: "explained",
+      executiveSummary: result.explanations.executiveSummary,
+      explanations: result.explanations.explanations.map((entry) => ({
+        ruleId: entry.ruleId,
+        explanation: entry.explanation,
+        businessImpact: entry.businessImpact,
+        recommendation: entry.recommendation,
+      })),
+      partial: result.partial,
+      rejectedCount: result.rejected.length,
+    },
+  };
 }

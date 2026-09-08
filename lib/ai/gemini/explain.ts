@@ -28,6 +28,10 @@ import type { Interactions } from "@google/genai";
 import { AI_EXPLANATION_BUDGET_MS } from "../../budgets.ts";
 import type { AIReportInput } from "../contract.ts";
 import type { AIExplanationSet } from "../explanation.ts";
+import {
+  EXPLANATION_FAILURE_MESSAGES,
+  type ExplanationFailureReason,
+} from "../explanationOutcome.ts";
 import { type RejectedExplanation, validateExplanations } from "../validateExplanations.ts";
 import { type GeminiOptions, geminiAvailability, geminiClient } from "./client.ts";
 import { buildExplanationRequest } from "./prompt.ts";
@@ -77,40 +81,16 @@ export interface ExplainOptions extends GeminiOptions {
 // What can come back
 // ---------------------------------------------------------------------------
 
-/**
- * Why no explanation was produced.
+/*
+ * `ExplanationFailureReason` is imported rather than declared here.
  *
- * MACHINE-READABLE, AND SEPARATE FROM THE ENGLISH, for the same reason the
- * speed check keeps the two apart: nothing downstream should have to read a
- * sentence to find out whether the provider timed out or refused the key.
- *
- * NONE OF THESE SAYS ANYTHING ABOUT THE AUDITED WEBSITE. Every one of them is
- * a fact about this server, this network or this provider. A report must never
- * turn one into a finding.
+ * The HTTP layer hands these states to a browser, so the list is read in
+ * two places that must never disagree, and it says nothing provider-specific
+ * -- a timeout is a timeout whoever was being waited on. It therefore lives
+ * in `../explanationOutcome.ts`, and this file re-exports it so a caller that
+ * already has the adapter does not need a second import to name its result.
  */
-export type ExplanationFailureReason =
-  /** No key is configured. Nothing was attempted. */
-  | "no-api-key"
-  /** The request was sent and the budget ran out before an answer arrived. */
-  | "timeout"
-  /** The provider could not be reached at all. */
-  | "network"
-  /** Quota or rate limit. The request was refused before any work was done. */
-  | "rate-limited"
-  /** The key was rejected, or it lacks permission. A configuration fault. */
-  | "not-authorised"
-  /** The provider answered with a server error of its own. */
-  | "provider-error"
-  /** The provider rejected the request as malformed. Our fault, not theirs. */
-  | "bad-request"
-  /** The request succeeded and carried no text to read. */
-  | "empty-response"
-  /** Text arrived and was not JSON, or was JSON of the wrong shape. */
-  | "unreadable-response"
-  /** JSON arrived and the validator refused the answer as a whole. */
-  | "refused"
-  /** A fault in this code. Kept apart so a bug here never reads as a bad reply. */
-  | "internal-error";
+export type { ExplanationFailureReason };
 
 /**
  * What asking produced.
@@ -148,19 +128,6 @@ export type ExplainResult =
     };
 
 
-const MESSAGES: Record<ExplanationFailureReason, string> = {
-  "no-api-key": "No AI service is configured on this server, so nothing was written.",
-  refused: "The AI service answered with something this application would not use.",
-  timeout: "The AI service did not answer in time, so the report has no written commentary.",
-  network: "The AI service could not be reached, so the report has no written commentary.",
-  "rate-limited": "The AI service is over its usage limit right now, so nothing was written.",
-  "not-authorised": "The AI service rejected this server's credentials, so nothing was written.",
-  "provider-error": "The AI service reported a fault of its own, so nothing was written.",
-  "bad-request": "The AI service rejected the request. This is a fault in this application.",
-  "empty-response": "The AI service answered with no text, so there was nothing to read.",
-  "unreadable-response": "The AI service answered with something that was not a usable report.",
-  "internal-error": "Writing the commentary failed unexpectedly. The audit itself is unaffected.",
-};
 
 /**
  * A failure state.
@@ -171,7 +138,7 @@ const MESSAGES: Record<ExplanationFailureReason, string> = {
  * refusal -- pass it in, and neither has to be repeated here to be correct.
  */
 function notExplained(reason: ExplanationFailureReason, message?: string): ExplainResult {
-  return { state: "not-explained", reason, message: message ?? MESSAGES[reason] };
+  return { state: "not-explained", reason, message: message ?? EXPLANATION_FAILURE_MESSAGES[reason] };
 }
 
 // ---------------------------------------------------------------------------

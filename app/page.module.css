@@ -1186,3 +1186,100 @@
   font-size: 0.8125rem;
   color: color-mix(in srgb, var(--foreground) 52%, transparent);
 }
+
+/* ---------------------------------------------------------------------------
+   AI commentary
+
+   Set apart from everything above it on purpose. Every other panel on this
+   page shows something this tool measured; these two show writing about those
+   measurements, and a reader must never have to guess which they are looking
+   at. The distinction is carried by a label in words and a tinted left edge,
+   not by colour alone, so it survives greyscale and a colour-blind reader.
+
+   Deliberately quieter than a finding: no badge, no severity colour, no
+   number. There is no field in the contract this arrives on that could hold
+   one, and styling it like a finding would suggest otherwise.
+   --------------------------------------------------------------------------- */
+
+.aiPanel {
+  margin-top: 1.5rem;
+  border: 1px solid #d8e0ea;
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+  background: #f7fafd;
+  padding: 0.85rem 1rem;
+}
+
+.aiPanelHeading {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--brand);
+  margin-bottom: 0.35rem;
+}
+
+.aiSummary {
+  font-size: 0.92rem;
+  color: #16202e;
+  line-height: 1.55;
+  max-width: 68ch;
+  white-space: pre-wrap;
+}
+
+/* The sentence that keeps the two kinds of content apart in the reader's head.
+   It is not decoration: it is the claim that the numbers above came from
+   somewhere else. */
+.aiPanelNote,
+.aiUnavailableNote {
+  font-size: 0.76rem;
+  color: #5b6779;
+  margin-top: 0.5rem;
+  max-width: 68ch;
+}
+
+.aiPending {
+  font-size: 0.88rem;
+  color: #5b6779;
+}
+
+/* A missing paragraph, worded so it cannot read as a missing check. */
+.aiUnavailable {
+  font-size: 0.88rem;
+  color: #16202e;
+  max-width: 68ch;
+}
+
+/* Inside one finding, under the evidence and the fixed action. */
+.aiExplanation {
+  margin-top: 0.7rem;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--brand);
+}
+
+.aiLabel {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--brand);
+  margin-bottom: 0.15rem;
+}
+
+.aiSubLabel {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #5b6779;
+  margin-top: 0.45rem;
+  margin-bottom: 0.1rem;
+}
+
+.aiText {
+  font-size: 0.85rem;
+  color: #16202e;
+  line-height: 1.5;
+  max-width: 68ch;
+  white-space: pre-wrap;
+}

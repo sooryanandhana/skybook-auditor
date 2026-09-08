@@ -400,3 +400,121 @@ test("an attachment travels on the snapshot, not by reference to the store", () 
   assert.deepEqual(taken?.attached, { speed: "measured" });
   assert.deepEqual(store.get(job.id)?.attached, { speed: "measured" });
 });
+
+// ---------------------------------------------------------------------------
+// THE EXPLANATION SLOT
+//
+// A second slot, for writing produced ABOUT the finished audit rather than
+// measured for it. It carries a claim as well as a value, because asking a
+// model is slow and costs money: the claim is what makes one audit cost one
+// request however many times a browser asks.
+// ---------------------------------------------------------------------------
+
+/** A store declaring both slots, so neither can be tested by accident. */
+function explainableStoreAt(startMs = 0, ttlMs = 1_000) {
+  let value = startMs;
+  let counter = 0;
+  const store = createJobStore<{ tag: string }, { speed: string }, { prose: string }>({
+    ttlMs,
+    now: () => value,
+    newId: () => `job-${++counter}`,
+  });
+  return { store, advance: (ms: number) => (value += ms) };
+}
+
+function finished(store: ReturnType<typeof explainableStoreAt>["store"]) {
+  const job = store.create("https://example.com");
+  store.finish(job.id, "completed", { tag: "audit" });
+  return job.id;
+}
+
+test("a new job has no explanation and no claim on one", () => {
+  const { store } = explainableStoreAt();
+  const job = store.create("https://example.com");
+
+  assert.equal(job.explanation, null);
+  assert.equal(job.explanationClaimed, false);
+});
+
+test("exactly one caller may claim the right to explain a job", () => {
+  const { store } = explainableStoreAt();
+  const id = finished(store);
+
+  assert.equal(store.claimExplanation(id), true);
+  assert.equal(store.claimExplanation(id), false);
+  assert.equal(store.claimExplanation(id), false);
+});
+
+test("a claim is refused before there is an audit to explain", () => {
+  const { store } = explainableStoreAt();
+  const job = store.create("https://example.com");
+
+  assert.equal(store.claimExplanation(job.id), false, "queued");
+  store.markRunning(job.id);
+  assert.equal(store.claimExplanation(job.id), false, "running");
+});
+
+test("a failed job may not be explained", () => {
+  const { store } = explainableStoreAt();
+  const job = store.create("https://example.com");
+  store.fail(job.id, "The entry page could not be read.");
+
+  assert.equal(store.claimExplanation(job.id), false);
+  store.setExplanation(job.id, { prose: "about nothing" });
+  assert.equal(store.get(job.id)?.explanation, null);
+});
+
+test("a job that never existed, or expired, grants no claim", () => {
+  const { store, advance } = explainableStoreAt();
+  const id = finished(store);
+
+  assert.equal(store.claimExplanation("no-such-job"), false);
+  advance(2_000);
+  assert.equal(store.claimExplanation(id), false);
+});
+
+test("the first explanation wins, like the first terminal write", () => {
+  const { store } = explainableStoreAt();
+  const id = finished(store);
+
+  store.setExplanation(id, { prose: "the first answer" });
+  store.setExplanation(id, { prose: "a second, different answer" });
+
+  assert.deepEqual(store.get(id)?.explanation, { prose: "the first answer" });
+});
+
+test("explaining changes nothing about the audit or its other slot", () => {
+  const { store } = explainableStoreAt();
+  const id = finished(store);
+  store.attach(id, { speed: "measured" });
+
+  store.claimExplanation(id);
+  store.setExplanation(id, { prose: "commentary" });
+
+  const job = store.get(id);
+  assert.equal(job?.status, "completed");
+  assert.deepEqual(job?.result, { tag: "audit" });
+  assert.equal(job?.error, null);
+  assert.deepEqual(job?.attached, { speed: "measured" });
+});
+
+test("an explanation travels on the snapshot, not by reference to the store", () => {
+  const { store } = explainableStoreAt();
+  const id = finished(store);
+  store.setExplanation(id, { prose: "commentary" });
+
+  const taken = store.get(id);
+  assert.ok(taken);
+  taken.explanation = { prose: "rewritten by a caller" };
+
+  assert.deepEqual(store.get(id)?.explanation, { prose: "commentary" });
+});
+
+test("an unfinished job stores no explanation even if one is offered", () => {
+  const { store } = explainableStoreAt();
+  const job = store.create("https://example.com");
+
+  store.setExplanation(job.id, { prose: "premature" });
+
+  assert.equal(store.get(job.id)?.explanation, null);
+});

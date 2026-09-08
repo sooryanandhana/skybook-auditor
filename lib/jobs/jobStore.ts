@@ -84,7 +84,7 @@ export const EMPTY_PROGRESS: JobProgress = {
   complete: false,
 };
 
-export interface Job<TResult, TAttached = never> {
+export interface Job<TResult, TAttached = never, TExplanation = never> {
   id: string;
   /** The address the audit was asked about, as submitted. */
   requestedUrl: string;
@@ -114,15 +114,42 @@ export interface Job<TResult, TAttached = never> {
    * can never disturb the terminal outcome.
    */
   attached: TAttached | null;
+  /**
+   * Writing produced ABOUT the finished audit, rather than measured for it.
+   *
+   * A second slot rather than a second use of `attached`, because both are
+   * first-write-wins and they are produced by different things at different
+   * times: the speed check is measured on its own endpoint, and the commentary
+   * is written afterwards from the audit AND that measurement together.
+   * Sharing one slot would mean whichever arrived first locked the other out.
+   *
+   * NEVER PART OF `result`. Nothing here may alter what the audit found; it
+   * sits beside the report and is read separately.
+   */
+  explanation: TExplanation | null;
+  /**
+   * True once somebody has taken responsibility for producing the explanation.
+   *
+   * THIS IS WHAT MAKES ONE AUDIT COST ONE REQUEST. Asking a model is slow and
+   * costs money, and the browser may ask more than once -- a double-click, a
+   * remount, a second tab. The claim is taken synchronously, before anything
+   * is awaited, so of two callers arriving together exactly one proceeds.
+   *
+   * There is deliberately no way to give a claim back. The adapter answers
+   * every failure with a state rather than an exception, so a claim is always
+   * resolved by a write; a release would exist only to allow a second request,
+   * which is the thing being prevented.
+   */
+  explanationClaimed: boolean;
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
 }
 
-export interface JobStore<TResult, TAttached = never> {
-  create(requestedUrl: string): Job<TResult, TAttached>;
+export interface JobStore<TResult, TAttached = never, TExplanation = never> {
+  create(requestedUrl: string): Job<TResult, TAttached, TExplanation>;
   /** The job, or null if it never existed or has expired. */
-  get(id: string): Job<TResult, TAttached> | null;
+  get(id: string): Job<TResult, TAttached, TExplanation> | null;
   /** Records progress. Ignored once the job is terminal. */
   setProgress(id: string, progress: JobProgress): void;
   /** Moves a job to "running". Ignored if it is already terminal. */
@@ -145,6 +172,26 @@ export interface JobStore<TResult, TAttached = never> {
    * `error`: attaching cannot change what the audit found.
    */
   attach(id: string, value: TAttached): void;
+  /**
+   * Takes the sole right to produce this job's explanation.
+   *
+   * Returns true to exactly one caller and false to every caller after it,
+   * including callers that arrive while the first is still working. Refused
+   * outright before the job is terminal, and refused for a job that failed:
+   * there is no finished audit for commentary to be about.
+   *
+   * SYNCHRONOUS ON PURPOSE. The check and the flag are set in one
+   * uninterrupted run of statements, so the classic check-then-act race cannot
+   * happen -- nothing else runs in between.
+   */
+  claimExplanation(id: string): boolean;
+  /**
+   * Files the explanation against a finished job. THE FIRST WRITE WINS.
+   *
+   * Never touches `status`, `result`, `error` or `attached`: writing about an
+   * audit cannot change what the audit found.
+   */
+  setExplanation(id: string, value: TExplanation): void;
   /** Drops expired jobs. Called on every access; exposed for tests. */
   sweep(): void;
   readonly size: number;
@@ -158,14 +205,14 @@ export interface JobStoreOptions {
   newId?: () => string;
 }
 
-export function createJobStore<TResult, TAttached = never>(
+export function createJobStore<TResult, TAttached = never, TExplanation = never>(
   options: JobStoreOptions = {},
-): JobStore<TResult, TAttached> {
+): JobStore<TResult, TAttached, TExplanation> {
   const ttlMs = options.ttlMs ?? JOB_TTL_MS;
   const now = options.now ?? Date.now;
   const newId = options.newId ?? randomUUID;
 
-  const jobs = new Map<string, Job<TResult, TAttached>>();
+  const jobs = new Map<string, Job<TResult, TAttached, TExplanation>>();
 
   /*
    * Expiry is swept on access rather than on a timer.
@@ -181,7 +228,7 @@ export function createJobStore<TResult, TAttached = never>(
     }
   };
 
-  const live = (id: string): Job<TResult, TAttached> | null => {
+  const live = (id: string): Job<TResult, TAttached, TExplanation> | null => {
     const job = jobs.get(id);
     if (job === undefined) return null;
     if (job.expiresAt <= now()) {
@@ -199,12 +246,14 @@ export function createJobStore<TResult, TAttached = never>(
    * would then be reading state that had changed underneath it. Copying is
    * cheap and the guarantee is absolute.
    */
-  const snapshot = (job: Job<TResult, TAttached>): Job<TResult, TAttached> => ({
+  const snapshot = (
+    job: Job<TResult, TAttached, TExplanation>,
+  ): Job<TResult, TAttached, TExplanation> => ({
     ...job,
     progress: { ...job.progress },
   });
 
-  const touch = (job: Job<TResult, TAttached>): void => {
+  const touch = (job: Job<TResult, TAttached, TExplanation>): void => {
     job.updatedAt = now();
     // A job being worked on should not expire out from under its own crawl.
     job.expiresAt = job.updatedAt + ttlMs;
@@ -214,7 +263,7 @@ export function createJobStore<TResult, TAttached = never>(
     create(requestedUrl) {
       sweep();
       const at = now();
-      const job: Job<TResult, TAttached> = {
+      const job: Job<TResult, TAttached, TExplanation> = {
         id: newId(),
         requestedUrl,
         status: "queued",
@@ -222,6 +271,8 @@ export function createJobStore<TResult, TAttached = never>(
         result: null,
         error: null,
         attached: null,
+        explanation: null,
+        explanationClaimed: false,
         createdAt: at,
         updatedAt: at,
         expiresAt: at + ttlMs,
@@ -278,6 +329,27 @@ export function createJobStore<TResult, TAttached = never>(
       // First attach wins, for the same reason the first terminal write does.
       if (job.attached !== null) return;
       job.attached = value;
+      touch(job);
+    },
+
+    claimExplanation(id) {
+      const job = live(id);
+      if (job === null) return false;
+      // Nothing to write about until the audit finished, and nothing at all if
+      // it failed -- there is no report for commentary to sit beside.
+      if (!isTerminal(job.status) || job.result === null) return false;
+      if (job.explanationClaimed) return false;
+      job.explanationClaimed = true;
+      touch(job);
+      return true;
+    },
+
+    setExplanation(id, value) {
+      const job = live(id);
+      if (job === null) return;
+      if (!isTerminal(job.status) || job.result === null) return;
+      if (job.explanation !== null) return;
+      job.explanation = value;
       touch(job);
     },
 

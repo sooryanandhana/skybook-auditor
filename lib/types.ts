@@ -1138,6 +1138,27 @@ export interface AuditData {
  * It is absent when we never reached the site at all.
  */
 /**
+ * The speed check's own deterministic result: measured, then graded.
+ *
+ * WHY THIS IS ITS OWN TYPE. The speed check runs as a separate request, on its
+ * own 95-second budget, so that a slow answer from Google never delays the
+ * audit. That means its measurement and its findings are produced in a
+ * different place from every other measurement in the audit, and for a long
+ * while the two were only ever joined in the browser.
+ *
+ * Naming the pair lets the SERVER hold both. Anything that has to reason about
+ * a whole audit — the AI contract most of all — can then be built from what
+ * the server measured rather than from what a browser sent back to it.
+ */
+export interface SpeedResult {
+  data: PerformanceData;
+  /** Graded by the speed rules, on the server. Severity is theirs, as always. */
+  findings: Finding[];
+  /** Speed checks that could not run. Never findings. */
+  skippedChecks: SkippedCheck[];
+}
+
+/**
  * What POST /api/audit/performance returns.
  *
  * Separate from AuditResponse because the speed check is now its own request.

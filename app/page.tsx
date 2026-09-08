@@ -274,7 +274,7 @@ export default function HomePage() {
        * split, so it must not be awaited before showing the results above.
        */
       if (includePerformance) {
-        void startPerformance(payload.result.data.fetch.finalUrl, runId);
+        void startPerformance(payload.result.data.fetch.finalUrl, runId, jobId);
       }
     } catch {
       if (runIdRef.current !== runId) return;
@@ -291,18 +291,27 @@ export default function HomePage() {
    * two attempts at Google, and a retry in the browser would turn that into
    * four — doubling a paid quota to solve a problem already solved.
    */
-  async function startPerformance(finalUrl: string, runId: number) {
+  async function startPerformance(finalUrl: string, runId: number, jobId: string) {
     const controller = new AbortController();
     performanceAbortRef.current = controller;
     setPerformanceRunning(true);
 
     try {
-      const response = await fetch("/api/audit/performance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: finalUrl }),
-        signal: controller.signal,
-      });
+      /*
+       * The job id travels with the request so the SERVER can keep this result
+       * beside the audit it belongs to. The browser still receives it exactly
+       * as before and renders from its own copy — nothing here changes what is
+       * shown, only what the server is able to describe later.
+       */
+      const response = await fetch(
+        `/api/audit/performance?jobId=${encodeURIComponent(jobId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: finalUrl }),
+          signal: controller.signal,
+        },
+      );
 
       const payload: PerformanceResponse = await response.json();
       if (runIdRef.current !== runId) return;

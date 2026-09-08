@@ -84,7 +84,7 @@ export const EMPTY_PROGRESS: JobProgress = {
   complete: false,
 };
 
-export interface Job<TResult> {
+export interface Job<TResult, TAttached = never> {
   id: string;
   /** The address the audit was asked about, as submitted. */
   requestedUrl: string;
@@ -99,15 +99,30 @@ export interface Job<TResult> {
    * them, and whatever else the thrower happened to include.
    */
   error: string | null;
+  /**
+   * Deterministic material measured SEPARATELY and attached after the fact.
+   *
+   * Null until something attaches, and null forever for a store that declares
+   * no attachment type. It exists because one part of an audit is measured on
+   * its own budget, in its own request — the speed check — and the server
+   * needs somewhere to keep it that lives and expires with the job it belongs
+   * to.
+   *
+   * DELIBERATELY NOT PART OF `result`. A second `finish` is refused, and
+   * rightly: that rule is what stops a late error overwriting a good result.
+   * This is a separate slot with its own first-write-wins rule, so attaching
+   * can never disturb the terminal outcome.
+   */
+  attached: TAttached | null;
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
 }
 
-export interface JobStore<TResult> {
-  create(requestedUrl: string): Job<TResult>;
+export interface JobStore<TResult, TAttached = never> {
+  create(requestedUrl: string): Job<TResult, TAttached>;
   /** The job, or null if it never existed or has expired. */
-  get(id: string): Job<TResult> | null;
+  get(id: string): Job<TResult, TAttached> | null;
   /** Records progress. Ignored once the job is terminal. */
   setProgress(id: string, progress: JobProgress): void;
   /** Moves a job to "running". Ignored if it is already terminal. */
@@ -121,6 +136,15 @@ export interface JobStore<TResult> {
    */
   finish(id: string, status: "completed" | "partial", result: TResult): void;
   fail(id: string, error: string): void;
+  /**
+   * Attaches separately measured material to a FINISHED job.
+   *
+   * Refused before the job is terminal, because there is no completed audit
+   * for it to belong to yet, and refused a second time, because the first
+   * answer is the one that was measured. Never touches `status`, `result` or
+   * `error`: attaching cannot change what the audit found.
+   */
+  attach(id: string, value: TAttached): void;
   /** Drops expired jobs. Called on every access; exposed for tests. */
   sweep(): void;
   readonly size: number;
@@ -134,12 +158,14 @@ export interface JobStoreOptions {
   newId?: () => string;
 }
 
-export function createJobStore<TResult>(options: JobStoreOptions = {}): JobStore<TResult> {
+export function createJobStore<TResult, TAttached = never>(
+  options: JobStoreOptions = {},
+): JobStore<TResult, TAttached> {
   const ttlMs = options.ttlMs ?? JOB_TTL_MS;
   const now = options.now ?? Date.now;
   const newId = options.newId ?? randomUUID;
 
-  const jobs = new Map<string, Job<TResult>>();
+  const jobs = new Map<string, Job<TResult, TAttached>>();
 
   /*
    * Expiry is swept on access rather than on a timer.
@@ -155,7 +181,7 @@ export function createJobStore<TResult>(options: JobStoreOptions = {}): JobStore
     }
   };
 
-  const live = (id: string): Job<TResult> | null => {
+  const live = (id: string): Job<TResult, TAttached> | null => {
     const job = jobs.get(id);
     if (job === undefined) return null;
     if (job.expiresAt <= now()) {
@@ -173,12 +199,12 @@ export function createJobStore<TResult>(options: JobStoreOptions = {}): JobStore
    * would then be reading state that had changed underneath it. Copying is
    * cheap and the guarantee is absolute.
    */
-  const snapshot = (job: Job<TResult>): Job<TResult> => ({
+  const snapshot = (job: Job<TResult, TAttached>): Job<TResult, TAttached> => ({
     ...job,
     progress: { ...job.progress },
   });
 
-  const touch = (job: Job<TResult>): void => {
+  const touch = (job: Job<TResult, TAttached>): void => {
     job.updatedAt = now();
     // A job being worked on should not expire out from under its own crawl.
     job.expiresAt = job.updatedAt + ttlMs;
@@ -188,13 +214,14 @@ export function createJobStore<TResult>(options: JobStoreOptions = {}): JobStore
     create(requestedUrl) {
       sweep();
       const at = now();
-      const job: Job<TResult> = {
+      const job: Job<TResult, TAttached> = {
         id: newId(),
         requestedUrl,
         status: "queued",
         progress: { ...EMPTY_PROGRESS },
         result: null,
         error: null,
+        attached: null,
         createdAt: at,
         updatedAt: at,
         expiresAt: at + ttlMs,
@@ -239,6 +266,18 @@ export function createJobStore<TResult>(options: JobStoreOptions = {}): JobStore
       job.status = "failed";
       job.error = error;
       job.result = null;
+      touch(job);
+    },
+
+    attach(id, value) {
+      const job = live(id);
+      if (job === null) return;
+      // Nothing to attach to until the audit finished, and nothing to attach
+      // to at all if it failed: there is no result for this to belong beside.
+      if (!isTerminal(job.status) || job.result === null) return;
+      // First attach wins, for the same reason the first terminal write does.
+      if (job.attached !== null) return;
+      job.attached = value;
       touch(job);
     },
 

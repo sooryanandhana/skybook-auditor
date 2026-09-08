@@ -29,9 +29,10 @@ import { callerKey, checkRateLimit, type RateLimitResult } from "../rateLimit.ts
 import { runRules } from "../rules/runner.ts";
 import { SPEED_RULES } from "../rules/all.ts";
 import { PERFORMANCE_BUDGET_MS } from "../budgets.ts";
-import { auditJobs, startAudit, type StartAuditOptions } from "../jobs/auditJobs.ts";
+import { auditJobs, startAudit, type AuditJobStore, type StartAuditOptions } from "../jobs/auditJobs.ts";
 import { statusAnswer, resultAnswer } from "../jobs/jobResponses.ts";
 import type {
+  SpeedResult,
   AuditResultResponse,
   AuditStartResponse,
   AuditStatusResponse,
@@ -183,7 +184,7 @@ export function auditResultRoute(
  */
 export async function performanceRoute(
   request: Request,
-  deps: { measure?: typeof runPerformanceChecks } = {},
+  deps: { measure?: typeof runPerformanceChecks; store?: AuditJobStore } = {},
 ): Promise<ApiResult<PerformanceResponse>> {
   const limit = checkRateLimit(callerKey(request));
   if (!limit.allowed) return tooManyRequests<PerformanceResponse>(limit);
@@ -213,15 +214,29 @@ export async function performanceRoute(
      */
     const graded = runRules({ performance }, SPEED_RULES);
 
-    return {
-      status: 200,
-      body: {
-        ok: true,
-        data: performance,
-        findings: graded.findings,
-        skippedChecks: graded.skipped,
-      },
+    const speed: SpeedResult = {
+      data: performance,
+      findings: graded.findings,
+      skippedChecks: graded.skipped,
     };
+
+    /*
+     * Kept beside the audit it belongs to, when the caller named one.
+     *
+     * The browser already receives this and always has. Storing it too is what
+     * lets the SERVER describe a whole audit — speed included — without ever
+     * being handed one back by a client. Anything built from a client's copy
+     * could be built from a client's invention.
+     *
+     * Best-effort on purpose: an unknown, expired or unfinished job simply
+     * takes no attachment, and the speed answer is returned either way. A
+     * failure to file something away is not a reason to withhold a
+     * measurement that succeeded.
+     */
+    const jobId = jobIdFrom(request);
+    if (jobId !== "") (deps.store ?? auditJobs()).attach(jobId, speed);
+
+    return { status: 200, body: { ok: true, ...speed } };
   } catch {
     return {
       status: 500,

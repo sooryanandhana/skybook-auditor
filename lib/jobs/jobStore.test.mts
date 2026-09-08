@@ -286,3 +286,117 @@ test("sweeping drops only the jobs that are actually expired", () => {
 test("the default lifetime is half an hour", () => {
   assert.equal(JOB_TTL_MS, 30 * 60 * 1000);
 });
+
+// ---------------------------------------------------------------------------
+// ATTACHING SOMETHING MEASURED SEPARATELY
+//
+// One part of an audit is measured in its own request, on its own budget, and
+// arrives after the job has already finished. It is attached rather than
+// written into the outcome, so first-write-wins stays exactly as it was.
+// ---------------------------------------------------------------------------
+
+/** A store that also declares what may be attached to its jobs. */
+function attachableStoreAt(startMs = 0, ttlMs = 1_000) {
+  let value = startMs;
+  let counter = 0;
+  const store = createJobStore<{ tag: string }, { speed: string }>({
+    ttlMs,
+    now: () => value,
+    newId: () => `job-${++counter}`,
+  });
+  return { store, advance: (ms: number) => (value += ms) };
+}
+
+test("a new job has nothing attached", () => {
+  const { store } = attachableStoreAt();
+  const job = store.create("https://example.com");
+
+  assert.equal(job.attached, null);
+});
+
+test("a finished job accepts an attachment", () => {
+  const { store } = attachableStoreAt();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "completed", { tag: "audit" });
+
+  store.attach(job.id, { speed: "measured" });
+
+  assert.deepEqual(store.get(job.id)?.attached, { speed: "measured" });
+});
+
+test("attaching changes nothing about the outcome", () => {
+  const { store } = attachableStoreAt();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "partial", { tag: "audit" });
+
+  store.attach(job.id, { speed: "measured" });
+
+  const after = store.get(job.id);
+  assert.equal(after?.status, "partial", "the crawl said partial and still does");
+  assert.deepEqual(after?.result, { tag: "audit" });
+  assert.equal(after?.error, null);
+});
+
+test("a job still running accepts nothing", () => {
+  // There is no finished audit for it to belong beside yet.
+  const { store } = attachableStoreAt();
+  const job = store.create("https://example.com");
+  store.markRunning(job.id);
+
+  store.attach(job.id, { speed: "measured" });
+
+  assert.equal(store.get(job.id)?.attached, null);
+});
+
+test("a failed job accepts nothing", () => {
+  // There is no result for this to sit beside, and inventing a half-audit out
+  // of one measurement would be worse than having none.
+  const { store } = attachableStoreAt();
+  const job = store.create("https://example.com");
+  store.fail(job.id, "The page could not be read.");
+
+  store.attach(job.id, { speed: "measured" });
+
+  assert.equal(store.get(job.id)?.attached, null);
+});
+
+test("the first attachment wins, like the first terminal write", () => {
+  const { store } = attachableStoreAt();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "completed", { tag: "audit" });
+
+  store.attach(job.id, { speed: "first" });
+  store.attach(job.id, { speed: "second" });
+
+  assert.deepEqual(store.get(job.id)?.attached, { speed: "first" });
+});
+
+test("attaching to a job that never existed does nothing and does not throw", () => {
+  const { store } = attachableStoreAt();
+
+  store.attach("no-such-job", { speed: "measured" });
+
+  assert.equal(store.size, 0);
+});
+
+test("attaching to an expired job does nothing", () => {
+  const { store, advance } = attachableStoreAt(0, 1_000);
+  const job = store.create("https://example.com");
+  store.finish(job.id, "completed", { tag: "audit" });
+
+  advance(2_000);
+  store.attach(job.id, { speed: "measured" });
+
+  assert.equal(store.get(job.id), null, "the job is gone, and nothing recreated it");
+});
+
+test("an attachment travels on the snapshot, not by reference to the store", () => {
+  const { store } = attachableStoreAt();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "completed", { tag: "audit" });
+  store.attach(job.id, { speed: "measured" });
+
+  const taken = store.get(job.id);
+  assert.deepEqual(taken?.attached, { speed: "measured" });
+  assert.deepEqual(store.get(job.id)?.attached, { speed: "measured" });
+});

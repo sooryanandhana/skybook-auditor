@@ -44,9 +44,9 @@ export interface Answer<TBody> {
  * told apart — an expired job is deleted. Guessing would mean telling someone
  * their audit expired when they had simply mistyped an id.
  */
-export function statusAnswer(
+export function statusAnswer<TAttached>(
   jobId: string,
-  job: Job<SiteAuditResult> | null,
+  job: Job<SiteAuditResult, TAttached> | null,
 ): Answer<AuditStatusResponse> {
   if (jobId === "") return { status: 400, body: { ok: false, error: NO_JOB_ID } };
   if (job === null) return { status: 404, body: { ok: false, error: JOB_NOT_FOUND } };
@@ -86,9 +86,9 @@ export function statusAnswer(
  * must not happen is calling it a whole-site audit, and `crawl.complete` and
  * `crawl.stoppedBecause` inside the result are what stop that.
  */
-export function resultAnswer(
+export function resultAnswer<TAttached>(
   jobId: string,
-  job: Job<SiteAuditResult> | null,
+  job: Job<SiteAuditResult, TAttached> | null,
 ): Answer<AuditResultResponse> {
   if (jobId === "") return { status: 400, body: { ok: false, error: NO_JOB_ID } };
   if (job === null) return { status: 404, body: { ok: false, error: JOB_NOT_FOUND } };

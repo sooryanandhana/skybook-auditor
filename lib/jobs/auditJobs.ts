@@ -12,7 +12,7 @@ import {
   runSiteAudit,
   type SiteAuditOptions,
 } from "../audit/siteAudit.ts";
-import type { SiteAuditResult } from "../types";
+import type { SiteAuditResult, SpeedResult } from "../types";
 
 /**
  * One store for the whole server process.
@@ -25,13 +25,22 @@ import type { SiteAuditResult } from "../types";
  */
 const GLOBAL_KEY = "__skybookAuditJobs";
 
+/**
+ * The audit job store, and the one kind of thing that may be attached to it.
+ *
+ * The speed check is measured in its own request, so its result arrives after
+ * the audit has already finished. It is attached rather than merged into the
+ * terminal write, which stays first-write-wins.
+ */
+export type AuditJobStore = JobStore<SiteAuditResult, SpeedResult>;
+
 type GlobalWithJobs = typeof globalThis & {
-  [GLOBAL_KEY]?: JobStore<SiteAuditResult>;
+  [GLOBAL_KEY]?: AuditJobStore;
 };
 
-export function auditJobs(): JobStore<SiteAuditResult> {
+export function auditJobs(): AuditJobStore {
   const holder = globalThis as GlobalWithJobs;
-  holder[GLOBAL_KEY] ??= createJobStore<SiteAuditResult>();
+  holder[GLOBAL_KEY] ??= createJobStore<SiteAuditResult, SpeedResult>();
   return holder[GLOBAL_KEY];
 }
 
@@ -46,7 +55,7 @@ export const UNEXPECTED_FAILURE =
   "The audit stopped unexpectedly. Nothing was measured, so there is nothing to report.";
 
 export interface StartAuditOptions {
-  store?: JobStore<SiteAuditResult>;
+  store?: AuditJobStore;
   /** Overridden by tests so the limit can be exercised without waiting. */
   maxConcurrent?: number;
   /** Swapped by tests so no job here reaches the network. */
@@ -101,7 +110,7 @@ export function queuedAuditCount(): number {
  * Recursive only through the completion handler, so a queue of a hundred jobs
  * starts two, and starts the third when one of those two finishes.
  */
-function pump(store: JobStore<SiteAuditResult>, limit: number): void {
+function pump(store: AuditJobStore, limit: number): void {
   const state = scheduler();
 
   while (state.running < limit && state.waiting.length > 0) {

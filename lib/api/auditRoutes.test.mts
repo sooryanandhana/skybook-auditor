@@ -24,7 +24,10 @@ import { createJobStore } from "../jobs/jobStore.ts";
 import { JOB_TTL_MS } from "../jobs/jobStore.ts";
 import { resetRateLimits, DEFAULT_LIMIT, GLOBAL_LIMIT } from "../rateLimit.ts";
 import { runSeoChecks } from "../collector/seoChecks.ts";
-import type { PerformanceData, SiteAuditResult } from "../types.ts";
+import { runSecurityChecks } from "../collector/securityChecks.ts";
+import type { PerformanceData, SiteAuditResult, SpeedResult } from "../types.ts";
+import { withSpeed } from "../audit/withSpeed.ts";
+import { buildAIReportInput } from "../ai/buildReportInput.ts";
 
 beforeEach(() => {
   resetRateLimits();
@@ -503,4 +506,208 @@ test("performance: shares the audit's allowance rather than adding a second one"
   );
 
   assert.equal(result.status, 429);
+});
+
+// ---------------------------------------------------------------------------
+// THE SPEED RESULT REACHES THE SERVER, NOT JUST THE BROWSER
+//
+// The speed check runs as its own request so a slow answer never delays the
+// report. The cost was that the two halves of one audit only ever met in the
+// browser, so nothing on the server could describe a whole audit — and the AI
+// contract could only ever report the speed check as pending.
+//
+// The route now files its result beside the audit it belongs to. These prove
+// the server can build the whole picture from what it measured itself.
+// ---------------------------------------------------------------------------
+
+/** An audit result thin enough to read, real enough to compose. */
+function storedAudit(): SiteAuditResult {
+  const data = {
+    website: { requestedUrl: "https://example.com", checkedAt: "2026-09-07T10:00:00.000Z" },
+    fetch: {
+      finalUrl: "https://example.com/",
+      redirectChain: ["https://example.com/"],
+      wasRedirected: false,
+      servedOverHttps: true,
+      httpsUnavailable: false,
+      certificateProblem: null,
+      contentType: "text/html",
+    },
+    uptime: { isOnline: true, statusCode: 200, serverResponseTimeMs: 90 },
+    seo: runSeoChecks("<html><head></head><body><p>x</p></body></html>", "https://example.com/"),
+    technical: null,
+    performance: {
+      status: "pending",
+      strategy: "mobile",
+      requestedUrl: "https://example.com/",
+      failureReason: null,
+      field: {
+        status: "absent", measuredUrl: null, scope: null, overall: null,
+        lcp: null, inp: null, cls: null, fcp: null, ttfb: null, error: null,
+      },
+      lab: {
+        status: "error", measuredUrl: null, score: null, lcpMs: null, fcpMs: null,
+        tbtMs: null, speedIndexMs: null, cls: null, error: "not run",
+      },
+      notInspected: [],
+      message: "The speed check is running.",
+    },
+    security: runSecurityChecks({ "content-type": "text/html" }, "<html><body><p>x</p></body></html>", true, []),
+    ssl: { status: "not-applicable", hostname: "example.com", certificate: null, trusted: null, problem: null, failure: null, message: "No HTTPS." },
+    dns: {
+      hostname: "example.com", emailDomain: "example.com",
+      a: { status: "absent", records: [], error: null },
+      aaaa: { status: "absent", records: [], error: null },
+      mx: { status: "absent", records: [], error: null },
+      ns: { status: "absent", records: [], error: null },
+      txt: { status: "absent", records: [], error: null },
+      spf: { status: "absent", record: null, error: null },
+      dmarc: {
+        status: "absent", record: null, error: null, hostname: "_dmarc.example.com",
+        appliesTo: "example.com", policyDomain: null, inherited: false, effectivePolicy: null,
+      },
+    },
+    hosting: null,
+    findings: [],
+    skippedChecks: [],
+    timedOut: false,
+  } as unknown as SiteAuditResult["data"];
+
+  return {
+    data,
+    site: { findings: [], skippedChecks: [], evaluatedPages: 1 },
+    pages: [{ url: "https://example.com/", data }],
+    crawl: {
+      requestedUrl: "https://example.com",
+      limits: {
+        maxPages: 150, maxDurationMs: 300_000, maxQueueSize: 2_000,
+        maxResponseBytes: 5_000_000, concurrency: 3, perRequestDelayMs: 200,
+      },
+      stoppedBecause: "completed", complete: true, discovered: 1, queuedAtStop: 0,
+      evaluated: 1, unavailable: [], skippedNonHtml: 0,
+      sources: { html: 1, sitemap: 0 },
+      sitemapDiscovery: { attempted: true, complete: true, stoppedBecause: "completed" },
+      robots: { status: "absent", enforced: true, excluded: 0 },
+    },
+  };
+}
+
+/** A store holding one finished audit, ready to receive a speed result. */
+function storeWithFinishedAudit() {
+  const store = createJobStore<SiteAuditResult, SpeedResult>();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "completed", storedAudit());
+  return { store, jobId: job.id };
+}
+
+const speedRequestFor = (jobId: string, url = "https://example.com") =>
+  new Request(`https://audit.test/api/audit/performance?jobId=${encodeURIComponent(jobId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+
+test("performance: the measured result is filed beside the audit it belongs to", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  const answer = await performanceRoute(speedRequestFor(jobId), {
+    measure: async () => measured(),
+    store,
+  });
+
+  assert.equal(answer.status, 200);
+  const attached = store.get(jobId)?.attached;
+  assert.ok(attached, "the server kept it, not only the browser");
+  assert.equal(attached.data.status, "checked");
+  assert.ok(attached.findings.some((f) => f.id === "speed.field.lcp.slow"));
+});
+
+test("performance: the browser still receives exactly what it always did", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  const answer = await performanceRoute(speedRequestFor(jobId), {
+    measure: async () => measured(),
+    store,
+  });
+
+  assert.ok(answer.body.ok);
+  if (!answer.body.ok) return;
+  assert.equal(answer.body.data.status, "checked");
+  assert.ok(answer.body.findings.length > 0);
+  assert.ok(Array.isArray(answer.body.skippedChecks));
+});
+
+test("performance: filing it away changes nothing about the stored audit", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+  const before = JSON.stringify(store.get(jobId)?.result);
+
+  await performanceRoute(speedRequestFor(jobId), { measure: async () => measured(), store });
+
+  const after = store.get(jobId);
+  assert.equal(JSON.stringify(after?.result), before, "the crawl's result is untouched");
+  assert.equal(after?.status, "completed");
+});
+
+test("performance: a request naming no audit still answers, and files nothing", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  const answer = await performanceRoute(speedRequest({ url: "https://example.com" }), {
+    measure: async () => measured(),
+    store,
+  });
+
+  assert.equal(answer.status, 200, "a measurement that succeeded is never withheld");
+  assert.equal(store.get(jobId)?.attached, null);
+});
+
+test("performance: an unknown audit is not a reason to withhold the measurement", async () => {
+  const { store } = storeWithFinishedAudit();
+
+  const answer = await performanceRoute(speedRequestFor("no-such-job"), {
+    measure: async () => measured(),
+    store,
+  });
+
+  assert.equal(answer.status, 200);
+  assert.ok(answer.body.ok);
+});
+
+test("the server can now describe a whole audit, speed included", async () => {
+  /*
+   * THE POINT OF 5A, END TO END.
+   *
+   * Everything below comes from what the SERVER measured. Nothing a browser
+   * sent is an input to it, which is what keeps `buildAIReportInput` the
+   * fail-closed boundary it was built to be.
+   */
+  const { store, jobId } = storeWithFinishedAudit();
+  await performanceRoute(speedRequestFor(jobId), { measure: async () => measured(), store });
+
+  const job = store.get(jobId);
+  assert.ok(job?.result);
+  const whole = withSpeed(job.result, job.attached);
+  const input = buildAIReportInput(whole);
+
+  // Before this, the contract could only ever say the speed check was pending.
+  assert.equal(input.measurements.performance.knowledge, "value");
+  assert.equal(input.measurements.performance.state, "measured");
+
+  const speedFinding = input.findings.find((f) => f.ruleId === "speed.field.lcp.slow");
+  assert.ok(speedFinding, "a speed finding reaches the contract");
+  assert.equal(speedFinding.severity, "high", "the rule's severity, carried through");
+  assert.equal(speedFinding.category, "speed");
+  assert.equal(speedFinding.reach?.affectedCount, 1);
+  assert.equal(speedFinding.reach?.evaluatedPages, 1, "one address was measured, not the crawl");
+});
+
+test("an audit whose speed check never ran still says so honestly", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  const job = store.get(jobId);
+  assert.ok(job?.result);
+  const input = buildAIReportInput(withSpeed(job.result, job.attached));
+
+  assert.equal(input.measurements.performance.knowledge, "unknown");
+  assert.equal(input.measurements.performance.state, "pending");
+  assert.ok(!input.findings.some((f) => f.category === "speed"));
 });

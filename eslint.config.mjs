@@ -13,6 +13,16 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  {
+    /*
+     * The mutation harnesses are CommonJS scripts run directly by node, not
+     * part of the application. `require` is how a .cjs file imports, so the
+     * rule against it is asking these files to be something they are not.
+     * Nothing here ships: no route, component or library imports this folder.
+     */
+    files: ["tools/mutation/**/*.cjs"],
+    rules: { "@typescript-eslint/no-require-imports": "off" },
+  },
 ]);
 
 export default eslintConfig;

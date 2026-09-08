@@ -64,3 +64,24 @@ export const PERFORMANCE_BUDGET_MS = 95_000;
  * Two is a prototype figure for a tool one salesperson runs on one machine.
  */
 export const MAX_CONCURRENT_AUDITS = 2;
+
+/**
+ * How long the AI explanation request may take, start to finish.
+ *
+ * SEPARATE FROM THE AUDIT'S CLOCK, ON PURPOSE, and for the same reason the
+ * speed check is: the deterministic report is already finished before this is
+ * asked. Spending the audit's budget here would let a slow model shorten the
+ * checks that produce the report, which is exactly backwards -- the report is
+ * the product, and the writing beside it is an addition.
+ *
+ * ONE REQUEST, ONE ATTEMPT. The provider's own timeout is per attempt, and its
+ * retry policy is switched off, so this number is the whole wait rather than
+ * the first slice of several.
+ *
+ * WHY 45 SECONDS. A Flash model writing a few hundred words about thirty
+ * findings answers in single-digit seconds when the service is healthy. This
+ * leaves room for a slow day without leaving somebody watching a spinner
+ * indefinitely, and it is well under the speed check's budget, which is the
+ * longest a person already waits for a panel to fill in.
+ */
+export const AI_EXPLANATION_BUDGET_MS = 45_000;

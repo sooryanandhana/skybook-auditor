@@ -228,6 +228,7 @@ function auditData(overrides: Partial<AuditData> = {}): AuditData {
       contentType: "text/html; charset=utf-8",
     },
     uptime: { isOnline: true, statusCode: 200, serverResponseTimeMs: 180 },
+    responseTime: null,
     seo: seo(),
     technical,
     performance: performance(),

@@ -26,6 +26,7 @@ import { dedupKey, normalizeCrawlUrl } from "../collector/crawlUrl.ts";
 import { runSeoChecks } from "../collector/seoChecks.ts";
 import { runSecurityChecks } from "../collector/securityChecks.ts";
 import { runTechnicalChecks } from "../collector/technicalChecks.ts";
+import { measureResponseTime } from "../collector/responseTime.ts";
 import type { RobotsMeasurement } from "../collector/robots.ts";
 import { runSslChecks, DEFAULT_HTTPS_PORT } from "../collector/sslChecks.ts";
 import { runDnsChecks } from "../collector/dnsChecks.ts";
@@ -43,6 +44,7 @@ import { aggregateFindings, type PageRuleResult } from "../report/aggregate.ts";
 import type {
   AuditData,
   Finding,
+  ResponseTimeMeasurement,
   PageAudit,
   SiteAuditResult,
   TechnicalData,
@@ -51,11 +53,20 @@ import type {
 /** How long a whole site audit may take, crawl included. */
 export const SITE_AUDIT_BUDGET_MS = 6 * 60 * 1000;
 
-/** The three measurements that describe the site rather than any one page. */
+/** The measurements that describe the site rather than any one page. */
 export interface SiteChecks {
   technical: TechnicalData | null;
   ssl: AuditData["ssl"];
   dns: AuditData["dns"];
+  /**
+   * Three timed requests to the entry address, and their median.
+   *
+   * SITE-LEVEL FOR THE SAME REASON THE CERTIFICATE IS. It describes the
+   * server, not a page, so measuring it per crawled page would be four hundred
+   * and fifty requests saying the same thing. Null only when it was never
+   * attempted, which the audit's own `timedOut` already explains.
+   */
+  responseTime: ResponseTimeMeasurement | null;
 }
 
 /**
@@ -81,12 +92,27 @@ async function measureSite(
   }
 
   const siteDeadline = capDeadline(deadline, SITE_CHECKS_BUDGET_MS);
-  const [ssl, dns] = await Promise.all([
+  /*
+   * RUN ALONGSIDE THE OTHERS, NOT AMONG THEM.
+   *
+   * The certificate and DNS checks share a capped slice of the audit's clock
+   * because they are lookups that can hang. The timings are HTTP requests to
+   * the site itself, and putting them inside that same slice would mean a slow
+   * certificate handshake shortening a measurement of how fast the server
+   * answers -- which would make the number describe our budget rather than
+   * their server.
+   *
+   * They share the audit's deadline like everything else, so they cannot run
+   * past it, and they are awaited together so three sequential requests do not
+   * add their seconds on top of the certificate's.
+   */
+  const [ssl, dns, responseTime] = await Promise.all([
     runSslChecks(url.hostname, servedOverHttps, siteDeadline, port),
     runDnsChecks(url.hostname, siteDeadline),
+    measureResponseTime(entryUrl, { deadline }),
   ]);
 
-  return { technical, ssl, dns };
+  return { technical, ssl, dns, responseTime };
 }
 
 export interface SiteAuditOptions {
@@ -164,7 +190,7 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<SiteAudit
    * between pages. Measuring them per page would be a hundred and fifty
    * identical answers and a hundred and fifty times the requests.
    */
-  const { technical, ssl, dns } = await (options.siteChecksImpl ?? measureSite)(
+  const { technical, ssl, dns, responseTime } = await (options.siteChecksImpl ?? measureSite)(
     entry.finalUrl,
     entry.servedOverHttps,
     deadline,
@@ -182,6 +208,13 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<SiteAudit
     technical,
     ssl,
     dns,
+    /*
+     * Measured once, carried onto every page's facts unchanged.
+     *
+     * The same value on all of them, deliberately: it describes the server,
+     * and a per-page copy would invite somebody to average it later.
+     */
+    responseTime,
     hosting: null,
     timedOut: technical === null,
   };

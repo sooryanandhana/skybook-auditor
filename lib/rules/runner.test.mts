@@ -47,6 +47,7 @@ function facts(overrides: Partial<AuditFacts> = {}): AuditFacts {
       contentType: "text/html",
     },
     uptime: { isOnline: true, statusCode: 200, serverResponseTimeMs: 120 },
+    responseTime: null,
     seo: {
       titleText: "Example",
       titleLength: 7,

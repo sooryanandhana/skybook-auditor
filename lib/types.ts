@@ -216,6 +216,72 @@ export interface UptimeCheck {
   serverResponseTimeMs: number | null;
 }
 
+/** Why a response time could not be measured. Never a provider's own words. */
+export type ResponseTimeFailure =
+  /** The address could not be parsed, so nothing was requested. */
+  | "invalid-address"
+  /** The safety check refused the address. Nothing was requested. */
+  | "refused"
+  /** The audit's clock was already spent. Nothing about the site is claimed. */
+  | "out-of-time"
+  /** A request was made and the server did not start answering in time. */
+  | "timeout"
+  /** A request was made and the server could not be reached. */
+  | "network"
+  /** Some requests were answered and some were not, so there is no median. */
+  | "incomplete";
+
+/** One timing, or one request that produced none. */
+export interface ResponseTimeSample {
+  readonly ok: boolean;
+  /**
+   * Milliseconds to the first byte, or NULL when this request produced no
+   * timing at all.
+   *
+   * NEVER ZERO FOR A FAILURE. Zero is a measurement, and an impossible one; a
+   * failed request that recorded it would sit in a report as the fastest
+   * server ever audited and would drag a median down with it.
+   */
+  readonly ms: number | null;
+  readonly failure: ResponseTimeFailure | null;
+}
+
+/**
+ * How quickly the server starts answering, from three timed requests.
+ *
+ * A REFINEMENT OF `UptimeCheck.serverResponseTimeMs`, NOT A REPLACEMENT. That
+ * field is a by-product of the one fetch the audit already had to make, and it
+ * stays exactly as it was. This is measured on purpose, three times, and is
+ * the number worth quoting.
+ *
+ * MEASURED BY FIXED CODE. No model produces, adjusts or reviews anything here,
+ * and no rule reads it yet -- there is no response-time rule in this project,
+ * and inventing a threshold to grade it against would be inventing a policy
+ * nobody has decided.
+ */
+export type ResponseTimeMeasurement = {
+  /**
+   * `measured` requires all three requests to have been answered.
+   *
+   * Two timings have a mean, not a median, and one is just itself. Offering
+   * either as "the median of three samples" would describe a measurement that
+   * did not happen, so fewer than three is `unavailable` with the count said
+   * out loud.
+   */
+  readonly status: "measured" | "unavailable";
+  /** The middle of the three timings, or null when there is no median. */
+  readonly medianResponseTimeMs: number | null;
+  /** How many requests were made. Zero when nothing was attempted. */
+  readonly attempted: number;
+  /** How many of them were answered. */
+  readonly succeeded: number;
+  /** Every attempt, kept so a partial result is not mistaken for a whole one. */
+  readonly samples: readonly ResponseTimeSample[];
+  readonly failure: ResponseTimeFailure | null;
+  /** A plain-language summary for a person reading the report. */
+  readonly message: string;
+};
+
 // ---------------------------------------------------------------------------
 // seo — read from the page's own HTML
 // ---------------------------------------------------------------------------
@@ -1067,6 +1133,14 @@ export interface AuditData {
   website: WebsiteInfo;
   fetch: FetchData;
   uptime: UptimeCheck;
+  /**
+   * Three timed requests to the site, and their median.
+   *
+   * Null when the audit ran out of time before it could be measured -- which
+   * is NOT the same as a site that answers slowly. `timedOut` says why. A
+   * measurement that ran but failed is an object saying so, never null.
+   */
+  responseTime: ResponseTimeMeasurement | null;
   seo: SeoData;
   /**
    * robots.txt and sitemap findings.

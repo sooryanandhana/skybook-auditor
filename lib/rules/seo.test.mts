@@ -74,6 +74,7 @@ function facts(overrides: Partial<AuditFacts> = {}): AuditFacts {
       contentType: "text/html",
     },
     uptime: { isOnline: true, statusCode: 200, serverResponseTimeMs: 100 },
+    responseTime: null,
     seo: runSeoChecks(HEALTHY_HTML, "https://shop.test/kettles"),
     technical: technical(),
     performance: notCheckedPerformance(),

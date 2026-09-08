@@ -221,6 +221,8 @@ const healthySite = async (): Promise<SiteChecks> => ({
   technical: permissiveRobots,
   ssl: healthySsl(),
   dns: healthyDns(),
+  // Not measured by this stub. Null says exactly that, and no rule reads it.
+  responseTime: null,
 });
 
 /** The healthy site with one measurement replaced, for a rule-specific test. */
@@ -1109,6 +1111,7 @@ test("an unreadable robots.txt never reaches the report as absent", async () => 
       technical: await runTechnicalChecks(SITE, robots, deadline),
       ssl: healthySsl(),
       dns: healthyDns(),
+      responseTime: null,
     }),
   });
 
@@ -1147,6 +1150,7 @@ test("the two robots states in a result can no longer disagree", async () => {
         technical: await runTechnicalChecks(SITE, robots, deadline),
         ssl: healthySsl(),
         dns: healthyDns(),
+        responseTime: null,
       }),
     });
 
@@ -1159,4 +1163,108 @@ test("the two robots states in a result can no longer disagree", async () => {
       `one panel would say ${result.data.technical?.robotsTxtStatus} while the other says ${result.crawl.robots.status}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// THE THREE-SAMPLE RESPONSE TIME
+//
+// Measured once, like the certificate and the DNS records, and carried onto
+// every page's facts unchanged. What is tested here is the wiring: the
+// arithmetic and the failure states have their own file.
+// ---------------------------------------------------------------------------
+
+const measuredResponseTime = {
+  status: "measured",
+  medianResponseTimeMs: 240,
+  attempted: 3,
+  succeeded: 3,
+  samples: [
+    { ok: true, ms: 180, failure: null },
+    { ok: true, ms: 420, failure: null },
+    { ok: true, ms: 240, failure: null },
+  ],
+  failure: null,
+  message: "The server started answering in 240 ms, the middle of 3 timed requests.",
+} as const;
+
+test("the measured response time reaches the audit's facts", async () => {
+  const result = await audit(
+    crawlResult(),
+    SITE,
+    siteWhere({ responseTime: measuredResponseTime }),
+  );
+
+  assert.equal(result.data.responseTime?.status, "measured");
+  assert.equal(result.data.responseTime?.medianResponseTimeMs, 240);
+  assert.equal(result.data.responseTime?.succeeded, 3);
+});
+
+test("one measurement is shared by every page, not taken per page", async () => {
+  const pages = Array.from({ length: 5 }, (_, i) => page(`https://example.com/p${i}`));
+  const result = await audit(
+    crawlResult({ pages }),
+    // The entry address must be one of the crawled pages, or there is no
+    // report to attach anything to.
+    "https://example.com/p0",
+    siteWhere({ responseTime: measuredResponseTime }),
+  );
+
+  assert.equal(result.pages.length, 5);
+  for (const audited of result.pages) {
+    assert.equal(audited.data.responseTime?.medianResponseTimeMs, 240);
+  }
+});
+
+test("a response time that could not be measured says so, and is not a null median", async () => {
+  const result = await audit(
+    crawlResult(),
+    SITE,
+    siteWhere({
+      responseTime: {
+        status: "unavailable",
+        medianResponseTimeMs: null,
+        attempted: 3,
+        succeeded: 2,
+        samples: [
+          { ok: true, ms: 180, failure: null },
+          { ok: true, ms: 240, failure: null },
+          { ok: false, ms: null, failure: "timeout" },
+        ],
+        failure: "incomplete",
+        message: "The server did not answer every time, so no median could be taken.",
+      },
+    }),
+  );
+
+  assert.equal(result.data.responseTime?.status, "unavailable");
+  assert.equal(result.data.responseTime?.medianResponseTimeMs, null);
+  assert.equal(result.data.responseTime?.succeeded, 2);
+  // The rest of the audit is untouched by a measurement that did not work.
+  assert.equal(result.pages.length, 1);
+  assert.ok(result.data.seo);
+});
+
+test("no rule reads the response time, so no severity depends on it", () => {
+  /*
+   * There is no response-time rule in this project, and this task did not
+   * invent one: a threshold would be a policy nobody has decided, and a
+   * severity that moved with a measured number would be a severity computed
+   * rather than declared.
+   */
+  const sources = ["seo", "security", "technical", "speed"].map((name) =>
+    fs.readFileSync(new URL(`../rules/${name}.ts`, import.meta.url), "utf8"),
+  );
+
+  for (const source of sources) {
+    assert.ok(!source.includes("responseTime"), "a rule reads the response time");
+    assert.ok(!source.includes("medianResponseTimeMs"));
+  }
+});
+
+test("the response time is measured by the collector, never by the AI layer", () => {
+  const source = fs.readFileSync(new URL("./siteAudit.ts", import.meta.url), "utf8");
+
+  assert.match(source, /from "\.\.\/collector\/responseTime\.ts"/);
+  assert.ok(!/from\s+["'][^"']*\/ai\//.test(source), "the audit imports from the AI layer");
+  assert.ok(!source.includes("@google/genai"));
 });

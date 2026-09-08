@@ -802,7 +802,20 @@ test("no HTTP or XML dependency was introduced", () => {
     assert.equal(all[banned], undefined, `${banned} must not be a dependency`);
   }
 
-  assert.deepEqual(Object.keys(pkg.dependencies).sort(), ["cheerio", "next", "react", "react-dom"]);
+  /*
+   * The whole list, so a NEW dependency has to be argued for here rather than
+   * appearing quietly. `@google/genai` was argued for and added in Phase 5D:
+   * it is the AI provider's own SDK, it is imported only by `lib/ai/gemini`,
+   * and a test in that folder walks the tree to prove nothing else reaches it.
+   * Sitemap reading never sees it, which is the property this guard protects.
+   */
+  assert.deepEqual(Object.keys(pkg.dependencies).sort(), [
+    "@google/genai",
+    "cheerio",
+    "next",
+    "react",
+    "react-dom",
+  ]);
 });
 
 test("robots.txt is read for signposts, never for rules", () => {

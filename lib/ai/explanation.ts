@@ -57,5 +57,22 @@ export interface AIExplanation {
  */
 export interface AIExplanationSet {
   readonly version: AIContractVersion;
+  /**
+   * The report's opening paragraph, written with every finding in view.
+   *
+   * The one thing here that is not about a single finding, and the reason it
+   * belongs to the model rather than to us: a summary is a judgement about
+   * emphasis — which of eleven problems a particular client should read first
+   * — and that is writing, not measurement.
+   *
+   * IT SUMMARISES; IT DOES NOT TOTAL. Nothing in it is a count, a score or a
+   * severity. Those were decided before the model was asked anything, they
+   * appear in the report from the deterministic result, and a sentence here
+   * that disagrees with one of them is wrong by definition.
+   *
+   * Required, not optional. A report with no opening is a worse report, and an
+   * optional field would let a provider quietly stop producing one.
+   */
+  readonly executiveSummary: string;
   readonly explanations: readonly AIExplanation[];
 }

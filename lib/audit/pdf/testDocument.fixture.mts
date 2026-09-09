@@ -2,14 +2,20 @@
  * One prepared document, shared by the renderer tests.
  *
  * NOT A TEST FILE and shipped nowhere: only `*.test.mts` imports it, and it
- * holds no assertions. It exists so the shell tests and the browser tests argue
- * about the same document.
+ * holds no assertions. It exists so the shell, cover, findings and browser
+ * tests argue about the same document.
  *
  * IT IS DELIBERATELY HOSTILE. The audited site's own title, its evidence and
  * one of its addresses are written the way an attacker would write them,
  * because a fixture of polite data proves only that polite data is safe. The
  * renderer builds HTML, so a fixture that never contains a tag would never
  * exercise the one thing that choosing a browser cost us.
+ *
+ * IT CARRIES BOTH SCOPES AND BOTH COMMENTARY STATES. One site-wide finding
+ * with no commentary and no reach, one page-level finding with a reach line,
+ * affected pages and commentary. Those are the four combinations the findings
+ * section has to get right, and a fixture with only one of them would let
+ * three of them break quietly.
  */
 import type { PdfDocument } from "../pdfDocument.ts";
 
@@ -19,8 +25,21 @@ export const HOSTILE = '<script>fetch("https://evil.example")</script>';
 /** A sentinel that appears nowhere in this file except as document content. */
 export const SENTINEL = "ZZQQ-RENDERER-SENTINEL";
 
+/** The rule ids the fixture's findings carry, in the order they are rendered. */
+export const FIXTURE_RULE_IDS = ["security.dns.spf.missing", "seo.meta-description.missing"] as const;
+
 export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument {
   return {
+    labels: {
+      remediation: "What to do",
+      aiSummaryHeading: "AI summary",
+      aiProvenance:
+        "Written by AI from the findings below. The findings, their severities " +
+        "and every number in this report were measured by this tool.",
+      aiExplanation: "AI explanation",
+      aiImpact: "Why it matters",
+      aiRecommendation: "Suggested next step",
+    },
     cover: {
       client: { companyName: "Example Company Ltd", contactName: null, preparedBy: null },
       auditedUrl: "https://example.com/",
@@ -32,15 +51,28 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
     },
     coverage: {
       partial: false,
-      headline: "What we checked",
+      headline: "128 pages read of 128 found",
       stopReason: null,
-      facts: [{ label: "Pages read", value: "128" }],
+      facts: [
+        { label: "Pages read", value: "128" },
+        { label: "Pages found", value: "128" },
+        { label: "Excluded by robots.txt", value: "4", note: "Not a fault in the site." },
+      ],
     },
     summary: {
-      severityCounts: [{ severity: "high", label: "High", count: 1 }],
+      severityCounts: [
+        { severity: "critical", label: "Critical", count: 0 },
+        { severity: "high", label: "High", count: 1 },
+        { severity: "medium", label: "Medium", count: 1 },
+      ],
       state: "findings",
       stateSentence: "",
-      ai: null,
+      ai: {
+        executiveSummary: `This site has two issues worth attention. ${SENTINEL}`,
+        partial: false,
+        rejectedCount: 0,
+        rejectedNote: null,
+      },
     },
     siteFindings: {
       heading: "Site-wide issues",
@@ -52,7 +84,7 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
           label: "Security",
           findings: [
             {
-              ruleId: "security.dns.spf.missing",
+              ruleId: FIXTURE_RULE_IDS[0],
               title: "No SPF record",
               category: "security",
               categoryLabel: "Security",
@@ -60,6 +92,7 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
               severityLabel: "High",
               scope: "site",
               scopeLabel: "Site-wide",
+              // A site finding has no page denominator and must never be shown one.
               reach: null,
               evidence: `No SPF record was found. ${HOSTILE}`,
               remediation: "Publish an SPF record for this domain.",
@@ -74,8 +107,38 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
     pageFindings: {
       heading: "Page-level issues",
       intro: "These were found on individual pages.",
-      count: 0,
-      groups: [],
+      count: 1,
+      groups: [
+        {
+          category: "seo",
+          label: "Search visibility",
+          findings: [
+            {
+              ruleId: FIXTURE_RULE_IDS[1],
+              title: "No meta description",
+              category: "seo",
+              categoryLabel: "Search visibility",
+              severity: "medium",
+              severityLabel: "Medium",
+              scope: "page",
+              scopeLabel: "Page-level",
+              reach: "19 of 128 evaluated pages",
+              evidence: "No meta description tag was found.",
+              remediation: "Write a description of about 155 characters.",
+              affected: [
+                { url: "https://example.com/about", evidence: "No meta description tag." },
+                { url: "https://example.com/contact", evidence: "No meta description tag." },
+              ],
+              affectedNote: "Showing 2 of 19 affected pages.",
+              commentary: {
+                explanation: "Search engines write their own summary when a page supplies none.",
+                businessImpact: "The snippet a customer reads is chosen for you.",
+                recommendation: "Write a description for each page.",
+              },
+            },
+          ],
+        },
+      ],
     },
     skipped: null,
     speed: {

@@ -58,6 +58,7 @@ import {
 import {
   PAGE_FINDINGS_HEADING,
   PAGE_FINDINGS_INTRO,
+  REMEDIATION_LABEL,
   SITE_FINDINGS_HEADING,
   SITE_FINDINGS_INTRO,
   affectedView,
@@ -68,6 +69,14 @@ import {
   stopReasonText,
   type FindingScope,
 } from "../report/siteFindingsView.ts";
+import {
+  AI_EXPLANATION_LABEL,
+  AI_IMPACT_LABEL,
+  AI_PROVENANCE,
+  AI_RECOMMENDATION_LABEL,
+  AI_SUMMARY_HEADING,
+  rejectedNote,
+} from "../report/commentaryView.ts";
 import {
   SKIPPED_HEADING,
   SKIPPED_INTRO,
@@ -176,6 +185,40 @@ export interface PdfAiSummary {
   readonly partial: boolean;
   /** How many were dropped. A count, never the reasons. */
   readonly rejectedCount: number;
+  /**
+   * What to say about the dropped entries, or null when none were.
+   *
+   * Phrased by the report layer, because the count has to become a sentence
+   * with the right plural and a renderer that pluralises is a renderer that
+   * writes.
+   */
+  readonly rejectedNote: string | null;
+}
+
+/**
+ * The words that label parts of the document, rather than describe the site.
+ *
+ * WHY THEY TRAVEL WITH THE DOCUMENT. Every one of these is also on screen, and
+ * 7A §5 settled that shared wording lives in the report layer with one copy:
+ * two copies of a sentence about a client's website drift, and the browser
+ * report and the PDF would then disagree. The renderer cannot reach the report
+ * layer -- 7A §25 gives it this object and nothing else -- so the labels come
+ * through here, exactly as the section headings already do.
+ *
+ * THEY ARE LABELS, NOT MEASUREMENTS. Nothing here is derived from the audit,
+ * and the same six strings appear in every document.
+ */
+export interface PdfLabels {
+  /** Above a finding's remediation. 7A §8 requires it labelled and set apart. */
+  readonly remediation: string;
+  /** Above the whole-audit summary. */
+  readonly aiSummaryHeading: string;
+  /** The sentence saying every finding and figure was measured by the tool. */
+  readonly aiProvenance: string;
+  /** The three labels inside one finding's commentary, in contract order. */
+  readonly aiExplanation: string;
+  readonly aiImpact: string;
+  readonly aiRecommendation: string;
 }
 
 export interface PdfSummary {
@@ -282,6 +325,8 @@ export type PdfSpeed =
     };
 
 export interface PdfDocument {
+  /** The document's own labels. The same six strings in every document. */
+  readonly labels: PdfLabels;
   readonly cover: PdfCover;
   readonly coverage: PdfCoverage;
   readonly summary: PdfSummary;
@@ -578,6 +623,7 @@ export function buildPdfDocument(
           executiveSummary: job.explanation.explanations.executiveSummary,
           partial: job.explanation.partial,
           rejectedCount: job.explanation.rejected.length,
+          rejectedNote: rejectedNote(job.explanation.rejected.length),
         }
       : null;
 
@@ -587,9 +633,23 @@ export function buildPdfDocument(
     preparedBy: clientField(options.preparedBy),
   };
 
+  /*
+   * ONE COPY OF EVERY SHARED LABEL, read from the report layer here so the
+   * renderer never has to. See `PdfLabels`.
+   */
+  const labels: PdfLabels = {
+    remediation: REMEDIATION_LABEL,
+    aiSummaryHeading: AI_SUMMARY_HEADING,
+    aiProvenance: AI_PROVENANCE,
+    aiExplanation: AI_EXPLANATION_LABEL,
+    aiImpact: AI_IMPACT_LABEL,
+    aiRecommendation: AI_RECOMMENDATION_LABEL,
+  };
+
   return {
     ok: true,
     document: {
+      labels,
       cover: {
         client: client.companyName === null && client.contactName === null && client.preparedBy === null
           ? EMPTY_CLIENT

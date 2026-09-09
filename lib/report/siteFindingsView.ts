@@ -123,6 +123,17 @@ export function scopeLabel(scope: FindingScope): string {
   return scope === "site" ? "Site-wide" : "Page-level";
 }
 
+/**
+ * The label above a finding's remediation.
+ *
+ * 7A §8 requires the action to be "labelled and set apart". On screen the
+ * evidence and the action were once two grey paragraphs of the same size, and
+ * a reader could not tell what was measured from what to do about it. The
+ * label carries that distinction in words, so it does not rest on styling
+ * alone, and it is shared so the PDF says exactly what the screen says.
+ */
+export const REMEDIATION_LABEL = "What to do";
+
 export const SITE_FINDINGS_HEADING = "Site-wide issues";
 export const PAGE_FINDINGS_HEADING = "Page-level issues";
 

@@ -17,6 +17,7 @@ import {
   PAGE_FINDINGS_HEADING,
   PAGE_FINDINGS_INTRO,
   SITE_FINDINGS_HEADING,
+  REMEDIATION_LABEL,
   SITE_FINDINGS_INTRO,
   affectedView,
   auditStatusText,
@@ -28,6 +29,14 @@ import {
   siteFileText,
   type FindingScope,
 } from "@/lib/report/siteFindingsView";
+import {
+  AI_EXPLANATION_LABEL,
+  AI_IMPACT_LABEL,
+  AI_PROVENANCE,
+  AI_RECOMMENDATION_LABEL,
+  AI_SUMMARY_HEADING,
+  rejectedNote,
+} from "@/lib/report/commentaryView";
 import {
   certificateFacts,
   certificateProblemFacts,
@@ -979,7 +988,7 @@ function FindingCard({
           distinction in words, so it does not rest on the styling alone.
         */}
         <p className={styles.remediation}>
-          <span className={styles.remediationLabel}>What to do</span>
+          <span className={styles.remediationLabel}>{REMEDIATION_LABEL}</span>
           {finding.remediation}
         </p>
 
@@ -1036,13 +1045,13 @@ function FindingCard({
 function FindingExplanation({ explanation }: { explanation: AIExplanation }) {
   return (
     <div className={styles.aiExplanation}>
-      <p className={styles.aiLabel}>AI explanation</p>
+      <p className={styles.aiLabel}>{AI_EXPLANATION_LABEL}</p>
       <p className={styles.aiText}>{explanation.explanation}</p>
 
-      <p className={styles.aiSubLabel}>Why it matters</p>
+      <p className={styles.aiSubLabel}>{AI_IMPACT_LABEL}</p>
       <p className={styles.aiText}>{explanation.businessImpact}</p>
 
-      <p className={styles.aiSubLabel}>Suggested next step</p>
+      <p className={styles.aiSubLabel}>{AI_RECOMMENDATION_LABEL}</p>
       <p className={styles.aiText}>{explanation.recommendation}</p>
     </div>
   );
@@ -1102,13 +1111,11 @@ function AiSummaryPanel({
 
   return (
     <section className={styles.aiPanel}>
-      <p className={styles.aiPanelHeading}>AI summary</p>
+      <p className={styles.aiPanelHeading}>{AI_SUMMARY_HEADING}</p>
       <p className={styles.aiSummary}>{answer.executiveSummary}</p>
       <p className={styles.aiPanelNote}>
-        Written by AI from the findings below. The findings, their severities
-        and every number in this report were measured by this tool.
-        {answer.partial &&
-          ` ${answer.rejectedCount} explanation${answer.rejectedCount === 1 ? " was" : "s were"} not usable and ${answer.rejectedCount === 1 ? "was" : "were"} left out.`}
+        {AI_PROVENANCE}
+        {answer.partial && ` ${rejectedNote(answer.rejectedCount) ?? ""}`}
       </p>
     </section>
   );

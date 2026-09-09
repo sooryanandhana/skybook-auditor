@@ -1,11 +1,15 @@
 /**
  * The document shell: the page the report sections will be poured into.
  *
- * WHAT THIS IS NOT, STILL. There is no findings section, no security or speed
- * section, no commentary and no affected-page list. Those are later 7C steps
- * and a first draft of any of them here would be rewritten there. What exists
- * is the frame: a titled document, the cover, the type scale, the embedded
- * faces, and one placeholder block per section the document actually carries.
+ * WHAT IT ASSEMBLES TODAY. The cover, the coverage section, the summary with
+ * its severity split and AI panel, and both findings sections, in the order 7A
+ * §6 sets out. Each is built by its own module; this file decides only what
+ * goes on the page and in what order.
+ *
+ * WHAT IS STILL A PLACEHOLDER. Speed, the measured-facts tables, the coverage
+ * detail and the skipped checks each render a heading and a line saying they
+ * are not yet built. They belong to 7C-4, and a first draft of any of them
+ * here would be rewritten there.
  *
  * IT READS `PdfDocument` AND NOTHING ELSE. Every heading below is a string 7B
  * already prepared. The shell chooses no wording, formats no number, reads no
@@ -21,6 +25,9 @@
 import type { PdfDocument, PdfFactSection } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
 import { coverHtml } from "./cover.ts";
+import { coverageHtml } from "./coverage.ts";
+import { findingsHtml } from "./findings.ts";
+import { summaryHtml } from "./summary.ts";
 import { STYLESHEET } from "./styles.ts";
 
 
@@ -46,15 +53,6 @@ function placeholders(document: PdfDocument): Placeholder[] {
     }));
 
   return [
-    { heading: document.coverage.headline, detail: "Crawl coverage, not yet rendered." },
-    {
-      heading: document.siteFindings.heading,
-      detail: `${document.siteFindings.count} findings, not yet rendered.`,
-    },
-    {
-      heading: document.pageFindings.heading,
-      detail: `${document.pageFindings.count} findings, not yet rendered.`,
-    },
     ...(document.skipped === null
       ? []
       : [
@@ -87,13 +85,25 @@ export function documentHtml(document: PdfDocument): string {
     .map((block) => html`<section><h2>${block.heading}</h2><p class="note">${block.detail}</p></section>`)
     .join("");
 
+  /*
+   * THE ORDER IS 7A §6's, and it is not arbitrary. Coverage comes before any
+   * finding because a reader has to know how much of the site was looked at
+   * before a list of problems means anything. Site-wide findings come before
+   * page-level ones because one broken certificate outranks a missing meta
+   * description on nine pages, whatever the counts say.
+   */
+  const labels = document.labels;
+
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
     html`<title>Website audit — ${cover.auditedUrl}</title>` +
     `<style>${STYLESHEET}</style></head><body>` +
     coverHtml(cover) +
     `<main>` +
-    `<p class="note">The report sections below are not yet rendered.</p>` +
+    coverageHtml(document.coverage) +
+    summaryHtml(document.summary, labels) +
+    findingsHtml(document.siteFindings, labels) +
+    findingsHtml(document.pageFindings, labels) +
     `</main>` +
     blocks +
     `</body></html>`

@@ -310,12 +310,98 @@ export const STYLESHEET: string =
   .facts tbody tr + tr th, .facts tbody tr + tr td { border-top: .5pt solid ${LINE_SOFT}; }
   .fact-note { display: block; font-size: 8pt; color: ${INK_FAINT}; }
 
-  /* ---------- body pages ---------- */
+  /* ---------- speed ---------- */
+
+  .speed-block { margin: 0 0 10pt; }
+  .speed-score {
+    font-family: ${SERIF};
+    font-size: 22pt;
+    font-weight: 600;
+    line-height: 1.1;
+    margin: 2pt 0 5pt;
+  }
+  .speed-score-of { font-family: ${SANS}; font-size: 10pt; font-weight: 400; color: ${INK_FAINT}; }
+  .speed-limits { margin: 0 0 8pt; }
+
+  /* ---------- checks that did not run ---------- */
 
   /*
-   * TEMPORARY. One section per page makes the running head, the running foot
-   * and "page n of m" observable on a real multi-page document. 7A §18 decides
-   * the real page breaks, at 7C-6.
+   * No badge and no colour. 7A §14: a check that could not run is not a
+   * finding, and giving it the visual language of one would turn our own gap
+   * into an accusation about the client's website.
    */
-  section + section { break-before: page; }
+  .skipped-group { margin: 0 0 8pt; }
+  .skipped-checks { list-style: none; margin: 0; padding: 0; }
+  .skipped-checks li { display: inline; }
+  .skipped-checks li + li::before { content: ", "; }
+  .skipped-group .note { margin: 1pt 0 0; }
+
+  /* ---------- caveats, and about this report ---------- */
+
+  .caveat { margin: 0 0 10pt; }
+  .caveat-label {
+    font-size: 8pt; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 3pt;
+  }
+  .caveat-list { margin: 0; padding-left: 12pt; max-width: 68ch; }
+  .caveat-list li { margin: 0 0 3pt; }
+  .fact-group { margin: 0 0 10pt; }
+
+  /* ---------- page breaks, 7A §18 ---------- */
+
+  /*
+   * A FINDING STAYS TOGETHER. Title, severity, evidence and remediation split
+   * across a break is the case §18 names first, because a reader who turns the
+   * page mid-finding loses the thing that made the evidence mean something.
+   *
+   * Chromium breaks it anyway when it is genuinely taller than a page, which
+   * §18 permits and which is the right fallback: a clipped finding would be
+   * worse than a split one.
+   */
+  .finding { break-inside: avoid; }
+
+  /* The same, for the smaller blocks that read as one thing. */
+  .speed-block,
+  .skipped-group,
+  .caveat,
+  .fact-group,
+  .tile,
+  .ai { break-inside: avoid; }
+
+  /*
+   * A HEADING NEVER SITS ALONE AT THE FOOT. §18 names this too. The break-after rule
+   * moves the heading down with the content it introduces rather than leaving
+   * it stranded as the last line on a page.
+   */
+  h1, h2, h3, .finding-title, .ai-label, .caveat-label, .remediation-label {
+    break-after: avoid;
+  }
+
+  /*
+   * A TABLE THAT SPANS PAGES REPEATS ITS HEADER. §18 requires it, and this is
+   * what makes Chromium do it: a real thead element declared as a header group. A
+   * row itself never splits, so a label never ends up on one page with its
+   * value on the next.
+   */
+  .facts thead { display: table-header-group; }
+  .facts tbody { display: table-row-group; }
+  .facts tr { break-inside: avoid; }
+
+  /*
+   * Long prose flows. §18 forbids truncating AI commentary, and evidence and
+   * remediation are the site's own facts, so all three are allowed to break
+   * and none is allowed to be cut. Two lines are kept together at each edge so
+   * a break never leaves a single orphaned line behind.
+   */
+  p, .affected-list, .caveat-list { orphans: 2; widows: 2; }
+
+  /* ---------- the pages that stand alone ---------- */
+
+  /*
+   * The cover has its own page above, and "About this report" has one here.
+   * §18 names these two and no others: every other section flows, because
+   * forcing a page per section leaves half-empty pages and makes a short
+   * report look padded.
+   */
+  .about { break-before: page; }
 `;

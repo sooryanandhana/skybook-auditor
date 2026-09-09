@@ -1,15 +1,14 @@
 /**
  * The document shell: the page the report sections will be poured into.
  *
- * WHAT IT ASSEMBLES TODAY. The cover, the coverage section, the summary with
- * its severity split and AI panel, and both findings sections, in the order 7A
- * §6 sets out. Each is built by its own module; this file decides only what
- * goes on the page and in what order.
+ * ALL TEN SECTIONS, in the order 7A §6 sets out. Each is built by its own
+ * module, and this file decides only what goes on the page and in what order.
+ * There are no placeholders left.
  *
- * WHAT IS STILL A PLACEHOLDER. Speed, the measured-facts tables, the coverage
- * detail and the skipped checks each render a heading and a line saying they
- * are not yet built. They belong to 7C-4, and a first draft of any of them
- * here would be rewritten there.
+ * IT ADDS NOTHING OF ITS OWN. Every section either returns markup or returns
+ * an empty string, and a section that returns nothing leaves no heading, no
+ * gap and no trace. That is 7A §19's rule about empty sections, honoured by
+ * each module for itself rather than by a list of conditions kept here.
  *
  * IT READS `PdfDocument` AND NOTHING ELSE. Every heading below is a string 7B
  * already prepared. The shell chooses no wording, formats no number, reads no
@@ -22,50 +21,18 @@
  * both to be rendered as text. There is no path in this file that puts a
  * document value into markup unescaped.
  */
-import type { PdfDocument, PdfFactSection } from "../pdfDocument.ts";
+import type { PdfDocument } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
 import { coverHtml } from "./cover.ts";
+import { aboutHtml } from "./about.ts";
 import { coverageHtml } from "./coverage.ts";
+import { COVERAGE_DETAIL_HEADING, MEASURED_HEADING, factSectionsHtml } from "./factSections.ts";
 import { findingsHtml } from "./findings.ts";
+import { skippedHtml } from "./skipped.ts";
+import { speedHtml } from "./speed.ts";
 import { summaryHtml } from "./summary.ts";
 import { STYLESHEET } from "./styles.ts";
 
-
-/** A section that exists, and the heading 7B gave it. */
-interface Placeholder {
-  readonly heading: string;
-  readonly detail: string;
-}
-
-/**
- * Which sections this document carries, in the order 7A §6 lists them.
- *
- * A section absent from the document produces no block, which is 7A §19's rule
- * that an empty section is omitted rather than left blank. Here that rule
- * costs nothing to honour, so it is honoured from the start rather than
- * retrofitted.
- */
-function placeholders(document: PdfDocument): Placeholder[] {
-  const factHeadings = (sections: readonly PdfFactSection[]) =>
-    sections.map((section) => ({
-      heading: section.heading,
-      detail: `${section.facts.length} measured facts, not yet rendered.`,
-    }));
-
-  return [
-    ...(document.skipped === null
-      ? []
-      : [
-          {
-            heading: document.skipped.heading,
-            detail: `${document.skipped.count} checks, not yet rendered.`,
-          },
-        ]),
-    { heading: "Speed", detail: "Speed result, not yet rendered." },
-    ...factHeadings(document.measured),
-    ...factHeadings(document.coverageDetail),
-  ];
-}
 
 /**
  * The whole page, as one HTML string.
@@ -80,10 +47,6 @@ function placeholders(document: PdfDocument): Placeholder[] {
  */
 export function documentHtml(document: PdfDocument): string {
   const cover = document.cover;
-
-  const blocks = placeholders(document)
-    .map((block) => html`<section><h2>${block.heading}</h2><p class="note">${block.detail}</p></section>`)
-    .join("");
 
   /*
    * THE ORDER IS 7A §6's, and it is not arbitrary. Coverage comes before any
@@ -104,8 +67,12 @@ export function documentHtml(document: PdfDocument): string {
     summaryHtml(document.summary, labels) +
     findingsHtml(document.siteFindings, labels) +
     findingsHtml(document.pageFindings, labels) +
+    skippedHtml(document.skipped) +
+    speedHtml(document.speed, labels) +
+    factSectionsHtml(MEASURED_HEADING, document.measured, "measured") +
+    factSectionsHtml(COVERAGE_DETAIL_HEADING, document.coverageDetail, "coverage-detail") +
+    aboutHtml() +
     `</main>` +
-    blocks +
     `</body></html>`
   );
 }

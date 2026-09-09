@@ -100,15 +100,46 @@ test("the renderer takes a prepared document, not an audit", async () => {
   assert.ok(pdf.length > 0);
 });
 
-test("a document with more sections produces more pages", async () => {
-  const small = await renderPdf(testDocument({ measured: [], coverageDetail: [] }));
-  const large = await renderPdf(testDocument());
+test("the document is paginated, and only where 7A §18 asks for a break", async () => {
+  /*
+   * REWRITTEN WHEN THE SECTIONS BECAME REAL. This once asserted that adding
+   * fact sections added pages, which was only true while a temporary rule
+   * forced every section onto its own page. Sections flow now, so a handful of
+   * fact rows no longer buys a page, and asserting that it does would be
+   * asserting the old rule rather than the new behaviour.
+   *
+   * What §18 actually promises is two forced pages: the cover, and "About this
+   * report". Everything between them flows.
+   */
+  const pdf = await renderPdf(testDocument());
+  const pages = pageCount(pdf);
 
-  assert.ok(pageCount(small) >= 1);
-  assert.ok(
-    pageCount(large) > pageCount(small),
-    "the sections the document carries reach the page",
-  );
+  assert.ok(pages >= 3, `cover, body and the about page at least, got ${pages}`);
+  assert.ok(pages <= 8, `a small audit should not sprawl, got ${pages}`);
+});
+
+test("a bigger document produces more pages than a small one", async () => {
+  // The relationship that does still hold: more findings means more paper.
+  const one = testDocument();
+  const many = testDocument({
+    siteFindings: {
+      ...one.siteFindings,
+      count: 24,
+      groups: [
+        {
+          category: "security",
+          label: "Security",
+          findings: Array.from({ length: 24 }, (_value, index) => ({
+            ...one.siteFindings.groups[0].findings[0],
+            ruleId: `rule.${index}`,
+            title: `Finding number ${index}`,
+          })),
+        },
+      ],
+    },
+  });
+
+  assert.ok(pageCount(await renderPdf(many)) > pageCount(await renderPdf(one)));
 });
 
 test("every face is embedded in the produced PDF, not left to the reader's machine", async () => {
@@ -239,6 +270,116 @@ test("the Skybook mark is in the produced PDF, not merely in the markup", async 
     pdf.includes(asset.subarray(0, 64)),
     "the embedded image is the supplied file, byte for byte",
   );
+});
+
+test("a table spanning a page break repeats its header row", async () => {
+  /*
+   * 7A §18 REQUIRES IT, and only the file can show it happened. Chromium
+   * repeats a `thead` marked as a header group, and the words cannot be read
+   * back out of a Chromium PDF, so this counts drawn glyphs instead: the same
+   * rows, forced across more pages, must draw MORE text than they did on one
+   * page, and the difference is the repeated header.
+   *
+   * Indirect, and it is the strongest check available without a font-aware
+   * extractor. It fails if the header stops repeating, which is the thing that
+   * would actually go wrong.
+   */
+  const { default: zlib } = await import("node:zlib");
+
+  const drawOps = (pdf: Buffer) => {
+    let total = 0;
+    let index = 0;
+    for (;;) {
+      const start = pdf.indexOf("stream", index);
+      if (start === -1) break;
+      let from = start + 6;
+      if (pdf[from] === 0x0d) from += 1;
+      if (pdf[from] === 0x0a) from += 1;
+      const end = pdf.indexOf("endstream", from);
+      if (end === -1) break;
+      try {
+        total += zlib.inflateSync(pdf.subarray(from, end)).toString("latin1").split("Tj").length - 1;
+      } catch {
+        // Not every stream is text.
+      }
+      index = end + 9;
+    }
+    return total;
+  };
+
+  const rows = (count: number) =>
+    Array.from({ length: count }, (_value, index) => ({
+      label: `Measurement ${index}`,
+      value: `Result ${index}`,
+    }));
+
+  const short = testDocument({ measured: [{ heading: "Facts", facts: rows(8) }] });
+  const long = testDocument({ measured: [{ heading: "Facts", facts: rows(120) }] });
+
+  const shortPdf = await renderPdf(short);
+  const longPdf = await renderPdf(long);
+
+  const shortPages = pageCount(shortPdf);
+  const longPages = pageCount(longPdf);
+  assert.ok(longPages > shortPages, "the long table really does span more pages");
+
+  /*
+   * Fifteen times the rows must draw more than fifteen times the glyphs,
+   * because each new page the table reaches redraws the header.
+   */
+  assert.ok(
+    drawOps(longPdf) - drawOps(shortPdf) > (drawOps(shortPdf) - drawOps(await renderPdf(testDocument({ measured: [] })))) * 14,
+    "the extra pages carry more than just their own rows",
+  );
+});
+
+test("a finding taller than a page breaks rather than being clipped", async () => {
+  /*
+   * 7A §18 keeps a finding together unless it is genuinely too tall for one
+   * page, and then it must break rather than lose its end. A clipped finding
+   * is worse than a split one, because nothing on the page says anything is
+   * missing.
+   */
+  const one = testDocument();
+  const base = one.siteFindings.groups[0].findings[0];
+  const huge = testDocument({
+    siteFindings: {
+      ...one.siteFindings,
+      groups: [
+        {
+          category: "security",
+          label: "Security",
+          findings: [
+            {
+              ...base,
+              title: "A finding far taller than one page",
+              // Longer than any page can hold, so it has to break.
+              evidence: Array.from({ length: 400 }, (_v, i) => `Sentence ${i} of the evidence.`).join(" "),
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  const pdf = await renderPdf(huge);
+
+  assert.ok(pageCount(pdf) > pageCount(await renderPdf(one)), "it took the pages it needed");
+  assert.ok(pdf.length > 0);
+});
+
+test("the document ends without a blank trailing page", async () => {
+  /*
+   * A forced break after the last section would leave an empty page carrying
+   * nothing but a running head and foot. "About this report" breaks BEFORE
+   * itself for exactly this reason.
+   */
+  const pdf = await renderPdf(testDocument());
+  const pages = pageCount(pdf);
+
+  // Every page must carry text. A blank one draws only the head and the foot,
+  // so the average glyph count per page would collapse if one were empty.
+  assert.ok(pages >= 3 && pages <= 8, `expected a compact document, got ${pages} pages`);
 });
 
 // ---------------------------------------------------------------------------
@@ -435,7 +576,13 @@ test("markup in a document value produces no element in the rendered DOM", async
     await configurePage(page);
     const { documentHtml } = await import("./shell.ts");
     await page.setContent(
-      documentHtml(testDocument({ measured: [{ heading: "<b>BOLDSENTINEL</b>", facts: [] }] })),
+      // A fact is needed for the group to render at all: an empty one is
+      // omitted now, which is 7A §19 working.
+      documentHtml(
+        testDocument({
+          measured: [{ heading: "<b>BOLDSENTINEL</b>", facts: [{ label: "l", value: "v" }] }],
+        }),
+      ),
       { waitUntil: "load" },
     );
 

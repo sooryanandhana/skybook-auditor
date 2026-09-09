@@ -39,6 +39,9 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
       aiExplanation: "AI explanation",
       aiImpact: "Why it matters",
       aiRecommendation: "Suggested next step",
+      speedField: "Real visitors",
+      speedLab: "Simulated load",
+      speedNotInspected: "What this does not cover",
     },
     cover: {
       client: { companyName: "Example Company Ltd", contactName: null, preparedBy: null },

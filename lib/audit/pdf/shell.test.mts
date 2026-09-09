@@ -56,8 +56,9 @@ test("a skipped section that exists does produce a block", () => {
     }),
   );
 
-  assert.ok(out.includes("Checks not evaluated"));
-  assert.ok(out.includes("2 checks"));
+  assert.ok(out.includes("Checks not evaluated"), "the heading, carried word for word");
+  assert.ok(out.includes("nothing is claimed about them either way"), "and its one line of context");
+  assert.ok(out.includes("The page could not be read"), "the reason");
 });
 
 test("every fact section the document carries gets a block", () => {
@@ -108,7 +109,10 @@ test("the whole shell contains no element the shell did not write", () => {
   const withTags = documentHtml(
     testDocument({ measured: [{ heading: "<b>x</b>", facts: [{ label: "<i>", value: "<u>" }] }] }),
   );
-  const withoutTags = documentHtml(testDocument({ measured: [{ heading: "x", facts: [] }] }));
+  // Both carry one fact, because a group with none renders nothing at all now.
+  const withoutTags = documentHtml(
+    testDocument({ measured: [{ heading: "x", facts: [{ label: "l", value: "v" }] }] }),
+  );
 
   assert.equal(
     (withTags.match(/</g) ?? []).length,

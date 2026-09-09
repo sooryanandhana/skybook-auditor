@@ -4,6 +4,9 @@ import { useEffect, useState } from "react";
 import type { FieldPerformance, LabPerformance, PerformanceData } from "@/lib/types";
 import {
   METRIC_NOT_REPORTED,
+  SPEED_FIELD_HEADING,
+  SPEED_LAB_HEADING,
+  SPEED_NOT_INSPECTED_HEADING,
   fieldOverallText,
   fieldShiftText,
   labShiftText,
@@ -87,7 +90,7 @@ export function PerformancePanel({
 
       {performance.notInspected.length > 0 && (
         <details className={styles.perfNotes}>
-          <summary>What this does not cover ({performance.notInspected.length})</summary>
+          <summary>{SPEED_NOT_INSPECTED_HEADING} ({performance.notInspected.length})</summary>
           <ul>
             {performance.notInspected.map((note) => (
               <li key={note}>{note}</li>
@@ -105,7 +108,7 @@ function FieldBlock({ field }: { field: FieldPerformance }) {
 
   return (
     <div className={styles.perfBlock}>
-      <h4 className={styles.perfBlockTitle}>Real visitors</h4>
+      <h4 className={styles.perfBlockTitle}>{SPEED_FIELD_HEADING}</h4>
 
       {field.status === "absent" && (
         <p className={styles.perfMuted}>
@@ -202,7 +205,7 @@ function LabBlock({ lab, strategy }: { lab: LabPerformance; strategy: Performanc
 
   return (
     <div className={styles.perfBlock}>
-      <h4 className={styles.perfBlockTitle}>Simulated load</h4>
+      <h4 className={styles.perfBlockTitle}>{SPEED_LAB_HEADING}</h4>
 
       {lab.status === "error" ? (
         <p className={styles.perfMuted}>{lab.error}</p>

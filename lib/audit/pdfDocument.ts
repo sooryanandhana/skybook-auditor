@@ -44,6 +44,9 @@ import {
   labShiftText,
   metricDurationText,
   ratingLabel,
+  SPEED_FIELD_HEADING,
+  SPEED_LAB_HEADING,
+  SPEED_NOT_INSPECTED_HEADING,
   readableTimestamp,
   robotsFacts,
   securityFacts,
@@ -219,6 +222,11 @@ export interface PdfLabels {
   readonly aiExplanation: string;
   readonly aiImpact: string;
   readonly aiRecommendation: string;
+  /** The two halves of a speed result, which are not the same measurement. */
+  readonly speedField: string;
+  readonly speedLab: string;
+  /** Above the list of what the speed check could not see. */
+  readonly speedNotInspected: string;
 }
 
 export interface PdfSummary {
@@ -644,6 +652,9 @@ export function buildPdfDocument(
     aiExplanation: AI_EXPLANATION_LABEL,
     aiImpact: AI_IMPACT_LABEL,
     aiRecommendation: AI_RECOMMENDATION_LABEL,
+    speedField: SPEED_FIELD_HEADING,
+    speedLab: SPEED_LAB_HEADING,
+    speedNotInspected: SPEED_NOT_INSPECTED_HEADING,
   };
 
   return {

@@ -826,6 +826,24 @@ const METRIC_RATING_TEXT: Record<PerformanceRating, string> = {
   SLOW: "Poor",
 };
 
+/**
+ * The two things a speed check measures, and they are not the same thing.
+ *
+ * 7A §10 requires field and lab data kept separate and labelled "as the panel
+ * does". Field data is what real visitors experienced; lab data is one
+ * simulated load in Google's own test browser. A reader who takes the second
+ * for the first will act on a number that describes nobody's actual visit.
+ *
+ * SHARED SO THE TWO REPORTS CANNOT DRIFT, which is 7A §5's rule for any
+ * wording the screen and the PDF both show. They lived in the performance
+ * panel, which is a client component and unreachable from server code.
+ */
+export const SPEED_FIELD_HEADING = "Real visitors";
+export const SPEED_LAB_HEADING = "Simulated load";
+
+/** Above the list of what the speed check could not see. */
+export const SPEED_NOT_INSPECTED_HEADING = "What this does not cover";
+
 export function ratingLabel(rating: PerformanceRating): string {
   return METRIC_RATING_TEXT[rating];
 }

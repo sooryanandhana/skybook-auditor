@@ -1,12 +1,11 @@
 /**
- * The document shell: the smallest page that is worth rendering.
+ * The document shell: the page the report sections will be poured into.
  *
- * WHAT THIS IS NOT. There is no cover, no logo, no findings, no security or
- * speed section, no commentary, no affected-page list and no finished
- * typography. Those are later 7C steps and putting a first draft of any of
- * them here would mean rewriting it there. What exists is the frame they will
- * be poured into: a titled document, a readable body, a main region, and one
- * placeholder block per section the document actually carries.
+ * WHAT THIS IS NOT, STILL. There is no findings section, no security or speed
+ * section, no commentary and no affected-page list. Those are later 7C steps
+ * and a first draft of any of them here would be rewritten there. What exists
+ * is the frame: a titled document, the cover, the type scale, the embedded
+ * faces, and one placeholder block per section the document actually carries.
  *
  * IT READS `PdfDocument` AND NOTHING ELSE. Every heading below is a string 7B
  * already prepared. The shell chooses no wording, formats no number, reads no
@@ -21,39 +20,9 @@
  */
 import type { PdfDocument, PdfFactSection } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
+import { coverHtml } from "./cover.ts";
+import { STYLESHEET } from "./styles.ts";
 
-/**
- * TEMPORARY typography, and no more of it than a page needs to be legible.
- *
- * 7A §16 sets body text at 10 to 11 point with generous leading and a measure
- * near 65 to 75 characters, and the 7C evaluation recommended a full scale and
- * three embedded faces. None of that is settled here: embedding fonts is its
- * own step, and a half-applied scale is harder to finish than an absent one.
- * These rules exist so the foundation renders as a document rather than as
- * unstyled markup.
- *
- * The sections are broken onto separate pages for the same temporary reason:
- * it makes the running head, the running foot and "page n of m" observable on
- * a real multi-page document. 7A §18 decides the real page breaks, at 7C-6.
- */
-const STYLE = `
-  @page { margin: 0; }
-  html { -webkit-print-color-adjust: exact; }
-  body {
-    margin: 0;
-    font-family: -apple-system, "Segoe UI", sans-serif;
-    font-size: 10.5pt;
-    line-height: 1.55;
-    color: #16213a;
-  }
-  main { max-width: 68ch; }
-  h1 { font-size: 20pt; line-height: 1.2; margin: 0 0 8pt; }
-  h2 { font-size: 13pt; line-height: 1.25; margin: 0 0 6pt; }
-  p { margin: 0 0 8pt; }
-  .url { font-family: ui-monospace, "Courier New", monospace; overflow-wrap: anywhere; }
-  .note { color: #4a5872; font-size: 9pt; }
-  section + section { break-before: page; }
-`;
 
 /** A section that exists, and the heading 7B gave it. */
 interface Placeholder {
@@ -121,18 +90,10 @@ export function documentHtml(document: PdfDocument): string {
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
     html`<title>Website audit — ${cover.auditedUrl}</title>` +
-    `<style>${STYLE}</style></head><body><main>` +
-    html`<h1>${cover.statusLine}</h1>` +
-    html`<p class="url">${cover.auditedUrl}</p>` +
-    /*
-     * PRINTED, NOT PHRASED. The projection turns the stored timestamp into a
-     * sentence; this puts that sentence on the page. Null means the stored
-     * value could not be read, and the line is omitted rather than filled --
-     * a document that says "Measured" and then nothing is worse than one that
-     * does not raise the question.
-     */
-    (cover.checkedAt === null ? "" : html`<p class="note">Measured ${cover.checkedAt}</p>`) +
-    `<p class="note">Foundation document. The report sections below are not yet rendered.</p>` +
+    `<style>${STYLESHEET}</style></head><body>` +
+    coverHtml(cover) +
+    `<main>` +
+    `<p class="note">The report sections below are not yet rendered.</p>` +
     `</main>` +
     blocks +
     `</body></html>`

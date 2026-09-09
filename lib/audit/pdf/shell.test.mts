@@ -265,11 +265,22 @@ test("the renderer imports nothing from the audit, the rules or the model", () =
   }
 });
 
-test("the renderer's only document import is the 7B projection", () => {
-  const source = fs.readFileSync(`${import.meta.dirname}/shell.ts`, "utf8");
-  const imports = [...source.matchAll(/from "([^"]+)"/g)].map((m) => m[1]);
+test("the renderer's only import from outside this folder is the 7B projection", () => {
+  /*
+   * Stated as the property rather than as a list of filenames. A pinned list
+   * has to be edited every time the renderer gains a component, and a list
+   * edited that often stops being read.
+   */
+  for (const name of fs.readdirSync(import.meta.dirname).filter((n) => n.endsWith(".ts"))) {
+    const source = fs.readFileSync(`${import.meta.dirname}/${name}`, "utf8");
+    const outside = [...source.matchAll(/from "([^"]+)"/g)]
+      .map((m) => m[1])
+      .filter((path) => !path.startsWith("./") && !path.startsWith("node:") && path !== "puppeteer");
 
-  assert.deepEqual(imports.sort(), ["../pdfDocument.ts", "./escape.ts"]);
+    for (const path of outside) {
+      assert.equal(path, "../pdfDocument.ts", `${name} may not import ${path}`);
+    }
+  }
 });
 
 test("nothing outside this folder imports the browser", () => {

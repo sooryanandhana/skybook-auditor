@@ -22,6 +22,7 @@ import http from "node:http";
 import puppeteer, { type Browser, type Page } from "puppeteer";
 import { PDF_RENDER_MESSAGES, PdfRenderError, configurePage, renderPdf } from "./render.ts";
 import { PAGE_MARGIN } from "./settings.ts";
+import { EMBEDDED_FACES } from "./fonts.ts";
 import { testDocument } from "./testDocument.fixture.mts";
 
 /** A loopback server that counts what reached it. */
@@ -107,6 +108,136 @@ test("a document with more sections produces more pages", async () => {
   assert.ok(
     pageCount(large) > pageCount(small),
     "the sections the document carries reach the page",
+  );
+});
+
+test("every face is embedded in the produced PDF, not left to the reader's machine", async () => {
+  /*
+   * THE TEST THAT WOULD HAVE CAUGHT IT, and did not exist while it was broken.
+   *
+   * An earlier version of the stylesheet embedded two variable fonts. Every
+   * string-level check passed, the browser reported all three faces as loaded,
+   * and `getComputedStyle` said each element resolved to the right family. The
+   * PDF contained no font program for either variable face, because Chrome 152
+   * does not embed them on its print path, so a reader without IBM Plex
+   * installed would have seen a different document.
+   *
+   * The lesson is not about fonts. It is that asking the page what it thinks
+   * it is doing answers a different question from asking the file what it
+   * actually contains, and 7A §16 is a claim about the file.
+   */
+  const { default: zlib } = await import("node:zlib");
+  const pdf = await renderPdf(testDocument());
+
+  // Font dictionaries can sit inside compressed object streams, so the whole
+  // file is inflated before being searched. Reading the raw bytes alone found
+  // three of the five faces and missed the two that mattered.
+  const chunks: string[] = [pdf.toString("latin1")];
+  let index = 0;
+  for (;;) {
+    const start = pdf.indexOf("stream", index);
+    if (start === -1) break;
+    let from = start + 6;
+    if (pdf[from] === 0x0d) from += 1;
+    if (pdf[from] === 0x0a) from += 1;
+    const end = pdf.indexOf("endstream", from);
+    if (end === -1) break;
+    try {
+      chunks.push(zlib.inflateSync(pdf.subarray(from, end)).toString("latin1"));
+    } catch {
+      // Not every stream is deflated, and the ones that are not carry no fonts.
+    }
+    index = end + 9;
+  }
+  const contents = chunks.join("");
+
+  /*
+   * THE FONTS THE FILE DECLARES, not every byte in it. An earlier version of
+   * this test searched the whole inflated file for a family name and failed on
+   * "Arial", which appears inside the embedded font programs themselves. A
+   * 700KB binary will spell almost anything eventually; what decides how the
+   * document draws is the set of `/BaseFont` entries.
+   *
+   * The six-character prefix on each is Chromium's subset tag.
+   */
+  const declared = [...new Set(contents.match(/\/BaseFont\s*\/[A-Za-z0-9+.\-]+/g) ?? [])].map(
+    (entry) => entry.replace(/\/BaseFont\s*\/(?:[A-Z]{6}\+)?/, ""),
+  );
+
+  /*
+   * The PostScript names, which are not the filenames: the regular weight
+   * drops its suffix and the semibold abbreviates.
+   */
+  for (const name of [
+    "IBMPlexSans",
+    "IBMPlexSans-SmBld",
+    "IBMPlexSerif-SemiBold",
+    "IBMPlexMono-Regular",
+  ]) {
+    assert.ok(
+      declared.includes(name),
+      `${name} is embedded in the file, not merely asked for in the stylesheet`,
+    );
+  }
+
+  assert.ok(
+    (contents.match(/\/FontFile2/g) ?? []).length >= EMBEDDED_FACES.length,
+    "one embedded font program per face, at least",
+  );
+
+  /*
+   * ONE FACE COMES FROM THE MACHINE, AND ONLY ONE. Chromium's running head and
+   * foot render in a context that will not load a face, not even from a data
+   * URI, so those two lines are set in whatever the render machine has. That
+   * is a known limitation recorded in `fonts.ts`, and the reason it is
+   * tolerated is that the alternative loses "page n of m", which 7A §20
+   * requires.
+   *
+   * The number is pinned at one so the limitation cannot quietly spread into
+   * the body of the document, which is the part a client reads.
+   */
+  const fromMachine = declared.filter((name) => !name.startsWith("IBMPlex"));
+
+  assert.ok(
+    fromMachine.length <= 1,
+    `only the running head and foot may fall back, but found ${fromMachine.join(", ")}`,
+  );
+});
+
+test("the Skybook mark is in the produced PDF, not merely in the markup", async () => {
+  /*
+   * THE SAME LESSON AS THE FONTS, APPLIED BEFORE IT COST ANYTHING. A test that
+   * reads the HTML proves the image was asked for. Only the file proves it
+   * arrived, and the fonts already demonstrated that Chromium can accept a
+   * data URI, render it on screen, and put nothing in the PDF.
+   *
+   * An image reaches a PDF as an XObject. A JPEG keeps its own compression
+   * rather than being re-encoded, so it appears with the DCTDecode filter and
+   * with the artwork's own pixel dimensions.
+   */
+  const pdf = await renderPdf(testDocument());
+  const raw = pdf.toString("latin1");
+
+  assert.ok(raw.includes("/Subtype /Image"), "the file carries an image");
+  assert.ok(raw.includes("/DCTDecode"), "and it is the JPEG, still JPEG");
+
+  const widths = [...raw.matchAll(/\/Width (\d+)/g)].map((m) => Number(m[1]));
+  const heights = [...raw.matchAll(/\/Height (\d+)/g)].map((m) => Number(m[1]));
+
+  assert.ok(widths.includes(3630), "at the artwork's own resolution, not resampled");
+  assert.ok(heights.includes(3630), "and square, so nothing was stretched");
+
+  /*
+   * The bytes themselves. The artwork's first scan-line bytes appear verbatim
+   * in the embedded stream when the JPEG is passed through untouched, so this
+   * fails if Chromium ever decides to re-encode it.
+   */
+  const asset = await import("node:fs").then((fs) =>
+    fs.readFileSync(`${import.meta.dirname}/assets/skybook-logo.jpg`),
+  );
+  assert.ok(
+    pdf.includes(asset.subarray(0, 64)),
+    "the embedded image is the supplied file, byte for byte",
   );
 });
 

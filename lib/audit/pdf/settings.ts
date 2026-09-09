@@ -19,6 +19,19 @@
 export const PAGE_FORMAT = "a4";
 
 /**
+ * TEMPORARY, and the same paper as `PAGE_FORMAT`.
+ *
+ * Stated as a length so the stylesheet can work out how tall a page's content
+ * box is and give the cover exactly that height. The alternative was `100vh`,
+ * which resolves against the page box in print but does so by a route worth
+ * less trust than arithmetic on two numbers this file already owns.
+ *
+ * IT MUST AGREE WITH `PAGE_FORMAT`, and a test asserts they describe the same
+ * paper, because two constants that must match will eventually not.
+ */
+export const PAGE_HEIGHT = "297mm";
+
+/**
  * TEMPORARY, and measured rather than guessed.
  *
  * The top and bottom margins are what reserve room for the running head and

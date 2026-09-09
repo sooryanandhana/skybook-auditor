@@ -2,7 +2,15 @@
 
 import { useEffect, useState } from "react";
 import type { FieldPerformance, LabPerformance, PerformanceData } from "@/lib/types";
-import { fieldOverallText, strategyLabel } from "@/lib/report/measurementsView";
+import {
+  METRIC_NOT_REPORTED,
+  fieldOverallText,
+  fieldShiftText,
+  labShiftText,
+  metricDurationText,
+  ratingLabel,
+  strategyLabel,
+} from "@/lib/report/measurementsView";
 import styles from "./page.module.css";
 
 /**
@@ -139,39 +147,39 @@ function FieldBlock({ field }: { field: FieldPerformance }) {
           )}
           <dl className={styles.perfMetrics}>
             {/*
-              missing="Not reported" rather than a bare dash: a reader cannot
+              missing={METRIC_NOT_REPORTED} rather than a bare dash: a reader cannot
               tell an unreported metric from a good one, and "Not reported"
               says which it is without implying the site failed anything.
             */}
             <Metric
               label="LCP"
-              value={ms(field.lcp?.percentileMs)}
+              value={metricDurationText(field.lcp?.percentileMs)}
               rating={field.lcp?.category}
-              missing="Not reported"
+              missing={METRIC_NOT_REPORTED}
             />
             <Metric
               label="INP"
-              value={ms(field.inp?.percentileMs)}
+              value={metricDurationText(field.inp?.percentileMs)}
               rating={field.inp?.category}
-              missing="Not reported"
+              missing={METRIC_NOT_REPORTED}
             />
             <Metric
               label="CLS"
-              value={field.cls ? field.cls.percentile.toFixed(2) : null}
+              value={fieldShiftText(field.cls)}
               rating={field.cls?.category}
-              missing="Not reported"
+              missing={METRIC_NOT_REPORTED}
             />
             <Metric
               label="FCP"
-              value={ms(field.fcp?.percentileMs)}
+              value={metricDurationText(field.fcp?.percentileMs)}
               rating={field.fcp?.category}
-              missing="Not reported"
+              missing={METRIC_NOT_REPORTED}
             />
             <Metric
               label="TTFB"
-              value={ms(field.ttfb?.percentileMs)}
+              value={metricDurationText(field.ttfb?.percentileMs)}
               rating={field.ttfb?.category}
-              missing="Not reported"
+              missing={METRIC_NOT_REPORTED}
             />
           </dl>
         </>
@@ -212,11 +220,11 @@ function LabBlock({ lab, strategy }: { lab: LabPerformance; strategy: Performanc
             </p>
           )}
           <dl className={styles.perfMetrics}>
-            <Metric label="LCP" value={ms(lab.lcpMs)} />
-            <Metric label="FCP" value={ms(lab.fcpMs)} />
-            <Metric label="TBT" value={ms(lab.tbtMs)} />
-            <Metric label="Speed Index" value={ms(lab.speedIndexMs)} />
-            <Metric label="CLS" value={lab.cls === null ? null : lab.cls.toFixed(3)} />
+            <Metric label="LCP" value={metricDurationText(lab.lcpMs)} />
+            <Metric label="FCP" value={metricDurationText(lab.fcpMs)} />
+            <Metric label="TBT" value={metricDurationText(lab.tbtMs)} />
+            <Metric label="Speed Index" value={metricDurationText(lab.speedIndexMs)} />
+            <Metric label="CLS" value={labShiftText(lab.cls)} />
           </dl>
         </>
       )}
@@ -250,17 +258,6 @@ function Metric({
       </dd>
     </div>
   );
-}
-
-function ratingLabel(rating: "FAST" | "AVERAGE" | "SLOW"): string {
-  if (rating === "FAST") return "Good";
-  if (rating === "AVERAGE") return "Needs work";
-  return "Poor";
-}
-
-function ms(value: number | null | undefined): string | null {
-  if (value === null || value === undefined) return null;
-  return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${Math.round(value)} ms`;
 }
 
 /**

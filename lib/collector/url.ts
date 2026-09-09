@@ -72,3 +72,33 @@ export function normalizeUrl(input: string): NormalizeResult {
 
   return { ok: true, url, schemeWasAssumed: !hasScheme };
 }
+
+/**
+ * The same address with any username and password removed.
+ *
+ * WHY IT LIVES HERE. It is a URL transformation and nothing else: no audit
+ * concept, no provider concept, no report concept. It was written inside the
+ * AI report builder because that was the first place that needed it, and the
+ * PDF projection needs exactly the same thing. One definition, in the module
+ * that already owns addresses.
+ *
+ * WHAT IT IS FOR. `normalizeUrl` above does not strip credentials, and neither
+ * does the page fetcher, so an address a person typed as
+ * `https://user:pass@example.com` keeps them all the way through to the entry
+ * page's own fields. Every address discovered by the crawl is stripped as part
+ * of its normalisation; these are the ones that never pass through it.
+ *
+ * AN UNPARSEABLE ADDRESS IS RETURNED UNCHANGED. It was measured as it stands,
+ * and quietly rewriting it would be reporting something that was not seen.
+ */
+export function withoutCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username === "" && parsed.password === "") return url;
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}

@@ -40,6 +40,19 @@ import {
   spfFacts,
   strategyLabel,
   expiryNote,
+  certificateProblemFacts,
+  certificateProblemLabel,
+  cookieSummary,
+  cspSummary,
+  hstsSummary,
+  METRIC_NOT_REPORTED,
+  fieldShiftText,
+  labShiftText,
+  securityFacts,
+  metricDurationText,
+  mixedContentSummary,
+  ratingLabel,
+  severityLabel,
 } from "./measurementsView.ts";
 import type {
   DnsData,
@@ -47,6 +60,7 @@ import type {
   FieldPerformance,
   Finding,
   MxRecord,
+  SecurityData,
   SeoData,
   SslData,
   TechnicalData,
@@ -986,4 +1000,613 @@ test("zeroes are kept here, because how it looked is a fact too", () => {
   const tiles = crawlCountTiles(crawl({ sources: { html: 0, sitemap: 0 } }));
 
   assert.equal(tiles.find((t) => t.label === "From sitemap")?.value, "0");
+});
+
+// ---------------------------------------------------------------------------
+// SECURITY AND SPEED, IN WORDS
+//
+// These lines were written for the results page and lived inside it until the
+// PDF needed them too. They were moved here unchanged, so what these tests pin
+// is that the move changed nothing: the same inputs still produce the same
+// strings, including the edge cases the wording exists to handle.
+// ---------------------------------------------------------------------------
+
+const hstsBlock = (over: Partial<SecurityData["hsts"]> = {}): SecurityData["hsts"] => ({
+  applicable: true,
+  valid: true,
+  maxAgeSeconds: 15_552_000,
+  disabledByZeroMaxAge: false,
+  includesSubdomains: false,
+  preload: false,
+  ...over,
+});
+
+test("HSTS on a page without HTTPS is not applicable rather than missing", () => {
+  assert.equal(
+    hstsSummary(hstsBlock({ applicable: false }), false),
+    "Not applicable — the page is not served over HTTPS",
+  );
+});
+
+test("HSTS distinguishes no header from a header that switched itself off", () => {
+  assert.equal(hstsSummary(hstsBlock(), false), "No HSTS header sent");
+  assert.equal(
+    hstsSummary(hstsBlock({ disabledByZeroMaxAge: true }), true),
+    "Header present but switched off (max-age=0)",
+  );
+});
+
+test("an unreadable max-age says so rather than reporting zero days", () => {
+  assert.equal(
+    hstsSummary(hstsBlock({ maxAgeSeconds: null }), true),
+    "Header present, but its max-age could not be read",
+  );
+});
+
+test("HSTS reports whole days, singular at one", () => {
+  assert.equal(hstsSummary(hstsBlock({ maxAgeSeconds: 15_552_000 }), true), "180 days");
+  assert.equal(hstsSummary(hstsBlock({ maxAgeSeconds: 86_400 }), true), "1 day");
+  // Rounded, not truncated: half a day short of two is still two.
+  assert.equal(hstsSummary(hstsBlock({ maxAgeSeconds: 129_600 }), true), "2 days");
+});
+
+test("HSTS appends the extras it was given, in order", () => {
+  assert.equal(
+    hstsSummary(hstsBlock({ maxAgeSeconds: 86_400, includesSubdomains: true }), true),
+    "1 day · includes subdomains",
+  );
+  assert.equal(
+    hstsSummary(
+      hstsBlock({ maxAgeSeconds: 86_400, includesSubdomains: true, preload: true }),
+      true,
+    ),
+    "1 day · includes subdomains · preload",
+  );
+  assert.equal(
+    hstsSummary(hstsBlock({ maxAgeSeconds: 86_400, preload: true }), true),
+    "1 day · preload",
+  );
+});
+
+const securityWith = (over: Record<string, unknown> = {}): SecurityData =>
+  ({
+    contentSecurityPolicy: { present: false },
+    contentSecurityPolicyReportOnly: { present: false },
+    ...over,
+  }) as unknown as SecurityData;
+
+test("a report-only policy is never called present", () => {
+  /*
+   * THE DISTINCTION THIS FUNCTION EXISTS FOR. Report-only is monitored and not
+   * enforced, so "Present" would claim protection the site does not have.
+   */
+  assert.equal(
+    cspSummary(securityWith({ contentSecurityPolicyReportOnly: { present: true } })),
+    "Report-only — monitored but not enforced",
+  );
+  assert.equal(
+    cspSummary(securityWith({ contentSecurityPolicy: { present: true } })),
+    "Present",
+  );
+  assert.equal(cspSummary(securityWith()), "Missing");
+});
+
+test("an enforced policy wins over a report-only one", () => {
+  assert.equal(
+    cspSummary(
+      securityWith({
+        contentSecurityPolicy: { present: true },
+        contentSecurityPolicyReportOnly: { present: true },
+      }),
+    ),
+    "Present",
+  );
+});
+
+const oneCookie = (over: Record<string, unknown> = {}) => ({
+  name: "session",
+  secure: true,
+  httpOnly: true,
+  sameSite: "Lax",
+  ...over,
+});
+
+const cookiesOf = (list: unknown[]): SecurityData["cookies"] =>
+  ({ total: list.length, cookies: list, notInspected: [] }) as unknown as SecurityData["cookies"];
+
+test("a page that set no cookies says so, rather than reporting missing flags", () => {
+  assert.equal(cookieSummary(cookiesOf([])), "None set by this page");
+});
+
+test("cookies with every flag set are reported as such, and pluralised", () => {
+  assert.equal(cookieSummary(cookiesOf([oneCookie()])), "1 cookie, all flags set");
+  assert.equal(cookieSummary(cookiesOf([oneCookie(), oneCookie()])), "2 cookies, all flags set");
+});
+
+test("each missing flag is counted separately", () => {
+  assert.equal(
+    cookieSummary(cookiesOf([oneCookie({ secure: false })])),
+    "1 cookie — 1 without Secure",
+  );
+  assert.equal(
+    cookieSummary(cookiesOf([oneCookie({ secure: false, httpOnly: false, sameSite: null })])),
+    "1 cookie — 1 without Secure, 1 without HttpOnly, 1 without SameSite",
+  );
+  assert.equal(
+    cookieSummary(cookiesOf([oneCookie({ httpOnly: false }), oneCookie({ httpOnly: false })])),
+    "2 cookies — 2 without HttpOnly",
+  );
+});
+
+test("the cookie summary reads flags and never a value", () => {
+  // A cookie value is often a live session token, so none is ever captured.
+  const withValue = oneCookie({ value: "super-secret-session-token" });
+  assert.ok(!cookieSummary(cookiesOf([withValue])).includes("super-secret"));
+});
+
+const mixedWith = (over: Record<string, unknown> = {}): SecurityData["mixedContent"] =>
+  ({
+    applicable: true,
+    total: 0,
+    activeCount: 0,
+    truncated: false,
+    notInspected: [],
+    ...over,
+  }) as unknown as SecurityData["mixedContent"];
+
+test("mixed content on a page without HTTPS is not applicable", () => {
+  assert.equal(
+    mixedContentSummary(mixedWith({ applicable: false })),
+    "Not applicable — the page is not served over HTTPS",
+  );
+});
+
+test("no insecure resources says what was actually read", () => {
+  /*
+   * "in the page HTML" is the point. Scripts are not run and stylesheets are
+   * not downloaded, so a bare "None found" would claim more than was checked.
+   */
+  assert.equal(mixedContentSummary(mixedWith()), "None found in the page HTML");
+});
+
+test("insecure resources are counted, with the likely-blocked ones said separately", () => {
+  assert.equal(
+    mixedContentSummary(mixedWith({ total: 3 })),
+    "3 found in the page HTML, loaded over plain HTTP",
+  );
+  assert.equal(
+    mixedContentSummary(mixedWith({ total: 3, activeCount: 2 })),
+    "3 found in the page HTML, loaded over plain HTTP, 2 likely blocked by browsers",
+  );
+});
+
+test("every certificate problem has its own sentence", () => {
+  assert.equal(certificateProblemLabel("expired"), "The certificate has expired");
+  assert.equal(
+    certificateProblemLabel("self-signed"),
+    "The certificate is self-signed, so browsers will not trust it",
+  );
+  assert.equal(
+    certificateProblemLabel("wrong-hostname"),
+    "The certificate was issued for a different address",
+  );
+  assert.equal(certificateProblemLabel("untrusted"), "The certificate could not be verified");
+});
+
+test("every severity has a word, including the one the split leaves out", () => {
+  assert.equal(severityLabel("critical"), "Critical");
+  assert.equal(severityLabel("high"), "High");
+  assert.equal(severityLabel("medium"), "Medium");
+  assert.equal(severityLabel("good"), "Good");
+});
+
+test("the severity split still counts problems only, and agrees on wording", () => {
+  // Widening the label map must not widen what the split reports.
+  const counted = severityCounts([
+    { severity: "critical" } as Finding,
+    { severity: "good" } as Finding,
+  ]);
+
+  assert.deepEqual(
+    counted.map((entry) => entry.severity),
+    ["critical"],
+  );
+  assert.equal(counted[0].label, severityLabel("critical"));
+});
+
+test("a metric rating is worded as advice, not as the overall verdict", () => {
+  /*
+   * DELIBERATELY DIFFERENT WORDS FROM `fieldOverallText`. The overall verdict
+   * quotes Google -- Fast, Average, Slow. A single metric tells the reader what
+   * to do about it. Merging the two maps would silently reword half the speed
+   * section, so this pins both at once.
+   */
+  assert.equal(ratingLabel("FAST"), "Good");
+  assert.equal(ratingLabel("AVERAGE"), "Needs work");
+  assert.equal(ratingLabel("SLOW"), "Poor");
+
+  const overall = (rating: "FAST" | "AVERAGE" | "SLOW") =>
+    fieldOverallText({ status: "found", overall: rating } as unknown as FieldPerformance);
+
+  assert.equal(overall("FAST"), "Fast");
+  assert.equal(overall("AVERAGE"), "Average");
+  assert.equal(overall("SLOW"), "Slow");
+  assert.notEqual(ratingLabel("FAST"), overall("FAST"));
+});
+
+test("an absent measurement has no duration, not a duration of zero", () => {
+  assert.equal(metricDurationText(null), null);
+  assert.equal(metricDurationText(undefined), null);
+});
+
+test("durations switch to seconds at one thousand milliseconds", () => {
+  assert.equal(metricDurationText(999), "999 ms");
+  assert.equal(metricDurationText(1000), "1.00 s");
+  assert.equal(metricDurationText(1240), "1.24 s");
+  assert.equal(metricDurationText(2500), "2.50 s");
+});
+
+test("milliseconds are whole numbers, and zero is a real measurement", () => {
+  assert.equal(metricDurationText(0), "0 ms");
+  assert.equal(metricDurationText(640.4), "640 ms");
+  assert.equal(metricDurationText(640.6), "641 ms");
+});
+
+test("a speed figure is not rounded the way a crawl limit is", () => {
+  // The crawl's own limits round to whole seconds. A page measurement of 1.24
+  // seconds is not 1 second, and 640 ms is not 1 second either.
+  assert.equal(metricDurationText(1240), "1.24 s");
+  assert.equal(metricDurationText(640), "640 ms");
+});
+
+// ---------------------------------------------------------------------------
+// LAYOUT SHIFT, IN TWO PLACES AND TWO PRECISIONS
+//
+// The last two formatting rules to leave the results panel. They describe the
+// same quantity and deliberately do not print it the same way, so what these
+// pin is that the move preserved both, and that nobody later folds them into
+// one function.
+// ---------------------------------------------------------------------------
+
+test("a real-visitor shift score shows two decimals", () => {
+  assert.equal(fieldShiftText({ percentile: 0.12, category: "AVERAGE" }), "0.12");
+  assert.equal(fieldShiftText({ percentile: 0.1, category: "FAST" }), "0.10");
+  assert.equal(fieldShiftText({ percentile: 0, category: "FAST" }), "0.00");
+  assert.equal(fieldShiftText({ percentile: 1, category: "SLOW" }), "1.00");
+});
+
+test("a real-visitor shift score rounds at the second decimal", () => {
+  // The thresholds a reader is judged against sit at 0.1 and 0.25, so the
+  // second place is what tells them which side of one they are on.
+  assert.equal(fieldShiftText({ percentile: 0.254, category: "AVERAGE" }), "0.25");
+  assert.equal(fieldShiftText({ percentile: 0.255, category: "SLOW" }), "0.26");
+  assert.equal(fieldShiftText({ percentile: 0.099, category: "FAST" }), "0.10");
+});
+
+test("an unreported shift score has no value, not a value of zero", () => {
+  assert.equal(fieldShiftText(null), null);
+  assert.equal(fieldShiftText(undefined), null);
+});
+
+test("a simulated shift score shows three decimals", () => {
+  assert.equal(labShiftText(0.045), "0.045");
+  assert.equal(labShiftText(0), "0.000");
+  assert.equal(labShiftText(0.1), "0.100");
+});
+
+test("a simulated shift score rounds at the third decimal", () => {
+  /*
+   * ROUNDED ON THE BINARY VALUE, not the decimal one, because that is what
+   * `toFixed` does: 0.0455 is stored slightly below its decimal form and comes
+   * out 0.045. Pinned as it behaves rather than as it reads, because this is
+   * the behaviour the results page has always had and the move preserved it.
+   */
+  assert.equal(labShiftText(0.0454), "0.045");
+  assert.equal(labShiftText(0.0455), "0.045");
+  assert.equal(labShiftText(0.0456), "0.046");
+});
+
+test("an unreported simulated score has no value either", () => {
+  assert.equal(labShiftText(null), null);
+  assert.equal(labShiftText(undefined), null);
+});
+
+test("the two shift formatters are not the same function", () => {
+  /*
+   * THE POINT OF KEEPING THEM APART. A lab run lands in the thousandths, and
+   * two clearly different runs would round to the same number at two places.
+   * If someone merges these, this fails.
+   */
+  assert.equal(labShiftText(0.045), "0.045");
+  assert.equal(fieldShiftText({ percentile: 0.045, category: "FAST" }), "0.04");
+  assert.notEqual(labShiftText(0.045), fieldShiftText({ percentile: 0.045, category: "FAST" }));
+});
+
+test("neither shift formatter borrows the duration formatter's units", () => {
+  // A score is not a duration, and must never come out carrying "ms" or "s".
+  assert.ok(!(fieldShiftText({ percentile: 0.12, category: "AVERAGE" }) ?? "").includes("s"));
+  assert.ok(!(labShiftText(0.045) ?? "").includes("m"));
+});
+
+// ---------------------------------------------------------------------------
+// THE SECURITY SECTION, AS ROWS
+//
+// Eleven rows that the results page used to build inline and the PDF needed
+// too. What these pin is the wording, and one distinction that is easy to get
+// wrong: three of the four simple headers show what the server actually sent,
+// not merely that it sent something.
+// ---------------------------------------------------------------------------
+
+const header = (value: string | null) => ({ present: value !== null, value });
+
+const fullSecurity = (over: Record<string, unknown> = {}): SecurityData =>
+  ({
+    servedOverHttps: true,
+    strictTransportSecurity: header(null),
+    contentSecurityPolicy: header(null),
+    contentSecurityPolicyReportOnly: header(null),
+    xFrameOptions: header(null),
+    xContentTypeOptions: header(null),
+    referrerPolicy: header(null),
+    permissionsPolicy: header(null),
+    hsts: {
+      applicable: true, valid: false, maxAgeSeconds: null,
+      disabledByZeroMaxAge: false, includesSubdomains: false, preload: false,
+    },
+    mixedContent: { applicable: true, total: 0, activeCount: 0, truncated: false, notInspected: ["Pages other than this one"], items: [] },
+    cookies: { total: 0, cookies: [], notInspected: [] },
+    insecureFormActions: [],
+    serverHeader: header(null),
+    poweredByHeader: header(null),
+    ...over,
+  }) as unknown as SecurityData;
+
+const rowValue = (security: SecurityData, label: string) =>
+  securityFacts(security).find((row) => row.label === label)?.value;
+
+const rowNote = (security: SecurityData, label: string) =>
+  securityFacts(security).find((row) => row.label === label)?.note;
+
+test("the security section carries its eleven rows, in order", () => {
+  assert.deepEqual(
+    securityFacts(fullSecurity()).map((row) => row.label),
+    [
+      "HTTPS protection (HSTS)",
+      "Content-Security-Policy",
+      "X-Frame-Options",
+      "X-Content-Type-Options",
+      "Referrer-Policy",
+      "Permissions-Policy",
+      "Cookies set by this page",
+      "Insecure resources",
+      "Not checked by this scan",
+      "Insecure form submission",
+      "Server software announced",
+    ],
+  );
+});
+
+test("a header that was never sent reads Missing", () => {
+  const none = fullSecurity();
+
+  assert.equal(rowValue(none, "X-Frame-Options"), "Missing");
+  assert.equal(rowValue(none, "X-Content-Type-Options"), "Missing");
+  assert.equal(rowValue(none, "Referrer-Policy"), "Missing");
+  assert.equal(rowValue(none, "Permissions-Policy"), "Missing");
+});
+
+test("three of the simple headers show what the server actually sent", () => {
+  /*
+   * NOT "Present". `X-Frame-Options: SAMEORIGIN` and `X-Frame-Options: DENY`
+   * are different protections, and a reader checking our reading needs the
+   * value rather than a word that covers both.
+   */
+  const sent = fullSecurity({
+    xFrameOptions: header("SAMEORIGIN"),
+    xContentTypeOptions: header("nosniff"),
+    referrerPolicy: header("strict-origin-when-cross-origin"),
+  });
+
+  assert.equal(rowValue(sent, "X-Frame-Options"), "SAMEORIGIN");
+  assert.equal(rowValue(sent, "X-Content-Type-Options"), "nosniff");
+  assert.equal(rowValue(sent, "Referrer-Policy"), "strict-origin-when-cross-origin");
+});
+
+test("Permissions-Policy is the exception and says Present, with its value beside it", () => {
+  // Its value is routinely long enough to fill the row, so it goes in the note.
+  const sent = fullSecurity({ permissionsPolicy: header("geolocation=(), camera=()") });
+
+  assert.equal(rowValue(sent, "Permissions-Policy"), "Present");
+  assert.equal(rowNote(sent, "Permissions-Policy"), "geolocation=(), camera=()");
+});
+
+test("the HSTS and policy rows carry the raw header as their note", () => {
+  const sent = fullSecurity({
+    strictTransportSecurity: header("max-age=15552000; includeSubDomains"),
+    contentSecurityPolicy: header("default-src 'self'"),
+  });
+
+  assert.equal(rowNote(sent, "HTTPS protection (HSTS)"), "max-age=15552000; includeSubDomains");
+  assert.equal(rowNote(sent, "Content-Security-Policy"), "default-src 'self'");
+});
+
+test("a report-only policy falls back to its own header for the note", () => {
+  const reportOnly = fullSecurity({
+    contentSecurityPolicyReportOnly: header("default-src 'self'; report-uri /csp"),
+  });
+
+  assert.equal(rowValue(reportOnly, "Content-Security-Policy"), "Report-only — monitored but not enforced");
+  assert.equal(rowNote(reportOnly, "Content-Security-Policy"), "default-src 'self'; report-uri /csp");
+});
+
+test("the cookie note lists names and flags, and never a value", () => {
+  const withCookies = fullSecurity({
+    cookies: {
+      total: 1,
+      cookies: [{ name: "session", secure: false, httpOnly: true, sameSite: null, value: "SECRET" }],
+      notInspected: [],
+    },
+  });
+
+  const note = rowNote(withCookies, "Cookies set by this page") ?? "";
+  assert.match(note, /session: no Secure, HttpOnly, SameSite=not set/);
+  assert.ok(!note.includes("SECRET"));
+});
+
+test("the insecure-resource note is capped, and absent when there is nothing to list", () => {
+  const clean = fullSecurity();
+  assert.equal(rowNote(clean, "Insecure resources"), undefined);
+
+  const many = fullSecurity({
+    mixedContent: {
+      applicable: true, total: 9, activeCount: 2, truncated: false, notInspected: [],
+      items: Array.from({ length: 9 }, (_v, i) => ({
+        element: "img", via: "src", url: `http://example.com/${i}.png`,
+      })),
+    },
+  });
+  const note = rowNote(many, "Insecure resources") ?? "";
+  assert.equal(note.split("  ·  ").length, 5, "five listed, not nine");
+});
+
+test("the not-checked row appears only where mixed content could be checked", () => {
+  const overHttp = fullSecurity({
+    mixedContent: { applicable: false, total: 0, activeCount: 0, truncated: false, notInspected: [], items: [] },
+  });
+
+  assert.ok(!securityFacts(overHttp).some((row) => row.label === "Not checked by this scan"));
+  assert.ok(securityFacts(fullSecurity()).some((row) => row.label === "Not checked by this scan"));
+});
+
+test("insecure forms are counted and pluralised, or said to be absent", () => {
+  assert.equal(rowValue(fullSecurity(), "Insecure form submission"), "None found");
+  assert.equal(
+    rowValue(fullSecurity({ insecureFormActions: ["http://example.com/a"] }), "Insecure form submission"),
+    "1 form sends data over plain HTTP",
+  );
+  assert.equal(
+    rowValue(
+      fullSecurity({ insecureFormActions: ["http://example.com/a", "http://example.com/b"] }),
+      "Insecure form submission",
+    ),
+    "2 forms sends data over plain HTTP",
+  );
+});
+
+test("a server that announced nothing says so rather than showing an empty row", () => {
+  assert.equal(rowValue(fullSecurity(), "Server software announced"), "— not announced —");
+  assert.equal(
+    rowValue(fullSecurity({ serverHeader: header("cloudflare") }), "Server software announced"),
+    "cloudflare",
+  );
+  assert.equal(
+    rowValue(
+      fullSecurity({ serverHeader: header("nginx"), poweredByHeader: header("PHP/8.2") }),
+      "Server software announced",
+    ),
+    "nginx · PHP/8.2",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// A METRIC NOBODY REPORTED
+// ---------------------------------------------------------------------------
+
+test("an unreported metric says so rather than showing a dash", () => {
+  /*
+   * A dash lets a reader assume either an unreported metric or a good one.
+   * The wording says which, without implying the site failed anything.
+   */
+  assert.equal(METRIC_NOT_REPORTED, "Not reported");
+  assert.ok(!METRIC_NOT_REPORTED.includes("0"));
+  assert.ok(!/slow|fail|poor|error/i.test(METRIC_NOT_REPORTED));
+});
+
+// ---------------------------------------------------------------------------
+// THE CERTIFICATE PROBLEM SEEN WHILE CONNECTING
+// ---------------------------------------------------------------------------
+
+test("no certificate problem produces no row at all", () => {
+  assert.deepEqual(certificateProblemFacts(null), []);
+});
+
+test("a certificate problem is one labelled row, with its own caveat", () => {
+  const [row] = certificateProblemFacts("expired");
+
+  assert.equal(row.label, "Certificate problem");
+  assert.equal(row.value, "The certificate has expired");
+  assert.equal(
+    row.note,
+    "Seen while connecting. The certificate itself is read separately, below.",
+  );
+});
+
+test("every certificate problem produces the label and its own sentence", () => {
+  for (const problem of ["expired", "self-signed", "wrong-hostname", "untrusted"] as const) {
+    const [row] = certificateProblemFacts(problem);
+    assert.equal(row.label, "Certificate problem");
+    assert.equal(row.value, certificateProblemLabel(problem));
+  }
+});
+
+test("the note exists because two certificate verdicts appear in one report", () => {
+  // Without it a reader meets a verdict here and another further down, and
+  // cannot tell why they differ.
+  const [row] = certificateProblemFacts("untrusted");
+  assert.match(row.note ?? "", /read separately/);
+});
+
+// ---------------------------------------------------------------------------
+// WHICH SECURITY NOTES ARE A SERVER'S OWN WORDS
+// ---------------------------------------------------------------------------
+
+test("the rows quoting a response header verbatim say so", () => {
+  const sent = fullSecurity({
+    strictTransportSecurity: header("max-age=15552000"),
+    contentSecurityPolicy: header("default-src 'self'"),
+    permissionsPolicy: header("geolocation=()"),
+  });
+
+  const marked = securityFacts(sent)
+    .filter((row) => row.rawHeaderNote === true)
+    .map((row) => row.label);
+
+  assert.deepEqual(marked, [
+    "HTTPS protection (HSTS)",
+    "Content-Security-Policy",
+    "Permissions-Policy",
+  ]);
+});
+
+test("the notes that are not header text are left unmarked", () => {
+  // Cookie names and flags, and addresses the crawl measured. None of these is
+  // a header, and an export may carry them.
+  const withDetail = fullSecurity({
+    cookies: {
+      total: 1,
+      cookies: [{ name: "session", secure: true, httpOnly: true, sameSite: "Lax" }],
+      notInspected: [],
+    },
+    mixedContent: {
+      applicable: true, total: 1, activeCount: 0, truncated: false, notInspected: [],
+      items: [{ element: "img", via: "src", url: "http://example.com/a.png" }],
+    },
+    insecureFormActions: ["http://example.com/submit"],
+  });
+
+  for (const label of ["Cookies set by this page", "Insecure resources", "Insecure form submission"]) {
+    const row = securityFacts(withDetail).find((r) => r.label === label);
+    assert.ok(row?.note, `${label} should carry a note`);
+    assert.equal(row?.rawHeaderNote, undefined, `${label} is not header text`);
+  }
+});
+
+test("the browser still receives every note, marked or not", () => {
+  // Marking changes nothing about what the shared builder returns. The results
+  // page shows the header so a reader can check our reading of it.
+  const sent = fullSecurity({ strictTransportSecurity: header("max-age=15552000") });
+  const row = securityFacts(sent).find((r) => r.label === "HTTPS protection (HSTS)");
+
+  assert.equal(row?.note, "max-age=15552000");
+  assert.equal(row?.rawHeaderNote, true);
 });

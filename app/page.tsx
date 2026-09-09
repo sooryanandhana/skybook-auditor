@@ -19,6 +19,7 @@ import {
   SITE_FINDINGS_HEADING,
   SITE_FINDINGS_INTRO,
   affectedView,
+  auditStatusText,
   crawlView,
   hasAffectedList,
   partitionByScope,
@@ -29,6 +30,7 @@ import {
 } from "@/lib/report/siteFindingsView";
 import {
   certificateFacts,
+  certificateProblemFacts,
   contentFacts,
   crawlLimitFacts,
   dmarcFacts,
@@ -38,7 +40,9 @@ import {
   crawlStateFacts,
   groupSkippedByReason,
   headingCountText,
+  securityFacts,
   severityCounts,
+  severityLabel,
   skippedCheckCount,
   spfFacts,
 } from "@/lib/report/measurementsView";
@@ -50,14 +54,12 @@ import type {
   AuditResultResponse,
   AuditStartResponse,
   AuditStatusResponse,
-  CertificateProblem,
   JobProgressView,
   SiteAuditResult,
   Finding,
   SkippedCheck,
   PerformanceData,
   PerformanceResponse,
-  Severity,
   UptimeCheck,
 } from "@/lib/types";
 import styles from "./page.module.css";
@@ -642,9 +644,7 @@ function Results({
           the banner above gives the detail, and this must not contradict it.
         */}
         <p className={styles.completeBadge}>
-          {siteResult !== null && !siteResult.crawl.complete
-            ? "Partial website audit"
-            : "Website audit complete"}
+          {auditStatusText(siteResult?.crawl.complete ?? true)}
         </p>
         <h2 className={styles.resultsUrl}>{data.fetch.finalUrl}</h2>
         <p className={styles.checkedAt}>
@@ -1241,19 +1241,9 @@ function MeasuredFacts({ data }: { data: AuditData }) {
               : undefined
           }
         />
-        {fetch.certificateProblem && (
-          <Fact
-            label="Certificate problem"
-            value={certificateProblemLabel(fetch.certificateProblem)}
-            /*
-             * The note used to end "a full certificate check is not implemented
-             * yet", which stopped being true when the certificate collector
-             * shipped. Its findings are below, and its measurements are in
-             * their own section further down.
-             */
-            note="Seen while connecting. The certificate itself is read separately, below."
-          />
-        )}
+        {certificateProblemFacts(fetch.certificateProblem).map((fact) => (
+          <Fact key={fact.label} label={fact.label} value={fact.value} note={fact.note} />
+        ))}
         {fetch.wasRedirected && (
           <Fact
             label="Redirects"
@@ -1381,165 +1371,21 @@ function MeasuredFacts({ data }: { data: AuditData }) {
 
       <h3 className={styles.findingsHeading}>Security</h3>
       <dl className={styles.factList}>
-        <Fact
-          label="HTTPS protection (HSTS)"
-          value={hstsSummary(data.security.hsts, data.security.strictTransportSecurity.present)}
-          note={data.security.strictTransportSecurity.value ?? undefined}
-        />
-        <Fact
-          label="Content-Security-Policy"
-          value={cspSummary(data.security)}
-          note={
-            data.security.contentSecurityPolicy.value ??
-            data.security.contentSecurityPolicyReportOnly.value ??
-            undefined
-          }
-        />
-        <Fact
-          label="X-Frame-Options"
-          value={data.security.xFrameOptions.value ?? "Missing"}
-        />
-        <Fact
-          label="X-Content-Type-Options"
-          value={data.security.xContentTypeOptions.value ?? "Missing"}
-        />
-        <Fact
-          label="Referrer-Policy"
-          value={data.security.referrerPolicy.value ?? "Missing"}
-        />
-        <Fact
-          label="Permissions-Policy"
-          value={data.security.permissionsPolicy.present ? "Present" : "Missing"}
-          note={data.security.permissionsPolicy.value ?? undefined}
-        />
-        <Fact
-          label="Cookies set by this page"
-          value={cookieSummary(data.security.cookies)}
-          note={
-            data.security.cookies.cookies.length > 0
-              ? data.security.cookies.cookies
-                  .slice(0, 6)
-                  .map(
-                    (c) =>
-                      `${c.name}: ${c.secure ? "Secure" : "no Secure"}, ${
-                        c.httpOnly ? "HttpOnly" : "no HttpOnly"
-                      }, SameSite=${c.sameSite ?? "not set"}`,
-                  )
-                  .join("  ·  ")
-              : undefined
-          }
-        />
-        <Fact
-          label="Insecure resources"
-          value={mixedContentSummary(data.security.mixedContent)}
-          note={
-            data.security.mixedContent.items.length > 0
-              ? data.security.mixedContent.items
-                  .slice(0, 5)
-                  .map((item) => `${item.element} (${item.via}): ${item.url}`)
-                  .join("  ·  ")
-              : undefined
-          }
-        />
-        {/* Shown next to the count so it is never read as a whole-site
-            all-clear. This scan reads the served markup and nothing more. */}
-        {data.security.mixedContent.applicable && (
-          <Fact
-            label="Not checked by this scan"
-            value={data.security.mixedContent.notInspected.join("  ·  ")}
-          />
-        )}
-        <Fact
-          label="Insecure form submission"
-          value={
-            data.security.insecureFormActions.length === 0
-              ? "None found"
-              : `${data.security.insecureFormActions.length} form${data.security.insecureFormActions.length === 1 ? "" : "s"} sends data over plain HTTP`
-          }
-          note={
-            data.security.insecureFormActions.length > 0
-              ? data.security.insecureFormActions.slice(0, 3).join("  ·  ")
-              : undefined
-          }
-        />
-        <Fact
-          label="Server software announced"
-          value={
-            [data.security.serverHeader.value, data.security.poweredByHeader.value]
-              .filter(Boolean)
-              .join(" · ") || "— not announced —"
-          }
-        />
+        {/*
+          ELEVEN ROWS, BUILT ONCE. They used to be written out here and the PDF
+          needed the same eleven; two copies of a sentence about a client's
+          site drift, and the browser and an export would then disagree about
+          the same measurement.
+        */}
+        {securityFacts(data.security).map((fact) => (
+          <Fact key={fact.label} label={fact.label} value={fact.value} note={fact.note} />
+        ))}
       </dl>
     </section>
   );
 }
 
 /** Turns the HSTS measurements into one readable line. */
-function hstsSummary(hsts: AuditData["security"]["hsts"], headerPresent: boolean): string {
-  if (!hsts.applicable) return "Not applicable — the page is not served over HTTPS";
-  if (!headerPresent) return "No HSTS header sent";
-  if (hsts.disabledByZeroMaxAge) return "Header present but switched off (max-age=0)";
-  if (hsts.maxAgeSeconds === null) return "Header present, but its max-age could not be read";
-
-  const days = Math.round(hsts.maxAgeSeconds / 86400);
-  const extras = [
-    hsts.includesSubdomains ? "includes subdomains" : null,
-    hsts.preload ? "preload" : null,
-  ].filter(Boolean);
-
-  return `${days} day${days === 1 ? "" : "s"}${extras.length ? ` · ${extras.join(" · ")}` : ""}`;
-}
-
-/**
- * Describes the Content-Security-Policy situation in one line.
- *
- * A report-only policy is monitored but not enforced, so saying "Present"
- * for one would imply protection the site does not actually have.
- */
-function cspSummary(security: AuditData["security"]): string {
-  if (security.contentSecurityPolicy.present) return "Present";
-  if (security.contentSecurityPolicyReportOnly.present) {
-    return "Report-only — monitored but not enforced";
-  }
-  return "Missing";
-}
-
-/** Summarises the cookies, saying how many lack each protective flag. */
-function cookieSummary(cookies: AuditData["security"]["cookies"]): string {
-  if (cookies.total === 0) return "None set by this page";
-
-  const missingSecure = cookies.cookies.filter((c) => !c.secure).length;
-  const missingHttpOnly = cookies.cookies.filter((c) => !c.httpOnly).length;
-  const missingSameSite = cookies.cookies.filter((c) => c.sameSite === null).length;
-
-  const gaps = [
-    missingSecure > 0 ? `${missingSecure} without Secure` : null,
-    missingHttpOnly > 0 ? `${missingHttpOnly} without HttpOnly` : null,
-    missingSameSite > 0 ? `${missingSameSite} without SameSite` : null,
-  ].filter(Boolean);
-
-  const plural = cookies.total === 1 ? "" : "s";
-  return gaps.length === 0
-    ? `${cookies.total} cookie${plural}, all flags set`
-    : `${cookies.total} cookie${plural} — ${gaps.join(", ")}`;
-}
-
-/**
- * Turns the mixed-content measurements into one readable line.
- *
- * The wording says "in the page HTML" deliberately. We read the markup the
- * server sent; we do not run the page or download its stylesheets. A bare
- * "None found" would claim more than we checked.
- */
-function mixedContentSummary(mixed: AuditData["security"]["mixedContent"]): string {
-  if (!mixed.applicable) return "Not applicable — the page is not served over HTTPS";
-  if (mixed.total === 0) return "None found in the page HTML";
-
-  const blocking = mixed.activeCount > 0 ? `, ${mixed.activeCount} likely blocked by browsers` : "";
-  return `${mixed.total} found in the page HTML, loaded over plain HTTP${blocking}`;
-}
-
 function Fact({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
     <div className={styles.fact}>
@@ -1552,28 +1398,3 @@ function Fact({ label, value, note }: { label: string; value: string; note?: str
   );
 }
 
-function certificateProblemLabel(problem: CertificateProblem): string {
-  switch (problem) {
-    case "expired":
-      return "The certificate has expired";
-    case "self-signed":
-      return "The certificate is self-signed, so browsers will not trust it";
-    case "wrong-hostname":
-      return "The certificate was issued for a different address";
-    case "untrusted":
-      return "The certificate could not be verified";
-  }
-}
-
-function severityLabel(severity: Severity): string {
-  switch (severity) {
-    case "critical":
-      return "Critical";
-    case "high":
-      return "High";
-    case "medium":
-      return "Medium";
-    case "good":
-      return "Good";
-  }
-}

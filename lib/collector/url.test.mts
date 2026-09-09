@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeUrl } from "./url.ts";
+import { normalizeUrl, withoutCredentials } from "./url.ts";
 
 /** Small helper: assert success and return the parsed URL. */
 function expectOk(input: string) {
@@ -114,4 +114,62 @@ test("rejects a hostname with no dot", () => {
 
 test("rejects text that cannot be parsed as a URL at all", () => {
   assert.match(expectRejected("https://"), /doesn't look like a website address/i);
+});
+
+// ---------------------------------------------------------------------------
+// STRIPPING CREDENTIALS FROM AN ADDRESS
+//
+// Moved here from the AI report builder, which was the first thing that needed
+// it and is not where a URL transformation belongs. Two projections now use
+// the one implementation: what a model is shown, and what a PDF prints.
+// ---------------------------------------------------------------------------
+
+test("an address carrying a username and password loses both", () => {
+  assert.equal(
+    withoutCredentials("https://user:secret@example.com/page"),
+    "https://example.com/page",
+  );
+});
+
+test("a username with no password is stripped too", () => {
+  assert.equal(withoutCredentials("https://user@example.com/"), "https://example.com/");
+});
+
+test("an ordinary address is returned exactly as it was", () => {
+  /*
+   * BYTE-FOR-BYTE, not merely equivalent. Parsing and re-serialising can add a
+   * trailing slash or reorder a query, and the address in a report should be
+   * the one that was measured.
+   */
+  for (const url of [
+    "https://example.com",
+    "https://example.com/",
+    "https://example.com/a/b?q=1&p=2#top",
+    "http://example.com:8080/path",
+  ]) {
+    assert.equal(withoutCredentials(url), url);
+  }
+});
+
+test("an address that cannot be parsed is left alone rather than rewritten", () => {
+  // It was measured as it stands. Quietly changing it would report something
+  // that was never seen.
+  for (const notAnAddress of ["", "not a url", "://broken", "example.com"]) {
+    assert.equal(withoutCredentials(notAnAddress), notAnAddress);
+  }
+});
+
+test("the rest of the address survives the stripping", () => {
+  assert.equal(
+    withoutCredentials("https://user:secret@example.com:8443/deep/path?a=1#frag"),
+    "https://example.com:8443/deep/path?a=1#frag",
+  );
+});
+
+test("nothing resembling the credentials remains", () => {
+  const stripped = withoutCredentials("https://admin:hunter2@example.com/dashboard");
+
+  assert.ok(!stripped.includes("admin"));
+  assert.ok(!stripped.includes("hunter2"));
+  assert.ok(!stripped.includes("@"));
 });

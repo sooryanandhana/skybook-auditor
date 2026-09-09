@@ -37,13 +37,16 @@ import type { RobotsStatus } from "../collector/robots.ts";
 import type { SitemapStopReason } from "../collector/sitemap.ts";
 import type {
   Category,
+  CertificateProblem,
   DnsData,
   DnsRecordSet,
   FieldPerformance,
   Finding,
   HostnameMatch,
   MxRecord,
+  FieldShiftMetric,
   PerformanceRating,
+  SecurityData,
   SeoData,
   Severity,
   SkippedCheck,
@@ -57,6 +60,23 @@ export interface FactRow {
   value: string;
   /** A second line under the value: units, context, or a caveat. */
   note?: string;
+}
+
+/**
+ * A security row, which may carry a note the server itself wrote.
+ *
+ * `rawHeaderNote` MARKS A RESPONSE HEADER QUOTED VERBATIM. The results page
+ * shows those deliberately: a reader checking our reading of an HSTS or policy
+ * header needs to see what was actually sent. A document that leaves the
+ * building has a different rule, so it is marked here rather than left for
+ * each consumer to work out from the label -- a check that would silently stop
+ * matching the day somebody rewords one.
+ *
+ * The unmarked notes are not header text: cookie names and flags, mixed-content
+ * addresses, insecure form actions.
+ */
+export interface SecurityFactRow extends FactRow {
+  readonly rawHeaderNote?: true;
 }
 
 /** A measurement that was looked for and genuinely is not there. */
@@ -754,6 +774,90 @@ export function fieldOverallText(field: FieldPerformance): string | null {
   return RATING_TEXT[field.overall];
 }
 
+/**
+ * One metric's rating, in the words shown beside that metric.
+ *
+ * DELIBERATELY NOT `RATING_TEXT` ABOVE, AND THE TWO MUST NOT BE MERGED. They
+ * describe the same three values in different places and the report says
+ * different things in each: the OVERALL verdict is reported as Google words it
+ * -- Fast, Average, Slow -- because it is Google's judgement being quoted. A
+ * single metric is reported as advice to the reader -- Good, Needs work, Poor
+ * -- because that is what a person does with one number.
+ *
+ * Collapsing them into one map would silently reword one half of the speed
+ * section. They are near each other so the distinction is visible.
+ */
+const METRIC_RATING_TEXT: Record<PerformanceRating, string> = {
+  FAST: "Good",
+  AVERAGE: "Needs work",
+  SLOW: "Poor",
+};
+
+export function ratingLabel(rating: PerformanceRating): string {
+  return METRIC_RATING_TEXT[rating];
+}
+
+/**
+ * One speed measurement, in milliseconds or seconds.
+ *
+ * NULL STAYS NULL. An absent metric has no duration, and rendering it as zero
+ * would make a metric nobody reported look like the fastest one measured.
+ *
+ * NOT `durationText` ABOVE, which rounds to whole seconds and minutes for the
+ * crawl's own limits. A page-speed figure of 1.24 seconds is not 1 second, and
+ * a figure of 640 ms is not 1 second either.
+ */
+export function metricDurationText(value: number | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${Math.round(value)} ms`;
+}
+
+/**
+ * What a field metric reads when Google reported none.
+ *
+ * "Not reported" RATHER THAN A DASH, and that distinction is the whole point:
+ * a reader cannot tell an unreported metric from a good one, and a dash lets
+ * them assume either. It says which without implying the site failed anything.
+ *
+ * A metric is missing because too few real visitors were recorded to report
+ * on, which is the normal case for a small business site and says nothing
+ * whatever about how fast the page is.
+ */
+export const METRIC_NOT_REPORTED = "Not reported";
+
+/**
+ * Layout shift as real visitors experienced it.
+ *
+ * NO UNIT, because there is none: CLS is a score, not a duration, which is why
+ * it has its own type rather than sharing the millisecond one.
+ *
+ * TWO DECIMALS. The thresholds a reader is judged against sit at 0.1 and 0.25,
+ * so two places is the precision that lets someone see which side of one they
+ * are on. The simulated figure below shows three, and the two must not be
+ * merged -- see the note there.
+ */
+export function fieldShiftText(cls: FieldShiftMetric | null | undefined): string | null {
+  if (cls === null || cls === undefined) return null;
+  return cls.percentile.toFixed(2);
+}
+
+/**
+ * Layout shift in Google's simulation.
+ *
+ * THREE DECIMALS, DELIBERATELY, AND NOT THE SAME AS THE FIELD FIGURE ABOVE. A
+ * lab run reports a single browser's measurement rather than a percentile
+ * across real visits, and it routinely lands in the thousandths -- 0.045 shown
+ * as 0.04 would round two clearly different runs to the same number.
+ *
+ * Kept apart from `fieldShiftText` for the same reason the rating vocabularies
+ * are kept apart: they describe the same quantity in different places and the
+ * report deliberately says it differently in each.
+ */
+export function labShiftText(value: number | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return value.toFixed(3);
+}
+
 // ---------------------------------------------------------------------------
 // How many problems, at a glance
 // ---------------------------------------------------------------------------
@@ -767,11 +871,25 @@ export interface SeverityCount {
 
 const PROBLEM_SEVERITIES: Array<Exclude<Severity, "good">> = ["critical", "high", "medium"];
 
-const SEVERITY_LABELS: Record<Exclude<Severity, "good">, string> = {
+/**
+ * Every severity, in the words the report shows.
+ *
+ * COVERS "good" TOO, which the split below does not. The severity split counts
+ * problems and deliberately leaves out the rules that passed; a badge on a
+ * finding has to be able to say "Good". One map serves both rather than a
+ * second copy living wherever the next reader needs the fourth word.
+ */
+const SEVERITY_LABELS: Record<Severity, string> = {
   critical: "Critical",
   high: "High",
   medium: "Medium",
+  good: "Good",
 };
+
+/** One severity, in the word the report shows. */
+export function severityLabel(severity: Severity): string {
+  return SEVERITY_LABELS[severity];
+}
 
 /**
  * The severity split, for the line under the findings heading.
@@ -925,3 +1043,239 @@ export function crawlStateFacts(
     ...robotsFacts(crawl, technical),
   ];
 }
+
+// ---------------------------------------------------------------------------
+// Security, in words
+//
+// These four lines and the certificate label were written for the results page
+// and lived inside it until the PDF needed them too. They are here so there is
+// ONE wording for each, rather than the browser and an export disagreeing
+// about the same measurement. Moved unchanged: same inputs, same strings, same
+// edge cases.
+// ---------------------------------------------------------------------------
+
+/**
+ * The HSTS line.
+ *
+ * TAKES THE HEADER'S PRESENCE SEPARATELY from the parsed block, because they
+ * answer different questions: whether anything was sent, and what it said. A
+ * header that was sent and switched itself off with `max-age=0` is a different
+ * fact from no header at all, and both are different from a header whose
+ * max-age could not be read.
+ */
+export function hstsSummary(hsts: SecurityData["hsts"], headerPresent: boolean): string {
+  if (!hsts.applicable) return "Not applicable — the page is not served over HTTPS";
+  if (!headerPresent) return "No HSTS header sent";
+  if (hsts.disabledByZeroMaxAge) return "Header present but switched off (max-age=0)";
+  if (hsts.maxAgeSeconds === null) return "Header present, but its max-age could not be read";
+
+  const days = Math.round(hsts.maxAgeSeconds / 86400);
+  const extras = [
+    hsts.includesSubdomains ? "includes subdomains" : null,
+    hsts.preload ? "preload" : null,
+  ].filter(Boolean);
+
+  return `${days} day${days === 1 ? "" : "s"}${extras.length ? ` · ${extras.join(" · ")}` : ""}`;
+}
+
+/**
+ * Describes the Content-Security-Policy situation in one line.
+ *
+ * A report-only policy is monitored but not enforced, so saying "Present"
+ * for one would imply protection the site does not actually have.
+ */
+export function cspSummary(security: SecurityData): string {
+  if (security.contentSecurityPolicy.present) return "Present";
+  if (security.contentSecurityPolicyReportOnly.present) {
+    return "Report-only — monitored but not enforced";
+  }
+  return "Missing";
+}
+
+/**
+ * Summarises the cookies, saying how many lack each protective flag.
+ *
+ * READS NAMES AND FLAGS ONLY. The audit never captures a cookie's value, so
+ * there is none here to leak into a report a client keeps.
+ */
+export function cookieSummary(cookies: SecurityData["cookies"]): string {
+  if (cookies.total === 0) return "None set by this page";
+
+  const missingSecure = cookies.cookies.filter((c) => !c.secure).length;
+  const missingHttpOnly = cookies.cookies.filter((c) => !c.httpOnly).length;
+  const missingSameSite = cookies.cookies.filter((c) => c.sameSite === null).length;
+
+  const gaps = [
+    missingSecure > 0 ? `${missingSecure} without Secure` : null,
+    missingHttpOnly > 0 ? `${missingHttpOnly} without HttpOnly` : null,
+    missingSameSite > 0 ? `${missingSameSite} without SameSite` : null,
+  ].filter(Boolean);
+
+  const plural = cookies.total === 1 ? "" : "s";
+  return gaps.length === 0
+    ? `${cookies.total} cookie${plural}, all flags set`
+    : `${cookies.total} cookie${plural} — ${gaps.join(", ")}`;
+}
+
+/**
+ * Turns the mixed-content measurements into one readable line.
+ *
+ * The wording says "in the page HTML" deliberately. We read the markup the
+ * server sent; we do not run the page or download its stylesheets. A bare
+ * "None found" would claim more than we checked.
+ */
+export function mixedContentSummary(mixed: SecurityData["mixedContent"]): string {
+  if (!mixed.applicable) return "Not applicable — the page is not served over HTTPS";
+  if (mixed.total === 0) return "None found in the page HTML";
+
+  const blocking = mixed.activeCount > 0 ? `, ${mixed.activeCount} likely blocked by browsers` : "";
+  return `${mixed.total} found in the page HTML, loaded over plain HTTP${blocking}`;
+}
+
+/** What is wrong with the certificate, as a sentence rather than a code. */
+export function certificateProblemLabel(problem: CertificateProblem): string {
+  switch (problem) {
+    case "expired":
+      return "The certificate has expired";
+    case "self-signed":
+      return "The certificate is self-signed, so browsers will not trust it";
+    case "wrong-hostname":
+      return "The certificate was issued for a different address";
+    case "untrusted":
+      return "The certificate could not be verified";
+  }
+}
+
+/**
+ * The security section, as rows.
+ *
+ * MOVED HERE WHOLE rather than label by label. The results page built these
+ * eleven rows inline, and the PDF needs the same eleven; splitting them would
+ * have left one list defined in two places, which is how the browser and an
+ * export come to disagree about the same measurement.
+ *
+ * THE THREE SIMPLE HEADERS SHOW WHAT THE SERVER SENT, not merely that it sent
+ * something. `X-Frame-Options: SAMEORIGIN` and `X-Frame-Options: DENY` are
+ * different protections, and a reader checking our reading needs the value.
+ * Permissions-Policy is the exception and says "Present", because its value is
+ * routinely long enough to fill the row, so it goes in the note instead.
+ *
+ * EVERY `note` IS TEXT FROM SOMEBODY ELSE'S SERVER. Display it as plain text
+ * and never as markup.
+ */
+export function securityFacts(security: SecurityData): SecurityFactRow[] {
+  const rows: SecurityFactRow[] = [
+    {
+      label: "HTTPS protection (HSTS)",
+      value: hstsSummary(security.hsts, security.strictTransportSecurity.present),
+      note: security.strictTransportSecurity.value ?? undefined,
+      rawHeaderNote: true,
+    },
+    {
+      label: "Content-Security-Policy",
+      value: cspSummary(security),
+      note:
+        security.contentSecurityPolicy.value ??
+        security.contentSecurityPolicyReportOnly.value ??
+        undefined,
+      rawHeaderNote: true,
+    },
+    { label: "X-Frame-Options", value: security.xFrameOptions.value ?? "Missing" },
+    { label: "X-Content-Type-Options", value: security.xContentTypeOptions.value ?? "Missing" },
+    { label: "Referrer-Policy", value: security.referrerPolicy.value ?? "Missing" },
+    {
+      label: "Permissions-Policy",
+      value: security.permissionsPolicy.present ? "Present" : "Missing",
+      note: security.permissionsPolicy.value ?? undefined,
+      rawHeaderNote: true,
+    },
+    {
+      label: "Cookies set by this page",
+      value: cookieSummary(security.cookies),
+      // Names and flags. A cookie's value is never captured, so none is here.
+      note:
+        security.cookies.cookies.length > 0
+          ? security.cookies.cookies
+              .slice(0, MAX_COOKIES_LISTED)
+              .map(
+                (cookie) =>
+                  `${cookie.name}: ${cookie.secure ? "Secure" : "no Secure"}, ${
+                    cookie.httpOnly ? "HttpOnly" : "no HttpOnly"
+                  }, SameSite=${cookie.sameSite ?? "not set"}`,
+              )
+              .join("  ·  ")
+          : undefined,
+    },
+    {
+      label: "Insecure resources",
+      value: mixedContentSummary(security.mixedContent),
+      note:
+        security.mixedContent.items.length > 0
+          ? security.mixedContent.items
+              .slice(0, MAX_MIXED_ITEMS_LISTED)
+              .map((item) => `${item.element} (${item.via}): ${item.url}`)
+              .join("  ·  ")
+          : undefined,
+    },
+  ];
+
+  /*
+   * Shown next to the count so it is never read as a whole-site all-clear.
+   * This scan reads the served markup and nothing more.
+   */
+  if (security.mixedContent.applicable) {
+    rows.push({
+      label: "Not checked by this scan",
+      value: security.mixedContent.notInspected.join("  ·  "),
+    });
+  }
+
+  const insecureForms = security.insecureFormActions.length;
+  rows.push({
+    label: "Insecure form submission",
+    value:
+      insecureForms === 0
+        ? "None found"
+        : `${insecureForms} form${insecureForms === 1 ? "" : "s"} sends data over plain HTTP`,
+    note: insecureForms > 0
+      ? security.insecureFormActions.slice(0, MAX_FORM_ACTIONS_LISTED).join("  ·  ")
+      : undefined,
+  });
+
+  rows.push({
+    label: "Server software announced",
+    value:
+      [security.serverHeader.value, security.poweredByHeader.value].filter(Boolean).join(" · ") ||
+      "— not announced —",
+  });
+
+  return rows;
+}
+
+/**
+ * The certificate problem seen while connecting, when there was one.
+ *
+ * AN ARRAY OF NONE OR ONE, so a caller renders it the same way it renders
+ * every other group of facts and does not need its own conditional.
+ *
+ * THE NOTE MATTERS. Without it a reader meets a certificate verdict here and a
+ * second one further down and cannot tell why they differ. This one was seen
+ * while connecting; the certificate itself is read properly in its own
+ * section.
+ */
+export function certificateProblemFacts(problem: CertificateProblem | null): FactRow[] {
+  if (problem === null) return [];
+
+  return [
+    {
+      label: "Certificate problem",
+      value: certificateProblemLabel(problem),
+      note: "Seen while connecting. The certificate itself is read separately, below.",
+    },
+  ];
+}
+
+/** How many of each list the note shows before it stops. */
+const MAX_COOKIES_LISTED = 6;
+const MAX_MIXED_ITEMS_LISTED = 5;
+const MAX_FORM_ACTIONS_LISTED = 3;

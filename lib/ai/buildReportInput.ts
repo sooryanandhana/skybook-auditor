@@ -69,6 +69,7 @@ import {
   type AIUnknownState,
 } from "./contract.ts";
 import type { SiteCrawlSummary } from "../collector/crawlSite.ts";
+import { withoutCredentials } from "../collector/url.ts";
 import type {
   AuditData,
   MxRecord,
@@ -243,18 +244,6 @@ function usableInSample(url: string): boolean {
  * as "https://example.com/" -- a different string from the one measured, and
  * the requested address is a fact this contract reports.
  */
-function withoutCredentials(url: string): string {
-  try {
-    const parsed = new URL(url);
-    if (parsed.username === "" && parsed.password === "") return url;
-    parsed.username = "";
-    parsed.password = "";
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-
 /** The same, for an address the collector may not have recorded at all. */
 function optionalWithoutCredentials(url: string | null): string | null {
   return url === null ? null : withoutCredentials(url);

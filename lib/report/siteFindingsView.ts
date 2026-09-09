@@ -143,6 +143,19 @@ export const PAGE_FINDINGS_INTRO =
  * — `complete` — and nothing here revisits it. This just spells out a value
  * the server already chose.
  */
+/**
+ * What the report calls itself, in one line.
+ *
+ * "COMPLETE" IS A CLAIM ABOUT THE SITE, so it may only be made when the crawl
+ * actually covered it. `complete` is the server's own verdict, which accounts
+ * for the page crawl and sitemap discovery both; nothing here recomputes it
+ * from counts, because a second opinion could disagree with the banner beside
+ * it and one of them would then be wrong.
+ */
+export function auditStatusText(complete: boolean): string {
+  return complete ? "Website audit complete" : "Partial website audit";
+}
+
 export function stopReasonText(crawl: SiteCrawlSummary): string {
   switch (crawl.stoppedBecause) {
     case "max-pages":

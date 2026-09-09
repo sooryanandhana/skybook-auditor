@@ -15,6 +15,7 @@ import test from "node:test";
 import fs from "node:fs";
 import {
   affectedView,
+  auditStatusText,
   crawlView,
   findingScope,
   hasAffectedList,
@@ -489,4 +490,31 @@ test("the complete-crawl wording is untouched", () => {
     crawlView(crawl({ evaluated: 12, discovered: 12 })).headline,
     "12 pages read. Every page we found was visited.",
   );
+});
+
+// ---------------------------------------------------------------------------
+// WHAT THE REPORT CALLS ITSELF
+//
+// One line, shown on the results page and on the PDF cover. It was written in
+// the page until the PDF needed the same two words, and a second copy is how
+// an export comes to claim a whole-site audit the browser called partial.
+// ---------------------------------------------------------------------------
+
+test("a crawl that covered the site says the audit is complete", () => {
+  assert.equal(auditStatusText(true), "Website audit complete");
+});
+
+test("a crawl that did not says the audit is partial", () => {
+  /*
+   * "Complete" is a claim about the SITE, so it may only be made when the
+   * crawl actually covered it. The caller passes the server's own verdict;
+   * nothing here recomputes it from counts.
+   */
+  assert.equal(auditStatusText(false), "Partial website audit");
+});
+
+test("the two never read as each other", () => {
+  assert.notEqual(auditStatusText(true), auditStatusText(false));
+  assert.ok(!auditStatusText(false).includes("complete"));
+  assert.ok(!auditStatusText(true).includes("Partial"));
 });

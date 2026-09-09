@@ -1,0 +1,48 @@
+/**
+ * The page itself: size, margins, and how long a render may take.
+ *
+ * ALMOST EVERYTHING HERE IS TEMPORARY AND SAYS SO. 7A specifies the body text
+ * size, the leading and the measure (§16), and it specifies what the running
+ * head and foot carry (§20). It does not specify a paper size, an orientation
+ * or a margin, and 7C-1 is not the step that decides them. The values below
+ * are the smallest set that lets a page render at all, marked so that the step
+ * which does decide them can find them.
+ */
+
+/**
+ * TEMPORARY. A4 portrait.
+ *
+ * Chosen because it is the paper the rest of the world outside North America
+ * prints on, and because a foundation needs some size to lay out against. The
+ * real decision belongs with whoever knows where these reports get printed.
+ */
+export const PAGE_FORMAT = "a4";
+
+/**
+ * TEMPORARY, and measured rather than guessed.
+ *
+ * The top and bottom margins are what reserve room for the running head and
+ * foot. Chromium draws those templates whether or not the margin leaves space
+ * for them -- verified on Chrome 152, where a 5mm margin still produced the
+ * same header and footer text, overlapping the body instead of dropping it. So
+ * a margin that is too small does not lose the running head; it collides with
+ * the content, which is worse, because it looks like a layout bug rather than
+ * a missing feature.
+ */
+export const PAGE_MARGIN = {
+  top: "24mm",
+  bottom: "20mm",
+  left: "18mm",
+  right: "18mm",
+} as const;
+
+/**
+ * How long one render may take before it is abandoned.
+ *
+ * 7A §23 gives the renderer its own budget, separate from the audit's and the
+ * model's, and forbids a retry: a second attempt at a deterministic render of
+ * the same data fails the same way. This is that budget. It covers the whole
+ * call, browser launch included, because a launch that hangs is exactly the
+ * failure a budget is for.
+ */
+export const PDF_RENDER_BUDGET_MS = 20_000;

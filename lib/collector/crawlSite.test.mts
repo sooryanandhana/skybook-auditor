@@ -450,7 +450,17 @@ test("no HTTP or crawling dependency was introduced", () => {
     "got-scraping",
     "node-fetch",
     "undici",
-    "puppeteer",
+    /*
+     * `puppeteer` was on this list until Phase 7C-1, when the PDF renderer
+     * was built on it. The ban existed to stop the CRAWLER fetching pages
+     * through a browser -- headless Chromium runs the site's JavaScript,
+     * which would change what the audit measures and would make every crawled
+     * page cost a browser. That property is unchanged and is now asserted
+     * where it belongs: the import walk below, and a matching walk in
+     * lib/audit/pdf proving nothing outside the renderer reaches it.
+     *
+     * `playwright` stays banned. Nothing here has a use for a second browser.
+     */
     "playwright",
     "request",
     "superagent",
@@ -464,11 +474,16 @@ test("no HTTP or crawling dependency was introduced", () => {
    * it is the AI provider's own SDK, it is imported only by `lib/ai/gemini`,
    * and a test in that folder walks the tree to prove nothing else reaches it.
    * The crawler never sees it, which is the property this guard protects.
+   * `puppeteer` was argued for the same way in Phase 7C-1: it draws the PDF
+   * report, it is imported only by `lib/audit/pdf`, and a test in that folder
+   * walks the tree to prove nothing else reaches it. No collector imports it,
+   * which is asserted directly below.
    */
   assert.deepEqual(Object.keys(pkg.dependencies).sort(), [
     "@google/genai",
     "cheerio",
     "next",
+    "puppeteer",
     "react",
     "react-dom",
   ]);

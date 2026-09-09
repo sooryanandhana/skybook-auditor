@@ -44,6 +44,7 @@ import {
   labShiftText,
   metricDurationText,
   ratingLabel,
+  readableTimestamp,
   robotsFacts,
   securityFacts,
   severityCounts,
@@ -128,8 +129,22 @@ export interface PdfCover {
   readonly auditedUrl: string;
   /** Where it started, when that differed. Null otherwise. */
   readonly requestedUrl: string | null;
-  /** When the site was measured. Not when the document was made. */
-  readonly checkedAt: string;
+  /**
+   * When the site was measured, as a sentence: "8 September 2026 at 10:00 UTC".
+   *
+   * NOT WHEN THE DOCUMENT WAS MADE, which 7A §20 is explicit about.
+   *
+   * DISPLAY-READY, like every other string here. It arrived as a stored
+   * timestamp until the 7C-1 review found it -- the one field the renderer
+   * would have had to interpret, and a renderer that formats a date is a
+   * renderer that can disagree with the screen about one.
+   *
+   * Null when the stored value could not be read. That does not happen today,
+   * because the audit writes it itself, and it is a state rather than a
+   * fallback because the alternative is printing the raw timestamp, which is
+   * the thing this field exists to keep out of the document.
+   */
+  readonly checkedAt: string | null;
   readonly partial: boolean;
   /** "Website audit complete" or "Partial website audit". */
   readonly statusLine: string;
@@ -588,7 +603,11 @@ export function buildPdfDocument(
         requestedUrl: data.fetch.wasRedirected
           ? withoutCredentials(data.website.requestedUrl)
           : null,
-        checkedAt: data.website.checkedAt,
+        /*
+         * PHRASED HERE, BY THE REPORT LAYER, using the same helper the rest of
+         * the report's dates go through. The renderer receives the sentence.
+         */
+        checkedAt: readableTimestamp(data.website.checkedAt),
         partial: !crawl.complete,
         statusLine: auditStatusText(crawl.complete),
       },

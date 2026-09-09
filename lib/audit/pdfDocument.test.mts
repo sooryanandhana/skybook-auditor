@@ -18,6 +18,7 @@ import { createJobStore } from "../jobs/jobStore.ts";
 import {
   METRIC_NOT_REPORTED,
   certificateProblemFacts,
+  readableTimestamp,
   securityFacts,
 } from "../report/measurementsView.ts";
 import { auditStatusText } from "../report/siteFindingsView.ts";
@@ -207,6 +208,123 @@ test("a partial crawl is never presented as a whole-site audit", () => {
   assert.equal(doc.cover.statusLine, "Partial website audit");
   assert.equal(doc.coverage.partial, true);
   assert.match(doc.coverage.stopReason ?? "", /150-page safety limit/);
+});
+
+/**
+ * The same audit, measured at a different moment.
+ *
+ * `storedAudit`'s overrides land on the result, and the timestamp lives a
+ * level down under `data.website`, so it needs its own way in.
+ */
+function measuredAt(checkedAt: string): SiteAuditResult {
+  const base = storedAudit();
+  return {
+    ...base,
+    data: { ...base.data, website: { ...base.data.website, checkedAt } },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// When the site was measured
+// ---------------------------------------------------------------------------
+
+test("the audit time reaches the document as a sentence, not as a timestamp", () => {
+  const { store, jobId } = jobWith();
+
+  assert.equal(documentFor(store, jobId).cover.checkedAt, "9 September 2026 at 10:00 UTC");
+});
+
+test("the stored timestamp itself never reaches the document", () => {
+  // The property, stated as an absence. A renderer given "2026-09-09T10:00:00.000Z"
+  // would have to interpret it, and 7A §25 says every string it receives is
+  // already display-ready.
+  const { store, jobId } = jobWith();
+  const checkedAt = documentFor(store, jobId).cover.checkedAt ?? "";
+
+  assert.ok(!checkedAt.includes("T10:00:00"), "no ISO time-of-day marker");
+  assert.ok(!checkedAt.includes(".000Z"), "no ISO zone marker");
+  assert.ok(!/^\d{4}-\d{2}-\d{2}/.test(checkedAt), "and it does not open with an ISO date");
+});
+
+test("the projection phrases the time with the report layer's own helper", () => {
+  // Not with a formatter of its own. A second one would drift, and the PDF
+  // would then disagree with the report about the same instant.
+  const { store, jobId } = jobWith();
+
+  assert.equal(
+    documentFor(store, jobId).cover.checkedAt,
+    readableTimestamp("2026-09-09T10:00:00.000Z"),
+  );
+});
+
+test("the exact instant survives, to the minute", () => {
+  const { store, jobId } = jobWith("completed", measuredAt("2026-09-08T20:30:00.000Z"));
+
+  assert.equal(documentFor(store, jobId).cover.checkedAt, "8 September 2026 at 20:30 UTC");
+});
+
+test("the instant reads the same wherever the server thinks it is", () => {
+  /*
+   * The document is rendered on a server whose timezone nobody chose. An audit
+   * at 20:30 UTC is the next day in Kolkata and the same day in Los Angeles,
+   * so a value converted to the machine's zone would name a different day
+   * depending on where it ran. Naming the zone is what keeps it checkable.
+   */
+  const before = process.env.TZ;
+
+  try {
+    const seen = new Set<string | null>();
+    for (const zone of ["Asia/Kolkata", "America/Los_Angeles", "UTC"]) {
+      process.env.TZ = zone;
+      const { store, jobId } = jobWith("completed", measuredAt("2026-09-08T20:30:00.000Z"));
+      seen.add(documentFor(store, jobId).cover.checkedAt);
+    }
+    assert.deepEqual([...seen], ["8 September 2026 at 20:30 UTC"]);
+  } finally {
+    process.env.TZ = before;
+  }
+});
+
+test("an unreadable timestamp becomes nothing, never the raw value", () => {
+  const { store, jobId } = jobWith("completed", measuredAt("not a date"));
+
+  assert.equal(documentFor(store, jobId).cover.checkedAt, null);
+});
+
+test("a timestamp carrying markup cannot reach the document at all", () => {
+  // It is unparseable, so it is refused before any escaping question arises.
+  // The renderer escapes as well, which is the second of the two failures
+  // that would have to happen together.
+  const { store, jobId } = jobWith(
+    "completed",
+    measuredAt('<script>fetch("https://evil.example")</script>'),
+  );
+  const doc = documentFor(store, jobId);
+
+  assert.equal(doc.cover.checkedAt, null);
+  assert.ok(!JSON.stringify(doc).includes("<script>"), "and nowhere else either");
+});
+
+test("phrasing the time changes nothing else on the cover", () => {
+  const { store, jobId } = jobWith();
+  const cover = documentFor(store, jobId).cover;
+
+  assert.equal(cover.auditedUrl, "https://example.com/");
+  assert.equal(cover.requestedUrl, null);
+  assert.equal(cover.partial, false);
+  assert.equal(cover.statusLine, "Website audit complete");
+  assert.deepEqual(cover.client, { companyName: null, contactName: null, preparedBy: null });
+});
+
+test("the stored audit still holds its own timestamp afterwards", () => {
+  // The fixtures are deep-frozen, so a write would have thrown. This says the
+  // gentler thing as well: the value the store holds is the value it held.
+  const { store, jobId } = jobWith();
+  const job = store.get(jobId);
+
+  documentFor(store, jobId);
+
+  assert.equal(job?.result?.data.website.checkedAt, "2026-09-09T10:00:00.000Z");
 });
 
 // ---------------------------------------------------------------------------

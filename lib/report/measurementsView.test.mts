@@ -36,6 +36,7 @@ import {
   crawlCountTiles,
   mxText,
   readableDate,
+  readableTimestamp,
   recordSetText,
   spfFacts,
   strategyLabel,
@@ -231,6 +232,53 @@ test("dates are written the same way wherever the browser thinks it is", () => {
   assert.equal(readableDate("2026-01-01T00:00:00.000Z"), "1 January 2026");
   assert.equal(readableDate(null), null);
   assert.equal(readableDate("not a date"), null);
+});
+
+test("a moment carries the time of day and names its timezone", () => {
+  assert.equal(
+    readableTimestamp("2026-10-27T22:17:21.000Z"),
+    "27 October 2026 at 22:17 UTC",
+  );
+});
+
+test("the hour and the minute are padded, so the column lines up", () => {
+  assert.equal(readableTimestamp("2026-01-01T00:00:00.000Z"), "1 January 2026 at 00:00 UTC");
+  assert.equal(readableTimestamp("2026-01-01T09:05:00.000Z"), "1 January 2026 at 09:05 UTC");
+});
+
+test("a moment reads identically wherever the machine thinks it is", () => {
+  /*
+   * The reason the zone is named rather than converted. This value is
+   * rendered on a server whose timezone nobody chose, and a time that looks
+   * local but is not can be the wrong day for an audit run late in the
+   * evening. Stated in UTC, it can be checked against the screen instead of
+   * quietly disagreeing with it.
+   */
+  const before = process.env.TZ;
+  try {
+    process.env.TZ = "Asia/Kolkata";
+    assert.equal(readableTimestamp("2026-09-08T20:30:00.000Z"), "8 September 2026 at 20:30 UTC");
+    process.env.TZ = "America/Los_Angeles";
+    assert.equal(readableTimestamp("2026-09-08T20:30:00.000Z"), "8 September 2026 at 20:30 UTC");
+  } finally {
+    process.env.TZ = before;
+  }
+});
+
+test("a moment refuses anything it cannot read, exactly as a date does", () => {
+  assert.equal(readableTimestamp(null), null);
+  assert.equal(readableTimestamp(""), null);
+  assert.equal(readableTimestamp("not a date"), null);
+  assert.equal(readableTimestamp("<script>steal()</script>"), null);
+});
+
+test("a moment is the date helper plus a time, not a second date formatter", () => {
+  // One month-name table and one unparseable-input policy. Two would drift.
+  const iso = "2026-03-09T07:04:00.000Z";
+  assert.ok(
+    (readableTimestamp(iso) ?? "").startsWith(readableDate(iso) ?? "!"),
+    "the moment opens with exactly the date the date helper gives",
+  );
 });
 
 test("the expiry note handles today and one day either side", () => {

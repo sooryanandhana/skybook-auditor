@@ -119,6 +119,39 @@ export function readableDate(iso: string | null): string | null {
   return `${at.getUTCDate()} ${MONTHS[at.getUTCMonth()]} ${at.getUTCFullYear()}`;
 }
 
+/**
+ * An ISO timestamp as a moment a person reads: "27 October 2026 at 22:17 UTC".
+ *
+ * FOR WHEN THE TIME OF DAY MATTERS, which is when the reader needs to know how
+ * recent a measurement is rather than merely which day it fell on. A
+ * certificate expires on a date; an audit was run at a moment.
+ *
+ * BUILT ON `readableDate` RATHER THAN BESIDE IT. Two date formatters means one
+ * of them drifts, and there is exactly one month-name table and one
+ * unparseable-input policy in this file for that reason.
+ *
+ * THE ZONE IS NAMED, and that is the whole point of the suffix. The results
+ * page shows this same instant through `toLocaleString`, so it reads in the
+ * viewer's own timezone. A document rendered on the server cannot know that
+ * timezone, and quietly printing the server's instead would produce a time
+ * that looks local and is not — which for an audit run late in the evening can
+ * be the wrong day. Saying "UTC" costs four characters and makes the value
+ * checkable against the screen rather than in conflict with it.
+ *
+ * Null for anything unparseable, exactly as `readableDate` is, so a caller
+ * shows nothing rather than "Invalid Date".
+ */
+export function readableTimestamp(iso: string | null): string | null {
+  const date = readableDate(iso);
+  if (date === null || iso === null) return null;
+
+  const at = new Date(iso);
+  const hours = String(at.getUTCHours()).padStart(2, "0");
+  const minutes = String(at.getUTCMinutes()).padStart(2, "0");
+
+  return `${date} at ${hours}:${minutes} UTC`;
+}
+
 /** "in 84 days", "today", "42 days ago" — the sign carries the meaning. */
 export function expiryNote(days: number | null): string | undefined {
   if (days === null) return undefined;

@@ -32,6 +32,16 @@ import path from "node:path";
 export const LOGO_FILE = "skybook-logo.jpg";
 
 /**
+ * What the mark says, for a reader who cannot see it.
+ *
+ * ONE COPY, because it is used twice: as the artwork's alternative text on the
+ * cover, and as the document's author in the PDF metadata. Those must agree --
+ * a reader who hears one and reads the other should not wonder whether they
+ * are two different companies.
+ */
+export const SKYBOOK_NAME = "Skybook Digital";
+
+/**
  * Where the artwork's ink actually sits inside its square, as fractions.
  *
  * MEASURED, NOT ESTIMATED. Every pixel of the 3630 square was read and the

@@ -59,7 +59,7 @@ export function documentHtml(document: PdfDocument): string {
 
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
-    html`<title>Website audit — ${cover.auditedUrl}</title>` +
+    html`<title>${documentTitle(document)}</title>` +
     `<style>${STYLESHEET}</style></head><body>` +
     coverHtml(cover) +
     `<main>` +
@@ -75,6 +75,18 @@ export function documentHtml(document: PdfDocument): string {
     `</main>` +
     `</body></html>`
   );
+}
+
+/**
+ * What the document is called.
+ *
+ * ONE SOURCE FOR TWO PLACES. It is the HTML title, which is what Chromium
+ * shows a page as, and it is the PDF title, which is what a reader announces.
+ * They were never going to be allowed to differ, and the way to guarantee that
+ * is for there to be one of them.
+ */
+export function documentTitle(document: PdfDocument): string {
+  return `Website audit — ${document.cover.auditedUrl}`;
 }
 
 /** The audited address, for the running head. */

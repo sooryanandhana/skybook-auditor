@@ -30,7 +30,9 @@
  */
 import puppeteer, { type Browser, type Page } from "puppeteer";
 import type { PdfDocument } from "../pdfDocument.ts";
-import { documentHtml, footOf, headOf } from "./shell.ts";
+import { documentHtml, documentTitle, footOf, headOf } from "./shell.ts";
+import { SKYBOOK_NAME } from "./logo.ts";
+import { withMetadata } from "./metadata.ts";
 import { footerTemplate, headerTemplate } from "./runningHeadFoot.ts";
 import { PAGE_FORMAT, PAGE_MARGIN, PDF_RENDER_BUDGET_MS } from "./settings.ts";
 
@@ -166,7 +168,7 @@ export async function renderPdf(
       await configurePage(page);
       await page.setContent(documentHtml(document), { waitUntil: "load" });
 
-      return Buffer.from(
+      const pdf = Buffer.from(
         await page.pdf({
           format: PAGE_FORMAT,
           printBackground: true,
@@ -174,8 +176,39 @@ export async function renderPdf(
           displayHeaderFooter: true,
           headerTemplate: headerTemplate(headOf(document)),
           footerTemplate: footerTemplate(footOf(document)),
+          /*
+           * STATED, NOT INHERITED. Puppeteer 25 already defaults this to true,
+           * and a file rendered without it is byte-identical to one rendered
+           * with it. It is written down anyway, because 7A §24 asks for a
+           * tagged document and a requirement met by somebody else's default
+           * is a requirement that can disappear in a minor version without
+           * anything here failing.
+           *
+           * What it buys, measured on Chrome 152: a marked-content flag, a
+           * structure tree, the document language, and real H1 to H4, P,
+           * Table, TR, TH, TD, L, LI and Figure elements. Turning it off
+           * loses every one of them.
+           *
+           * NOT A CONFORMANCE CLAIM. See the note on artifacts in
+           * `runningHeadFoot.ts`: this is a tagged, navigable document, and it
+           * is not a PDF/UA document.
+           */
+          tagged: true,
         }),
       );
+
+      /*
+       * THE TITLE CHROMIUM WOULD NOT WRITE. Its print interface takes no
+       * metadata, so the file arrives with no title at all, while already
+       * carrying the viewer preference asking a reader to display one. This
+       * appends it without touching a byte of what Chromium produced; see
+       * `metadata.ts` for why it is an append rather than a rewrite.
+       */
+      return withMetadata(pdf, {
+        title: documentTitle(document),
+        author: SKYBOOK_NAME,
+        subject: `Website audit for ${document.cover.auditedUrl}`,
+      });
     });
   } catch (error) {
     if (error instanceof PdfRenderError) throw error;

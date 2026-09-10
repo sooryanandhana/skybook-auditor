@@ -22,10 +22,34 @@
  *   3. They are drawn whether or not the page margin leaves room. A margin set
  *      too small produces overlap, not omission. See `PAGE_MARGIN`.
  *
- * THE MARK IS TYPESET, NOT DRAWN. The dark-text vector logo is still
- * outstanding, and 7A §27 is explicit that it is not to be recreated from what
- * is on screen. A wordmark in type is honest in the meantime and is replaced
- * when the approved asset arrives.
+ * THE MARK IS TYPESET, NOT DRAWN. The dark-text vector logo sits on the cover,
+ * where it has room to be read. Here the mark is a word, because 8pt of
+ * artwork in a page margin is a smudge.
+ *
+ * ---------------------------------------------------------------------------
+ * KNOWN ACCESSIBILITY LIMITATION, AND IT IS NOT FIXABLE FROM HERE
+ * ---------------------------------------------------------------------------
+ *
+ * These two lines are not marked as artifacts. A tagged PDF is supposed to
+ * mark repeated page furniture -- a running head, a page number -- as
+ * artifacts, so a screen reader skips them instead of announcing the mark, the
+ * address and the page number between every section. Measured on Chrome 152,
+ * the produced file contains no artifact marks at all.
+ *
+ * It cannot be corrected in this file. Chromium draws these templates itself,
+ * outside the page, and nothing the page contains can reach them. The only
+ * alternative is to stop using them and draw the head and foot inside the page
+ * instead, where they could be marked -- and that loses "page n of m", because
+ * Chromium fills those numbers in from the template and offers CSS no page
+ * counter. 7A §20 requires the page number by name.
+ *
+ * So the trade is: skippable furniture, or knowing which page you are on. The
+ * page number wins, and this note exists so the decision is visible rather
+ * than looking like an oversight. It is also the reason this project claims a
+ * tagged, navigable document and does NOT claim PDF/UA conformance.
+ *
+ * The same context is why these two lines use a system font while every other
+ * glyph in the document is embedded. See the note in `fonts.ts`.
  */
 import { escapeHtml } from "./escape.ts";
 

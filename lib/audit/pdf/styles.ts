@@ -34,10 +34,14 @@ const CONTENT_HEIGHT = `calc(${PAGE_HEIGHT} - ${PAGE_MARGIN.top} - ${PAGE_MARGIN
 /**
  * The brand, from 7A §15.
  *
- * ONLY THE DEEP BLUE IS USED FOR TEXT. It is the one of the three that carries
- * enough contrast on white to be read at body size; the mid and bright blues
- * are for rules and accents, where 7A §24's 4.5:1 requirement does not apply
- * because nothing is being read from them.
+ * MEASURED ON WHITE, not judged: deep 8.31:1, mid 4.56:1, bright 2.88:1.
+ *
+ * Only the deep blue is set on text. The mid blue would in fact clear 7A §24's
+ * 4.5:1 -- an earlier comment here claimed it could not, and the contrast test
+ * proved that wrong -- but it is kept for rules and accents anyway, because a
+ * ratio of 4.56 leaves nothing spare and the deep blue is there for reading.
+ * The bright blue genuinely cannot be read at body size, and a test asserts it
+ * never becomes a text colour.
  */
 export const SKYBOOK_DEEP = "#264a9a";
 export const SKYBOOK_MID = "#147ac3";
@@ -46,7 +50,14 @@ export const SKYBOOK_BRIGHT = "#05a2e4";
 /** Ink, in three weights. Chosen for print on white rather than for a screen. */
 const INK = "#16213a";
 const INK_SOFT = "#4a5872";
-const INK_FAINT = "#7c89a3";
+/*
+ * DARKENED BECAUSE A TEST MEASURED IT. This was #7c89a3, which is 3.52:1 on
+ * white and fails 7A §24's 4.5:1 outright. It was chosen by eye and looked
+ * right, which is exactly how one value in a palette ends up wrong while every
+ * other passes. It carries every caption, label and column heading in the
+ * document, so it is read constantly. Now 4.64:1.
+ */
+const INK_FAINT = "#68758e";
 const RULE = "#d5dfec";
 const LINE_SOFT = "#e7edf6";
 
@@ -68,6 +79,32 @@ const SEVERITY = {
   medium: "#7d6413",
   good: "#1f7a55",
 } as const;
+
+/** The paper. Every colour below is read against this and nothing else. */
+export const PAPER = "#ffffff";
+
+/**
+ * Every colour the document sets on text, and what it is used for.
+ *
+ * EXPORTED SO THE CONTRAST CAN BE MEASURED RATHER THAN TRUSTED. 7A §24 asks
+ * for 4.5:1 on body text against its background. These were originally chosen
+ * by eye, which is exactly the sort of judgement that turns out to be wrong on
+ * the one value nobody checked, so a test computes the real ratio for each.
+ *
+ * WHAT IS NOT HERE. The mid and bright brand blues, which are used for rules
+ * and borders. Nothing is read from a rule, so the requirement does not apply
+ * to them, and a test asserts they never appear as a text colour.
+ */
+export const TEXT_COLOURS: Readonly<Record<string, string>> = {
+  body: INK,
+  secondary: INK_SOFT,
+  caption: INK_FAINT,
+  mark: SKYBOOK_DEEP,
+  critical: SEVERITY.critical,
+  high: SEVERITY.high,
+  medium: SEVERITY.medium,
+  good: SEVERITY.good,
+};
 
 /**
  * The whole stylesheet, fonts included.
@@ -146,6 +183,17 @@ export const STYLESHEET: string =
     width: ${LOGO_BOX.imageWidth}mm;
     /* Height follows the width, so the square stays square. */
     height: auto;
+  }
+
+  /*
+   * The label above the client's name. It carries exactly the look an h3 has,
+   * because it used to be one; it stopped being one so the cover's outline
+   * runs h1 then h2 rather than h1 then h3. See cover.ts.
+   */
+  .eyebrow {
+    font-size: 9pt; font-weight: 600; line-height: 1.3;
+    letter-spacing: .08em; text-transform: uppercase; color: ${INK_FAINT};
+    margin: 0 0 5pt;
   }
 
   .cover-main { flex: 1; display: flex; flex-direction: column; justify-content: center; }

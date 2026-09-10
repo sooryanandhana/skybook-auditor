@@ -25,7 +25,7 @@
  */
 import type { PdfCover } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
-import { LOGO_DATA_URI } from "./logo.ts";
+import { LOGO_DATA_URI, SKYBOOK_NAME } from "./logo.ts";
 
 /**
  * The Skybook mark.
@@ -38,7 +38,7 @@ import { LOGO_DATA_URI } from "./logo.ts";
 function mark(): string {
   return (
     `<div class="logo">` +
-    `<img src="${LOGO_DATA_URI}" alt="Skybook Digital">` +
+    `<img src="${LOGO_DATA_URI}" alt="${SKYBOOK_NAME}">` +
     `</div>`
   );
 }
@@ -54,12 +54,20 @@ function mark(): string {
 function addressee(cover: PdfCover): string {
   const { companyName, contactName } = cover.client;
 
+  /*
+   * A LABEL, NOT A HEADING, and the distinction is structural rather than
+   * visual. These words introduce the client's name; they do not open a
+   * section. Marked up as a heading they became an H3 sitting directly under
+   * the cover's H1, which is a skipped level: a reader navigating by heading
+   * would be told the document jumps from its title to a third-level section
+   * called "Prepared for". It looks exactly the same and now says what it is.
+   */
   if (companyName === null && contactName === null) {
-    return html`<h3>Website audit for</h3><p class="client">${cover.auditedUrl}</p>`;
+    return html`<p class="eyebrow">Website audit for</p><p class="client">${cover.auditedUrl}</p>`;
   }
 
   return (
-    `<h3>Prepared for</h3>` +
+    `<p class="eyebrow">Prepared for</p>` +
     (companyName === null ? "" : html`<p class="client">${companyName}</p>`) +
     (contactName === null ? "" : html`<p class="contact">${contactName}</p>`)
   );

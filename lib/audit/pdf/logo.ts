@@ -27,6 +27,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** The supplied artwork, in the renderer's own asset directory. */
 export const LOGO_FILE = "skybook-logo.jpg";
@@ -90,8 +91,16 @@ export const LOGO_BOX = {
   offsetTop: round((LOGO_WIDTH_MM / INK.width) * INK.top),
 } as const;
 
-/** The artwork as a data URI. Read once, when this module is first imported. */
+/**
+ * The artwork as a data URI. Read once, when this module is first imported.
+ *
+ * DERIVED FROM `import.meta.url` for the reason given in `fonts.ts`:
+ * `import.meta.dirname` is undefined inside the production bundle, so this
+ * read threw at module evaluation and took every route importing the renderer
+ * down with it. The asset has not moved and the timing has not changed.
+ */
 export const LOGO_DATA_URI: string = (() => {
-  const bytes = fs.readFileSync(path.join(import.meta.dirname, "assets", LOGO_FILE));
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const bytes = fs.readFileSync(path.join(here, "assets", LOGO_FILE));
   return `data:image/jpeg;base64,${bytes.toString("base64")}`;
 })();

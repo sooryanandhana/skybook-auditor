@@ -25,9 +25,24 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-/** Where the committed faces live. Fixed, and never taken from a caller. */
-const FONT_DIR = path.join(import.meta.dirname, "assets", "fonts");
+/**
+ * Where the committed faces live. Fixed, and never taken from a caller.
+ *
+ * DERIVED FROM `import.meta.url`, NOT `import.meta.dirname`, and the
+ * difference is the difference between a route that builds and one that does
+ * not. Under plain Node the two produce byte-identical strings, which is why
+ * every test passed while this was broken. Inside the production bundle
+ * `import.meta.dirname` is undefined, so `path.join` threw the moment the
+ * module was evaluated -- which is when Next reads a route's configuration, so
+ * any route importing the renderer failed to build at all.
+ *
+ * `import.meta.url` survives bundling and still names this file's real
+ * location, so the assets stay exactly where they are and are still found
+ * beside the module that reads them.
+ */
+const FONT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "assets", "fonts");
 
 interface Face {
   /** The family name the stylesheet refers to. */

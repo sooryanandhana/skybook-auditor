@@ -211,6 +211,124 @@
   font-weight: 600;
 }
 
+/* ---------------------------------------------------------------------------
+   Client report
+
+   Deliberately quiet. It sits directly under the summary, above the findings,
+   because the document is what a salesperson came here for -- but it is an
+   ACTION, not a section of the report, so it carries no severity colour, no
+   badge and no tint. It reads as a toolbar, and the findings below it are
+   still the first coloured thing on the page.
+
+   The two answer lines reuse the palette the rest of the page already grades
+   with: the same red as an audit error, the same green as a passing badge.
+   Inventing a third pair would be two more colours to contrast-check.
+   --------------------------------------------------------------------------- */
+
+.export {
+  border: 1px solid #d8e0ea;
+  border-radius: 10px;
+  padding: 1rem 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.exportHeading {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.exportIntro {
+  font-size: 0.85rem;
+  color: #5b6779;
+  max-width: 66ch;
+}
+
+.exportSummary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--brand);
+  width: fit-content;
+}
+
+.exportSummary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.exportHint {
+  font-size: 0.8rem;
+  color: #5b6779;
+  margin-top: 0.5rem;
+  max-width: 66ch;
+}
+
+/* Wraps to one field per line on a narrow window rather than shrinking three
+   boxes until none of them fits a company name. */
+.exportFields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-top: 0.6rem;
+}
+
+.exportField {
+  flex: 1 1 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.exportLabel {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #5b6779;
+}
+
+/*
+  Its own box rather than the search field's.
+
+  The search input is flex: 1 1 260px, which is a WIDTH inside the row it was
+  written for and a HEIGHT inside this column -- reusing it made every client
+  field 260 pixels tall. Same appearance, one size smaller, and no flex.
+*/
+.exportInput {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.95rem;
+  font-family: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid #c9d3e0;
+  border-radius: 8px;
+}
+
+.exportInput:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+  border-color: transparent;
+}
+.exportAction {
+  margin-top: 0.3rem;
+}
+
+.exportDone {
+  font-size: 0.85rem;
+  color: #2f6b41;
+  max-width: 66ch;
+  word-break: break-word;
+}
+
+.exportProblem {
+  font-size: 0.85rem;
+  color: #a3312a;
+  max-width: 66ch;
+}
+
 /* ---------- Measured facts table ---------- */
 
 .facts {
@@ -707,6 +825,7 @@
   }
 
   .input,
+  .exportInput,
   .emptyFindings {
     border-color: #35415a;
   }
@@ -724,8 +843,23 @@
   }
 
   .summary,
-  .finding {
+  .finding,
+  .export {
     border-color: #2a3448;
+  }
+
+  .exportIntro,
+  .exportHint,
+  .exportLabel {
+    color: #9aa7be;
+  }
+
+  .exportDone {
+    color: #7cc396;
+  }
+
+  .exportProblem {
+    color: #e79288;
   }
 
   .placeholderNotice {

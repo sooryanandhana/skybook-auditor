@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AuditProgress } from "./AuditProgress";
 import { PerformancePanel } from "./PerformancePanel";
+import { ReportDownload } from "./ReportDownload";
 import {
   SKIPPED_HEADING,
   SKIPPED_INTRO,
@@ -29,6 +30,7 @@ import {
   siteFileText,
   type FindingScope,
 } from "@/lib/report/siteFindingsView";
+import { exportableJobId } from "@/lib/report/pdfExport";
 import {
   AI_EXPLANATION_LABEL,
   AI_IMPACT_LABEL,
@@ -159,6 +161,16 @@ export default function HomePage() {
   const [explanation, setExplanation] = useState<AuditExplanationResponse | null>(null);
   const [explanationRunning, setExplanationRunning] = useState(false);
 
+  /**
+   * The finished audit's job id, held so the report can be asked for.
+   *
+   * It was already flowing through the polling chain as an argument. Keeping
+   * it in state is what lets a control rendered later name the audit it
+   * belongs to, and it is cleared when a new audit starts so a download button
+   * can never ask for the previous one's report.
+   */
+  const [jobId, setJobId] = useState<string | null>(null);
+
   const [result, setResult] = useState<AuditData | null>(null);
   const [error, setError] = useState<string | null>(null);
   // A failed audit can still have measured something — see AuditResponse.
@@ -186,6 +198,7 @@ export default function HomePage() {
     setPerformanceSkipped([]);
     setExplanation(null);
     setExplanationRunning(false);
+    setJobId(null);
 
     try {
       /*
@@ -210,6 +223,7 @@ export default function HomePage() {
         return;
       }
 
+      setJobId(started.jobId);
       void pollUntilDone(started.jobId, runId);
     } catch {
       if (runIdRef.current !== runId) return;
@@ -428,6 +442,15 @@ export default function HomePage() {
     }
   }
 
+  /*
+   * Which audit, if any, a report may be made from.
+   *
+   * Decided here because this is the one place that knows both halves of it:
+   * which audit is current, and whether it finished with something to typeset.
+   * An audit that is queued, running or failed leaves this null.
+   */
+  const reportJobId = exportableJobId(jobId, result !== null);
+
   return (
     <main className={styles.main}>
       <header className={styles.header}>
@@ -552,6 +575,7 @@ export default function HomePage() {
           performanceSkipped={performanceSkipped}
           explanation={explanation}
           explanationRunning={explanationRunning}
+          reportJobId={reportJobId}
         />
       )}
     </main>
@@ -612,6 +636,7 @@ function Results({
   performanceSkipped,
   explanation,
   explanationRunning,
+  reportJobId,
 }: {
   data: AuditData;
   /** The whole-site audit, when a crawl produced one. */
@@ -623,6 +648,8 @@ function Results({
   /** The server's answer about the writing. Null until it has answered. */
   explanation: AuditExplanationResponse | null;
   explanationRunning: boolean;
+  /** The audit a report may be made from, or null when none may be. */
+  reportJobId: string | null;
 }) {
   /*
    * ruleId -> the writing about that rule.
@@ -688,6 +715,15 @@ function Results({
           </div>
         </dl>
       </div>
+
+      {/*
+        Directly under the summary, because the document IS the deliverable —
+        a salesperson opens this to get something to hand over, and burying
+        the button below two screens of appendix would hide it. The findings
+        still come first among the report's own sections: this is an action,
+        not one of them.
+      */}
+      {reportJobId !== null && <ReportDownload jobId={reportJobId} />}
 
       {/*
         FINDINGS FIRST.

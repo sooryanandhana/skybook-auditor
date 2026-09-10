@@ -194,10 +194,42 @@ function fromEmailRecord<U>(
   return unknown("error", record.status, record.error);
 }
 
-/** A header the server either sent or did not. */
-function fromHeader(header: SecurityHeader): AIMeasurement<AIText> {
+/** What crosses in place of a server-identification header's text. */
+const ANNOUNCED = "announced";
+
+/**
+ * A header that names the server's software, as the fact and never the string.
+ *
+ * THE ONLY HEADERS THIS FILE READS A VALUE FROM, and now it does not. Server
+ * and X-Powered-By are the two whose VALUE is a fingerprint of somebody's
+ * infrastructure: a build identifier, a framework and its version, the things
+ * an attacker looks up in a vulnerability list. The client-facing document
+ * already withholds them, and this closes the second route into it -- prose
+ * written by a model that had been handed the string and could quote it.
+ *
+ * THE MODEL LOSES NOTHING IT NEEDS. What it can say about this is that the
+ * server announces its software and that announcing it is worth stopping. Which
+ * build it is changes no sentence worth writing.
+ *
+ * PRESENCE ONLY, WHICH IS WHAT EVERY OTHER HEADER ALREADY DOES. The seven
+ * protective headers cross as booleans under `AIReportHeaderPresence`, and its
+ * own comment says "presence only, not their text". These two were the
+ * exception; they are not any more.
+ *
+ * THE SHAPE IS UNCHANGED, DELIBERATELY. What travels through it is a word of
+ * ours rather than a word of the site's, and the contract's versioning rule is
+ * explicit that a version is bumped for a change of shape and never for a
+ * change in the values flowing through one. The `AIText` describes the string
+ * it actually carries, so nothing in it is false.
+ */
+function announcedSoftware(header: SecurityHeader): AIMeasurement<AIText> {
   if (!header.present || header.value === null) return confirmedAbsent("absent", null);
-  return measured("present", siteText(header.value));
+
+  return measured("present", {
+    text: ANNOUNCED,
+    truncated: false,
+    originalLength: ANNOUNCED.length,
+  });
 }
 
 /** A value the page either declares or does not. */
@@ -537,8 +569,8 @@ function toSecurityMeasurements(security: SecurityData): AIReportSecurityMeasure
     cookies: toCookies(security),
     // A count. The form addresses themselves stay behind.
     insecureFormCount: security.insecureFormActions.length,
-    serverHeader: fromHeader(security.serverHeader),
-    poweredByHeader: fromHeader(security.poweredByHeader),
+    serverHeader: announcedSoftware(security.serverHeader),
+    poweredByHeader: announcedSoftware(security.poweredByHeader),
   };
 }
 

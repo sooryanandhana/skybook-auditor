@@ -1658,3 +1658,93 @@ test("the browser still receives every note, marked or not", () => {
   assert.equal(row?.note, "max-age=15552000");
   assert.equal(row?.rawHeaderNote, true);
 });
+
+// ---------------------------------------------------------------------------
+// The announced-software row: on screen and in a document
+//
+// The measurement is one measurement. What differs is who is reading it: a
+// person auditing the site needs to see what is being given away, and a
+// document that leaves the building and gets forwarded does not.
+// ---------------------------------------------------------------------------
+
+/** The whole row, not just its value, since the document reads a second field. */
+const securityRow = (security: SecurityData, label: string) =>
+  securityFacts(security).find((row) => row.label === label);
+
+test("a document is told to withhold the announced software, and told what to say", () => {
+  const row = securityRow(
+    fullSecurity({ serverHeader: header("internal-nginx-build-4417") }),
+    "Server software announced",
+  );
+
+  assert.ok(row);
+  assert.equal(row.value, "internal-nginx-build-4417", "the screen still shows what was measured");
+  assert.match(row.documentValue ?? "", /Announced/, "and the document says the fact");
+  assert.ok(
+    !(row.documentValue ?? "").includes("internal-nginx-build-4417"),
+    "without the string itself",
+  );
+});
+
+test("both headers are withheld together, not one of the two", () => {
+  /*
+   * The screen joins them, so a document taking the first half of a joined
+   * value would leak the other. There is one replacement for the row.
+   */
+  const row = securityRow(
+    fullSecurity({
+      serverHeader: header("internal-nginx-build-4417"),
+      poweredByHeader: header("SecretFramework/9.9"),
+    }),
+    "Server software announced",
+  );
+
+  assert.ok(row);
+  assert.equal(row.value, "internal-nginx-build-4417 · SecretFramework/9.9");
+  for (const value of ["internal-nginx-build-4417", "SecretFramework/9.9"]) {
+    assert.ok(!(row.documentValue ?? "").includes(value), `${value} is withheld`);
+  }
+});
+
+test("the X-Powered-By header alone is enough to withhold the row", () => {
+  const row = securityRow(
+    fullSecurity({ poweredByHeader: header("SecretFramework/9.9") }),
+    "Server software announced",
+  );
+
+  assert.ok(row);
+  assert.equal(row.value, "SecretFramework/9.9", "still measured and still on screen");
+  assert.ok(row.documentValue !== undefined, "and still withheld from a document");
+});
+
+test("a server that announced nothing has nothing to withhold", () => {
+  /*
+   * A reader of a clean site's report must not be told a value is being kept
+   * back when there is none, so the row reads the same in both places.
+   */
+  const row = securityRow(fullSecurity(), "Server software announced");
+
+  assert.ok(row);
+  assert.equal(row.value, "— not announced —");
+  assert.equal(row.documentValue, undefined);
+});
+
+test("no other security row asks a document to print something different", () => {
+  /*
+   * ONE ROW, NOT A NEW HABIT. The policy headers stay as they are: their values
+   * are directives a reader checks our verdict against, not a fingerprint of
+   * somebody's build, and narrowing them is a separate decision nobody made.
+   */
+  const narrowed = securityFacts(
+    fullSecurity({
+      serverHeader: header("internal-nginx-build-4417"),
+      xFrameOptions: header("SAMEORIGIN"),
+      referrerPolicy: header("strict-origin-when-cross-origin"),
+    }),
+  ).filter((row) => row.documentValue !== undefined);
+
+  assert.deepEqual(
+    narrowed.map((row) => row.label),
+    ["Server software announced"],
+  );
+});

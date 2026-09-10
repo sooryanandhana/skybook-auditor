@@ -77,6 +77,25 @@ export interface FactRow {
  */
 export interface SecurityFactRow extends FactRow {
   readonly rawHeaderNote?: true;
+  /**
+   * What a client-facing document prints instead of `value`, when the value
+   * itself is the server's own words.
+   *
+   * THE SAME RULE AS `rawHeaderNote`, ONE FIELD OVER. That mark exists because
+   * a note can be a header quoted verbatim; this exists because a VALUE can be
+   * too, and the mark never reached it. The row that announces the server's
+   * software is the case: on screen the software string is the point, and in a
+   * document that is forwarded on it is a fingerprint of somebody's
+   * infrastructure printed for no reason.
+   *
+   * IT CARRIES THE REPLACEMENT RATHER THAN JUST A MARK, so the decision about
+   * what a reader sees stays here with the rest of the report's wording. A
+   * renderer handed a mark would have to invent a sentence, which is a renderer
+   * deciding whether something is sensitive.
+   *
+   * Absent when the value is safe to print, which is every other row.
+   */
+  readonly documentValue?: string;
 }
 
 /** A measurement that was looked for and genuinely is not there. */
@@ -1293,11 +1312,34 @@ export function securityFacts(security: SecurityData): SecurityFactRow[] {
       : undefined,
   });
 
+  /*
+   * WHAT IS ANNOUNCED, AND ON SCREEN WHAT IT SAYS.
+   *
+   * The fact is a real one and worth reporting: a server that names its
+   * software and version tells every visitor which published vulnerabilities to
+   * try. The results page shows the string, because a person auditing the site
+   * needs to see what is being given away.
+   *
+   * A CLIENT-FACING DOCUMENT GETS THE FACT WITHOUT THE STRING. It is forwarded,
+   * printed and left on desks, and reproducing somebody's build identifier in
+   * it serves nobody -- the reader needs to know the software is announced, not
+   * which build it is. `documentValue` is what the PDF prints instead.
+   */
+  const announced = [security.serverHeader.value, security.poweredByHeader.value]
+    .filter(Boolean)
+    .join(" · ");
+
   rows.push({
     label: "Server software announced",
-    value:
-      [security.serverHeader.value, security.poweredByHeader.value].filter(Boolean).join(" · ") ||
-      "— not announced —",
+    value: announced || "— not announced —",
+    /*
+     * Nothing to withhold when nothing was announced, so the row reads the same
+     * in both places and a reader is not told a value is being kept back when
+     * there is none.
+     */
+    ...(announced === ""
+      ? {}
+      : { documentValue: "Announced — the value is withheld from this report" }),
   });
 
   return rows;

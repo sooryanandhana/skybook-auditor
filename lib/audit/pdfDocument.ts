@@ -571,13 +571,21 @@ function contentSection(data: AuditData): PdfFactSection {
  *
  * The notes that survive are not header text: cookie names and flags, which
  * the audit never captures a value for, and addresses the crawl measured.
+ *
+ * ONE VALUE IS NARROWED THE SAME WAY. The row announcing the server's software
+ * carries the header text in its VALUE rather than its note, so the mark above
+ * never reached it and the build identifier of somebody's infrastructure was
+ * printed in a document that gets forwarded. The shared builder now supplies
+ * what a document should say instead, and this takes it. Nothing here decides
+ * which values are sensitive -- that decision, and the wording, stay with the
+ * rest of the report's words.
  */
 function securitySection(security: AuditData["security"]): PdfFactSection {
   return {
     heading: "Security",
     facts: securityFacts(security).map((row) => ({
       label: row.label,
-      value: row.value,
+      value: row.documentValue ?? row.value,
       note: row.rawHeaderNote ? undefined : row.note,
     })),
   };

@@ -665,9 +665,20 @@ export interface AIReportSecurityMeasurements {
   readonly cookies: AIReportCookies;
   /** How many forms submit to a plain HTTP address. Their addresses do not cross. */
   readonly insecureFormCount: number;
-  /** The Server header's text. Short, and the disclosure is the finding. */
+  /**
+   * WHETHER the server announced its software, never which software.
+   *
+   * The value is a word of ours rather than the header's text. These two are
+   * the only headers whose contents are a fingerprint of somebody's
+   * infrastructure -- a build identifier, a framework and its version -- and a
+   * model handed the string could quote it into prose that a client-facing
+   * document then prints. The disclosure is the point; the build is not.
+   *
+   * `AIReportHeaderPresence` above already draws this line for every
+   * protective header. These two were the exception and no longer are.
+   */
   readonly serverHeader: AIMeasurement<AIText>;
-  /** The X-Powered-By header's text, for the same reason. */
+  /** Whether X-Powered-By was sent, never its text, for the same reason. */
   readonly poweredByHeader: AIMeasurement<AIText>;
 }
 

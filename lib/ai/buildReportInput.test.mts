@@ -2932,3 +2932,124 @@ test("the validator still refuses an explanation for a finding that was not sent
   assert.equal(checked.rejected.length, 1);
   assert.equal(checked.rejected[0].ruleId, "rule.020");
 });
+
+// ---------------------------------------------------------------------------
+// The two headers that name the server's software
+//
+// Every other header already crosses as presence alone. These two carried
+// their text until the client-facing document was narrowed, at which point
+// the prose a model writes became the remaining way for a build identifier to
+// reach a report. They cross as the fact now, and the fact is all a model can
+// usefully say about them.
+// ---------------------------------------------------------------------------
+
+/** The two values the PDF tests also use, so one leak is one failing suite. */
+const FINGERPRINTS = ["internal-nginx-build-4417", "SecretFramework/9.9"] as const;
+
+const auditAnnouncing = (server: string | null, poweredBy: string | null) =>
+  result({
+    data: auditData({
+      security: security({ serverHeader: header(server), poweredByHeader: header(poweredBy) }),
+    }),
+  });
+
+test("the Server header's text never crosses to a model", () => {
+  const input = buildAIReportInput(auditAnnouncing("internal-nginx-build-4417", null));
+
+  assert.equal(input.measurements.security.serverHeader.state, "measured", "still measured");
+  assert.ok(!JSON.stringify(input).includes("internal-nginx-build-4417"), "and not anywhere in it");
+});
+
+test("the X-Powered-By header's text never crosses to a model", () => {
+  const input = buildAIReportInput(auditAnnouncing(null, "SecretFramework/9.9"));
+
+  assert.equal(input.measurements.security.poweredByHeader.state, "measured", "still measured");
+  assert.ok(!JSON.stringify(input).includes("SecretFramework/9.9"), "and not anywhere in it");
+});
+
+test("neither crosses when both were sent, and the whole input is searched", () => {
+  /*
+   * THE WHOLE SERIALISED INPUT, because this is exactly what the request
+   * carries: the prompt builder sends `JSON.stringify(input)` and nothing else.
+   * A value absent from the field it came from and present elsewhere would
+   * still reach the model.
+   */
+  const serialised = JSON.stringify(
+    buildAIReportInput(auditAnnouncing("internal-nginx-build-4417", "SecretFramework/9.9")),
+  );
+
+  for (const value of FINGERPRINTS) {
+    assert.ok(!serialised.includes(value), `${value} does not cross`);
+  }
+});
+
+test("a model is still told the software was announced", () => {
+  // Withholding the string must not become withholding the fact: the
+  // disclosure is the thing worth writing about.
+  const both = buildAIReportInput(
+    auditAnnouncing("internal-nginx-build-4417", "SecretFramework/9.9"),
+  ).measurements.security;
+
+  for (const measurement of [both.serverHeader, both.poweredByHeader]) {
+    assert.equal(measurement.knowledge, "value");
+    assert.equal(measurement.state, "measured");
+    assert.equal(measurement.sourceState, "present");
+  }
+});
+
+test("a server that announced nothing is still confirmed absent, not unknown", () => {
+  /*
+   * The distinction the whole contract rests on. "We looked and there is none"
+   * is the only state that lets anything say the header is missing, and
+   * narrowing the value must not have blurred it into "we do not know".
+   */
+  const neither = buildAIReportInput(auditAnnouncing(null, null)).measurements.security;
+
+  for (const measurement of [neither.serverHeader, neither.poweredByHeader]) {
+    assert.equal(measurement.knowledge, "confirmed-absent");
+    assert.equal(measurement.state, "absent");
+  }
+});
+
+test("the value that crosses describes itself honestly", () => {
+  /*
+   * `AIText` promises `originalLength` is the length of the string it carries.
+   * It carries our word now, so the number is that word's length -- not the
+   * header's, which would be a measurement of something not present.
+   */
+  const measurement = buildAIReportInput(auditAnnouncing("internal-nginx-build-4417", null))
+    .measurements.security.serverHeader;
+
+  assert.equal(measurement.knowledge, "value");
+  if (measurement.knowledge !== "value") return;
+
+  assert.equal(measurement.value.truncated, false);
+  assert.equal(measurement.value.originalLength, measurement.value.text.length);
+});
+
+test("no other security header's text crosses either", () => {
+  /*
+   * Pins the boundary rather than this one change. Every protective header
+   * already crossed as a boolean, and a future field carrying one verbatim
+   * would fail here rather than in a client's report.
+   */
+  const serialised = JSON.stringify(
+    buildAIReportInput(
+      result({
+        data: auditData({
+          security: security({
+            xFrameOptions: header("SAMEORIGIN"),
+            xContentTypeOptions: header("nosniff"),
+            referrerPolicy: header("strict-origin-when-cross-origin"),
+            serverHeader: header("internal-nginx-build-4417"),
+            poweredByHeader: header("SecretFramework/9.9"),
+          }),
+        }),
+      }),
+    ).measurements.security,
+  );
+
+  for (const value of [...FINGERPRINTS, "SAMEORIGIN", "strict-origin-when-cross-origin"]) {
+    assert.ok(!serialised.includes(value), `${value} does not cross`);
+  }
+});

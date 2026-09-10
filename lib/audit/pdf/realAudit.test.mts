@@ -411,31 +411,66 @@ test("header names and policy header contents stay out of the document", async (
   }
 });
 
-test("the announced server software IS carried, under its own label", async () => {
+test("the fact that server software is announced survives; the string does not", async () => {
   /*
-   * PINNED AS A QUESTION, NOT AS AN APPROVAL.
+   * SETTLED, AND NO LONGER A QUESTION.
    *
-   * This row's value is the verbatim contents of the Server and X-Powered-By
-   * headers. It is not a secret -- it is what the site announces to every
-   * visitor -- and announcing software versions is itself a security finding a
-   * report should be able to make, which is presumably why the row exists and
-   * why the results page shows it.
+   * This row used to carry the verbatim contents of the Server and
+   * X-Powered-By headers, and an earlier version of this test pinned that as a
+   * question rather than an approval: 7A §22 excludes "response headers in raw
+   * form" without qualifying it, the projection already stripped three other
+   * rows for that reason, and it stripped them by a mark on the NOTE while this
+   * was raw header text in a VALUE.
    *
-   * But 7A §22 excludes "response headers in raw form" without qualifying it,
-   * and the projection already strips three other rows for exactly that
-   * reason. It strips them by a mark on the NOTE; this is raw header text in a
-   * VALUE, so the mark never applies. That inconsistency is real and the
-   * decision is the product owner's, not this test's.
+   * The decision was made: a client-facing document reports that the software
+   * is announced and does not reproduce which build it is. The fact is the part
+   * a reader can act on; the string is a fingerprint of somebody's
+   * infrastructure in a document that gets forwarded.
    *
-   * So this asserts the behaviour as it stands rather than blessing it. If the
-   * row is later stripped, this test is what says the change was deliberate.
+   * THE MEASUREMENT IS UNCHANGED. The audit still reads both headers and the
+   * results page still shows them, because a person auditing the site needs to
+   * see what is being given away. Only the document is narrower.
    */
   const audit = await runRealAudit({ requestedUrl: "https://user:hunter2@example.com/", site: HOSTILE });
   const facts = documentFor(audit).measured.flatMap((section) => section.facts);
   const banner = facts.find((fact) => fact.label === "Server software announced");
 
-  assert.ok(banner, "the row exists");
-  assert.ok(banner.value.includes("internal-nginx-build-4417"), "and carries the header verbatim");
+  assert.ok(banner, "the row exists, so the fact is still reported");
+  assert.match(banner.value, /Announced/, "and says the software is announced");
+  assert.ok(!banner.value.includes("internal-nginx-build-4417"), "without the Server value");
+  assert.ok(!banner.value.includes("SecretFramework/9.9"), "or the X-Powered-By value");
+});
+
+test("no announced software string reaches the document model or the rendered file", async () => {
+  /*
+   * THE WHOLE DOCUMENT, NOT THE ONE ROW. A value excluded from the field it was
+   * found in and present three sections later is not excluded. This searches
+   * the serialised model and then the text of the finished PDF, which is the
+   * only artefact a client actually receives.
+   */
+  const audit = await runRealAudit({ requestedUrl: "https://user:hunter2@example.com/", site: HOSTILE });
+  const document = documentFor(audit);
+
+  const model = JSON.stringify(document);
+  const text = extractText(await renderPdf(document));
+
+  for (const value of ["internal-nginx-build-4417", "SecretFramework/9.9"]) {
+    assert.ok(!model.includes(value), `${value} is not in the document model`);
+    assert.ok(!text.includes(value), `${value} is not in the rendered file`);
+  }
+});
+
+test("a site announcing nothing reads the same as it always did", async () => {
+  /*
+   * The row is not told to withhold a value that does not exist. A reader of a
+   * clean site's report must not be left wondering what was kept back.
+   */
+  const audit = await runRealAudit({ requestedUrl: "https://example.com/", site: ORDINARY });
+  const facts = documentFor(audit).measured.flatMap((section) => section.facts);
+  const banner = facts.find((fact) => fact.label === "Server software announced");
+
+  assert.ok(banner, "the row still exists");
+  assert.ok(!banner.value.includes("withheld"), "and says nothing about withholding");
 });
 
 test("cookie names may appear, because a flag on one is a finding", async () => {
@@ -532,4 +567,53 @@ test("the affected sample is capped and says that it is", async () => {
     capped.reach?.includes(String(document.coverage.facts.length > 0 ? 61 : 61)),
     "while the reach still reports the true total",
   );
+});
+
+test("a model is never handed the announced software, so it cannot quote it", async () => {
+  /*
+   * THE SECOND ROUTE INTO THE DOCUMENT, CLOSED AT ITS SOURCE.
+   *
+   * Withholding these values from the deterministic rows left one way in: the
+   * contract handed the strings to a model, validated prose is rendered into
+   * the PDF, and the validator checks prose for length and for addresses the
+   * audit did not measure -- not for a build identifier it was itself given.
+   *
+   * So the defence is not downstream filtering, which would make a model
+   * responsible for its own containment. The values do not enter the request.
+   * This asserts that on the real audit, against the whole serialised input,
+   * because `JSON.stringify(input)` is exactly what the request carries.
+   */
+  const audit = await runRealAudit({ requestedUrl: "https://user:hunter2@example.com/", site: HOSTILE });
+  const sentToModel = JSON.stringify(buildAIReportInput(audit));
+
+  for (const value of ["internal-nginx-build-4417", "SecretFramework/9.9"]) {
+    assert.ok(!sentToModel.includes(value), `${value} is not in what a model receives`);
+  }
+});
+
+test("the model is still told the software is announced", async () => {
+  // Withholding the string must not become withholding the fact.
+  const audit = await runRealAudit({ requestedUrl: "https://user:hunter2@example.com/", site: HOSTILE });
+  const security = buildAIReportInput(audit).measurements.security;
+
+  assert.equal(security.serverHeader.state, "measured");
+  assert.equal(security.poweredByHeader.state, "measured");
+});
+
+test("commentary built from this audit still passes the real validator unchanged", async () => {
+  /*
+   * The validator was not touched, and this proves it still approves prose
+   * about rules that genuinely fired. `commentaryFor` fails the test outright
+   * if the validator refuses, so reaching a document at all is the assertion.
+   */
+  const audit = await runRealAudit({ requestedUrl: "https://user:hunter2@example.com/", site: HOSTILE });
+  const document = documentFor(audit, commentaryFor(audit));
+
+  assert.ok(document.summary.ai !== null, "the commentary reached the document");
+
+  // And the finished file still carries neither string, with commentary in it.
+  const text = extractText(await renderPdf(document));
+  for (const value of ["internal-nginx-build-4417", "SecretFramework/9.9"]) {
+    assert.ok(!text.includes(value), `${value} is not in the rendered file`);
+  }
 });

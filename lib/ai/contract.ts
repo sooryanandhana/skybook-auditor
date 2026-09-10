@@ -136,6 +136,32 @@ export const MAX_DECLARED_URL_LENGTH = CRAWLER_MAX_URL_LENGTH;
 /** How many entries any bounded list of measured values may carry. */
 export const MAX_LIST_ITEMS = 10;
 
+/**
+ * How many findings a model may be asked to write about.
+ *
+ * OURS, NOT THE PROVIDER'S. Nothing Google publishes states a limit of twenty
+ * or of any other number; their documentation says only that "very large or
+ * deeply nested schemas may be rejected" and gives no threshold. What was
+ * measured is that requests carrying twenty findings are answered and requests
+ * carrying twenty-one are not, reproducibly, across two models and at two
+ * payload sizes -- and that a byte-identical twenty-finding request is refused
+ * when a schema naming twenty-one rules is attached to it. This is therefore a
+ * safeguard chosen against observed behaviour, not a documented constraint, and
+ * it must never be described as one.
+ *
+ * IT BOUNDS WHAT IS ASKED, AND NOTHING ELSE. The audit still measures, grades
+ * and reports every finding it makes. This decides how many of them a model is
+ * asked to write a paragraph about, which is the only thing that ever depended
+ * on the number.
+ *
+ * WHY THE CAP IS HERE AND NOT AT THE PROVIDER. Waiting for a refusal would mean
+ * a whole audit's commentary is lost on the sites that most need it, and it
+ * would put an undocumented number in somebody else's server in charge of what
+ * this application does. It is applied where the request is composed, before
+ * one exists.
+ */
+export const MAX_EXPLAINED_FINDINGS = 20;
+
 // ---------------------------------------------------------------------------
 // Text written by the audited site
 // ---------------------------------------------------------------------------

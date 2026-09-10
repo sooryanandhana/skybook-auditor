@@ -75,6 +75,7 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
         partial: false,
         rejectedCount: 0,
         rejectedNote: null,
+        coverageNote: null,
       },
     },
     siteFindings: {

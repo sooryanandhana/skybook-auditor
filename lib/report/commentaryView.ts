@@ -57,3 +57,35 @@ export function rejectedNote(count: number): string | null {
     ? "1 explanation was not usable and was left out."
     : `${count} explanations were not usable and were left out.`;
 }
+
+/**
+ * What to say when more findings were made than were sent to be written about.
+ *
+ * THE SAME READER PROBLEM AS `rejectedNote`, and answered the same way. Someone
+ * who counts thirty findings and twenty explanations is entitled to know why,
+ * and to be told before they wonder. Nothing is invented to fill the gap: a
+ * finding without commentary keeps its evidence, its remediation and its
+ * severity, all of which were measured rather than written.
+ *
+ * IT DOES NOT BLAME THE PROVIDER, and this is deliberate. No documented limit
+ * of twenty exists; the number is a safeguard this application chose against
+ * behaviour it measured. A sentence implying Google publishes such a limit
+ * would be a confident claim about somebody else's service made on no evidence,
+ * which is the kind of sentence this project exists not to write. So it says
+ * what was done and does not explain itself.
+ *
+ * THE SECOND HALF IS THE IMPORTANT HALF. It states that the report is complete,
+ * because the risk in the first half is a reader concluding that the audit
+ * stopped at twenty.
+ *
+ * Null when every finding was sent, so a complete audit shows no sentence
+ * rather than one accounting for nothing.
+ */
+export function coverageNote(totalFindings: number, explainedFindings: number): string | null {
+  if (totalFindings <= explainedFindings) return null;
+
+  return (
+    `AI commentary covers the ${explainedFindings} highest-priority findings. ` +
+    "Every finding the audit made is listed in this report."
+  );
+}

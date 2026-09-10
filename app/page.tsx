@@ -30,6 +30,7 @@ import {
   siteFileText,
   type FindingScope,
 } from "@/lib/report/siteFindingsView";
+import { MAX_EXPLAINED_FINDINGS } from "@/lib/ai/contract";
 import { exportableJobId } from "@/lib/report/pdfExport";
 import {
   AI_EXPLANATION_LABEL,
@@ -37,6 +38,7 @@ import {
   AI_PROVENANCE,
   AI_RECOMMENDATION_LABEL,
   AI_SUMMARY_HEADING,
+  coverageNote,
   rejectedNote,
 } from "@/lib/report/commentaryView";
 import {
@@ -742,7 +744,13 @@ function Results({
         itself, so the concatenation is not — FindingsSection reorders them by
         the severity it was given. Ordering by a severity is not deciding one.
       */}
-      <AiSummaryPanel answer={explanation} running={explanationRunning} />
+      <AiSummaryPanel
+        answer={explanation}
+        running={explanationRunning}
+        findingCount={
+          (siteResult?.site.findings ?? data.findings).length + performanceFindings.length
+        }
+      />
 
       <FindingsSection
         /*
@@ -1107,9 +1115,12 @@ function FindingExplanation({ explanation }: { explanation: AIExplanation }) {
 function AiSummaryPanel({
   answer,
   running,
+  findingCount,
 }: {
   answer: AuditExplanationResponse | null;
   running: boolean;
+  /** How many findings are on the page, so any without commentary are accounted for. */
+  findingCount: number;
 }) {
   if (running || answer === null) {
     return (
@@ -1145,6 +1156,8 @@ function AiSummaryPanel({
 
   if (answer.executiveSummary.trim() === "") return null;
 
+  const coverage = coverageNote(findingCount, MAX_EXPLAINED_FINDINGS);
+
   return (
     <section className={styles.aiPanel}>
       <p className={styles.aiPanelHeading}>{AI_SUMMARY_HEADING}</p>
@@ -1152,6 +1165,12 @@ function AiSummaryPanel({
       <p className={styles.aiPanelNote}>
         {AI_PROVENANCE}
         {answer.partial && ` ${rejectedNote(answer.rejectedCount) ?? ""}`}
+        {/*
+          Said for the same reason the dropped-entry sentence is: a reader who
+          counts the findings and counts the explanations should find the
+          difference already accounted for.
+        */}
+        {coverage !== null && ` ${coverage}`}
       </p>
     </section>
   );

@@ -18,11 +18,14 @@
  */
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { buildAIReportInput } from "./buildReportInput.ts";
+import { buildAIReportInput, selectForCommentary } from "./buildReportInput.ts";
+import { buildExplanationRequest } from "./gemini/prompt.ts";
+import { validateExplanations } from "./validateExplanations.ts";
 import {
   AI_CONTRACT_VERSION,
   MAX_DECLARED_URL_LENGTH,
   MAX_EVIDENCE_LENGTH,
+  MAX_EXPLAINED_FINDINGS,
   MAX_LIST_ITEMS,
   MAX_SAMPLE_URL_LENGTH,
   MAX_SAMPLE_URLS,
@@ -2681,4 +2684,251 @@ test("the contract cannot hold both answers about robots.txt at once", () => {
       "coverage saying it was unreadable while the measurement calls it absent",
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// How many findings a model is asked about
+//
+// The audit keeps every finding it makes. These are about the ONE list that is
+// bounded: the one inside the request. A finding that is not on it still has
+// its severity, its evidence, its remediation and its affected count, because
+// all four were measured here rather than written over there.
+// ---------------------------------------------------------------------------
+
+/**
+ * `count` findings in the order the aggregator would have left them: worst
+ * first, then by rule id. Built that way rather than shuffled, because a
+ * shuffled list would be testing a sort this function deliberately does not do.
+ */
+function manyFindings(count: number): Finding[] {
+  const severities = ["critical", "high", "medium"] as const;
+
+  return Array.from({ length: count }, (_, index) => {
+    const severity = severities[Math.floor((index * severities.length) / count)];
+    return pageFinding({
+      id: `rule.${String(index).padStart(3, "0")}`,
+      severity,
+      title: `Finding ${index}`,
+    });
+  });
+}
+
+const auditOf = (findings: Finding[]) =>
+  result({ site: { findings, skippedChecks: [], evaluatedPages: 12 } });
+
+test("an audit with no findings asks about none", () => {
+  assert.equal(buildAIReportInput(auditOf([])).findings.length, 0);
+});
+
+test("an audit with one finding asks about it", () => {
+  const input = buildAIReportInput(auditOf(manyFindings(1)));
+
+  assert.equal(input.findings.length, 1);
+  assert.equal(input.findings[0].ruleId, "rule.000");
+});
+
+test("an audit at exactly the cap asks about all of them", () => {
+  // The boundary itself: twenty is allowed, and nothing is dropped at twenty.
+  const input = buildAIReportInput(auditOf(manyFindings(MAX_EXPLAINED_FINDINGS)));
+
+  assert.equal(input.findings.length, MAX_EXPLAINED_FINDINGS);
+});
+
+test("one finding past the cap drops exactly one, and it is the last", () => {
+  const findings = manyFindings(MAX_EXPLAINED_FINDINGS + 1);
+  const input = buildAIReportInput(auditOf(findings));
+
+  assert.equal(input.findings.length, MAX_EXPLAINED_FINDINGS);
+  assert.deepEqual(
+    input.findings.map((f) => f.ruleId),
+    findings.slice(0, MAX_EXPLAINED_FINDINGS).map((f) => f.id),
+  );
+  assert.ok(
+    !input.findings.some((f) => f.ruleId === findings[MAX_EXPLAINED_FINDINGS].id),
+    "the one past the cap is not in the request",
+  );
+});
+
+test("an audit far past the cap still asks about exactly the cap", () => {
+  for (const count of [21, 30, 50, 128]) {
+    assert.equal(
+      buildAIReportInput(auditOf(manyFindings(count))).findings.length,
+      MAX_EXPLAINED_FINDINGS,
+      `${count} findings`,
+    );
+  }
+});
+
+test("the ones asked about are the most serious, worst first", () => {
+  const input = buildAIReportInput(auditOf(manyFindings(60)));
+  const severities = input.findings.map((f) => f.severity);
+
+  assert.ok(severities.every((s) => s === "critical"), "sixty findings, the top twenty are critical");
+});
+
+test("the selection is a prefix and never a re-sort", () => {
+  /*
+   * THE ORDER IS THE AGGREGATOR'S. Every list reaching the builder has already
+   * been sorted worst first and then by rule id, three times over, and sorting
+   * again here would be a fourth copy of that comparison. So a list handed over
+   * in an order the aggregator could not have produced is passed through in
+   * that order rather than quietly corrected -- which is what makes the
+   * selection deterministic rather than opinionated.
+   */
+  const findings = [
+    pageFinding({ id: "b.medium", severity: "medium" }),
+    pageFinding({ id: "a.critical", severity: "critical" }),
+  ];
+
+  assert.deepEqual(
+    buildAIReportInput(auditOf(findings)).findings.map((f) => f.ruleId),
+    ["b.medium", "a.critical"],
+  );
+});
+
+test("ties are broken the same way twice, and the same way every time", () => {
+  // Twenty-five findings all of one severity: the tie-break is the rule id, and
+  // it is the aggregator's, so two builds of one audit are byte-identical.
+  const findings = Array.from({ length: 25 }, (_, index) =>
+    pageFinding({ id: `tie.${String(index).padStart(3, "0")}`, severity: "high" }),
+  );
+
+  const first = buildAIReportInput(auditOf(findings));
+  const second = buildAIReportInput(auditOf(findings));
+
+  assert.equal(serialise(first), serialise(second));
+  assert.deepEqual(
+    first.findings.map((f) => f.ruleId),
+    findings.slice(0, MAX_EXPLAINED_FINDINGS).map((f) => f.id),
+  );
+});
+
+test("the audit keeps every finding it made", () => {
+  /*
+   * THE POINT OF THE WHOLE CHANGE. Fifty findings were measured and fifty are
+   * still there afterwards; the report, the page and the PDF all read this list
+   * rather than the request's.
+   */
+  const audit = auditOf(manyFindings(50));
+
+  const input = buildAIReportInput(audit);
+
+  assert.equal(input.findings.length, MAX_EXPLAINED_FINDINGS, "twenty are asked about");
+  assert.equal(audit.site.findings.length, 50, "fifty are still in the audit");
+  assert.deepEqual(
+    audit.site.findings.map((f) => f.id),
+    manyFindings(50).map((f) => f.id),
+    "and in the order they were in",
+  );
+});
+
+test("selecting reads the audit's list and never writes to it", () => {
+  const findings = manyFindings(50);
+  const before = JSON.stringify(findings);
+
+  buildAIReportInput(auditOf(findings));
+
+  assert.equal(JSON.stringify(findings), before, "the array handed in is unchanged");
+});
+
+test("selectForCommentary is a plain bound and holds nothing back below it", () => {
+  // Tested directly as well, because it is the safeguard: a caller that gets a
+  // shorter list than it handed over, below the cap, is a caller losing data.
+  for (const count of [0, 1, 7, 19, 20]) {
+    const items = Array.from({ length: count }, (_, i) => i);
+    assert.deepEqual(selectForCommentary(items), items, `${count} items`);
+  }
+
+  assert.equal(selectForCommentary(Array.from({ length: 21 }, (_, i) => i)).length, 20);
+});
+
+/*
+ * The bound, followed all the way to the request.
+ *
+ * COMPOSED ON PURPOSE, and it is the only test here that reaches into the
+ * provider folder. The cap is applied in this file; whether it survives to the
+ * object that leaves the machine depends on the request builder and the schema
+ * builder as well, and a guarantee about the request has to be asserted on the
+ * request.
+ */
+test("no request built from a large audit offers a model more than the cap", () => {
+  const request = buildExplanationRequest(buildAIReportInput(auditOf(manyFindings(60))));
+
+  const sent = JSON.parse(request.input) as { findings: { ruleId: string }[] };
+  const explanations = (
+    request.response_format.schema as {
+      properties: {
+        explanations: {
+          maxItems: number;
+          items: { properties: { ruleId: { enum?: readonly string[] } } };
+        };
+      };
+    }
+  ).properties.explanations;
+
+  // Both halves grow with the finding count. A cap bounding one and not the
+  // other would be no cap at all.
+  assert.equal(sent.findings.length, MAX_EXPLAINED_FINDINGS, "the audit in the request");
+  assert.equal(
+    explanations.items.properties.ruleId.enum?.length,
+    MAX_EXPLAINED_FINDINGS,
+    "the ids the model may name",
+  );
+  assert.equal(explanations.maxItems, MAX_EXPLAINED_FINDINGS, "how many it may write");
+});
+
+test("a finding past the cap has no id a model could name", () => {
+  const request = buildExplanationRequest(buildAIReportInput(auditOf(manyFindings(60))));
+  const offered = (
+    request.response_format.schema as {
+      properties: {
+        explanations: { items: { properties: { ruleId: { enum?: readonly string[] } } } };
+      };
+    }
+  ).properties.explanations.items.properties.ruleId.enum;
+
+  assert.ok(offered?.includes("rule.019"), "the twentieth is offered");
+  assert.ok(!offered?.includes("rule.020"), "the twenty-first is not");
+});
+
+test("the validator still refuses an explanation for a finding that was not sent", () => {
+  /*
+   * UNCHANGED BEHAVIOUR, PINNED HERE because the cap creates a new way to reach
+   * it: a rule that genuinely fired, and that the reader can see on the page,
+   * is now not a rule this request is about. The validator's answer is the same
+   * one it always gave -- it checks against the findings it was handed, and it
+   * is still the authority over what may be shown.
+   */
+  const input = buildAIReportInput(auditOf(manyFindings(60)));
+
+  const checked = validateExplanations(input, {
+    version: AI_CONTRACT_VERSION,
+    executiveSummary:
+      "This site has a number of issues across security and search visibility, each described beside the measurement that produced it.",
+    explanations: [
+      {
+        ruleId: "rule.000",
+        explanation: "The check named by this rule did not pass on the pages that were read.",
+        businessImpact: "Visitors and search engines may be affected on the affected pages.",
+        recommendation: "Apply the fix described beside this finding and run the audit again.",
+      },
+      {
+        ruleId: "rule.020",
+        explanation: "The check named by this rule did not pass on the pages that were read.",
+        businessImpact: "Visitors and search engines may be affected on the affected pages.",
+        recommendation: "Apply the fix described beside this finding and run the audit again.",
+      },
+    ],
+  });
+
+  assert.equal(checked.ok, true);
+  if (!checked.ok) return;
+
+  assert.deepEqual(
+    checked.accepted.explanations.map((entry) => entry.ruleId),
+    ["rule.000"],
+    "only the one that was sent",
+  );
+  assert.equal(checked.rejected.length, 1);
+  assert.equal(checked.rejected[0].ruleId, "rule.020");
 });

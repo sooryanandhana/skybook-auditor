@@ -17,8 +17,10 @@ import {
   AI_PROVENANCE,
   AI_RECOMMENDATION_LABEL,
   AI_SUMMARY_HEADING,
+  coverageNote,
   rejectedNote,
 } from "./commentaryView.ts";
+import { MAX_EXPLAINED_FINDINGS } from "../ai/contract.ts";
 
 test("the provenance sentence says who wrote the prose and who measured the numbers", () => {
   // 7A §9 requires exactly this claim beside the executive summary.
@@ -85,4 +87,55 @@ test("the results page uses these constants rather than its own copies", () => {
   }
 
   assert.ok(page.includes("commentaryView"), "it imports them instead");
+});
+
+// ---------------------------------------------------------------------------
+// The sentence that accounts for findings nobody wrote about
+// ---------------------------------------------------------------------------
+
+test("nothing is said when every finding was written about", () => {
+  // A sentence accounting for zero missing explanations invites a reader to
+  // look for a gap that is not there.
+  assert.equal(coverageNote(0, 20), null);
+  assert.equal(coverageNote(1, 20), null);
+  assert.equal(coverageNote(19, 20), null);
+  assert.equal(coverageNote(20, 20), null);
+});
+
+test("the sentence appears as soon as one finding was left out", () => {
+  const note = coverageNote(21, 20);
+
+  assert.ok(note !== null);
+  assert.match(note, /20 highest-priority findings/);
+});
+
+test("it says the report is complete, which is the half that matters", () => {
+  /*
+   * The risk in the first sentence is a reader concluding the audit stopped at
+   * twenty. The second sentence exists to close that, and a test pins it so it
+   * cannot be trimmed for space later.
+   */
+  const note = coverageNote(60, 20) ?? "";
+
+  assert.match(note, /Every finding the audit made is listed in this report\./);
+});
+
+test("it never blames the provider or claims a documented limit", () => {
+  /*
+   * No published limit of twenty exists. The number is a safeguard this
+   * application chose against behaviour it measured, and a sentence implying
+   * otherwise would be a confident claim about somebody else's service made on
+   * no evidence.
+   */
+  const note = coverageNote(60, 20) ?? "";
+
+  for (const forbidden of ["Google", "Gemini", "AI service", "limit", "provider", "refus", "error"]) {
+    assert.ok(!note.includes(forbidden), `must not mention ${forbidden}`);
+  }
+});
+
+test("the cap it quotes is the one the request actually uses", () => {
+  // Two numbers with the same meaning is how a report ends up telling a client
+  // something the code does not do.
+  assert.match(coverageNote(60, MAX_EXPLAINED_FINDINGS) ?? "", new RegExp(`${MAX_EXPLAINED_FINDINGS} highest-priority`));
 });

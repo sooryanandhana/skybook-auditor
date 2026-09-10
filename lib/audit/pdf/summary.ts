@@ -56,7 +56,9 @@ function aiPanel(summary: PdfSummary, labels: PdfLabels): string {
    * counts the explanations should find the difference already accounted for.
    * Nothing is invented to fill the gap.
    */
-  const note = ai.rejectedNote === null ? labels.aiProvenance : `${labels.aiProvenance} ${ai.rejectedNote}`;
+  const note = [labels.aiProvenance, ai.rejectedNote, ai.coverageNote]
+    .filter((sentence) => sentence !== null && sentence !== "")
+    .join(" ");
 
   return (
     `<div class="ai">` +

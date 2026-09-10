@@ -33,6 +33,7 @@ import {
   AI_CONTRACT_VERSION,
   MAX_DECLARED_URL_LENGTH,
   MAX_EVIDENCE_LENGTH,
+  MAX_EXPLAINED_FINDINGS,
   MAX_LIST_ITEMS,
   MAX_SAMPLE_URL_LENGTH,
   MAX_SAMPLE_URLS,
@@ -780,6 +781,31 @@ function toSiteContext(data: AuditData): AIReportSiteContext {
 }
 
 /**
+ * The findings a model is asked to write about, worst first.
+ *
+ * THE ORDER IS THE AGGREGATOR'S AND IS NOT RE-DERIVED HERE. Every list that
+ * reaches this function has already been sorted worst first and then by rule
+ * id -- by the rule runner, by the aggregator, and again by `withSpeed` after
+ * the speed findings are merged in. Sorting again would be a fifth copy of that
+ * comparison, and this project has watched two copies of one rule drift before.
+ * Taking a prefix of a list that is already in priority order is the whole of
+ * the selection, and it is what the PDF does with the same list.
+ *
+ * SO THE TWENTY ARE THE TWENTY MOST SERIOUS, and ties are broken exactly the
+ * way they are broken everywhere else the reader sees them. Nothing here reads
+ * a severity to compare it, invents a score, or asks anything to rank them.
+ *
+ * NOTHING IS LOST BY THIS. It returns a view for one request. The audit's own
+ * findings are untouched, and the report, the page and the PDF all read that
+ * list rather than this one.
+ */
+export function selectForCommentary<T>(findings: readonly T[]): readonly T[] {
+  return findings.length <= MAX_EXPLAINED_FINDINGS
+    ? findings
+    : findings.slice(0, MAX_EXPLAINED_FINDINGS);
+}
+
+/**
  * Everything an AI provider is given about one audited website.
  *
  * READS `site.findings`, NOT `data.findings`. The site summary is the
@@ -801,7 +827,12 @@ export function buildAIReportInput(result: SiteAuditResult): AIReportInput {
     version: AI_CONTRACT_VERSION,
     site: toSiteContext(data),
     coverage: toCoverage(result.crawl, result.site.evaluatedPages, data.timedOut),
-    findings: result.site.findings.map(toFinding),
+    /*
+     * THE MOST SERIOUS TWENTY, and every one of them still appears in the
+     * report. See `selectForCommentary`: this bounds what is ASKED, and the
+     * audit's own list is neither read for a decision nor changed.
+     */
+    findings: selectForCommentary(result.site.findings).map(toFinding),
     notEvaluated: result.site.skippedChecks.map(toSkipped),
     measurements: {
       page: toPageMeasurements(data.fetch.finalUrl, data.seo),

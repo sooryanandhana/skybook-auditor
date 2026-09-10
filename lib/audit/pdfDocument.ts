@@ -24,6 +24,7 @@
 import { withSpeed } from "./withSpeed.ts";
 import { withoutCredentials } from "../collector/url.ts";
 import type { AuditJobStore } from "../jobs/auditJobs.ts";
+import { MAX_EXPLAINED_FINDINGS } from "../ai/contract.ts";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
 import {
   METRIC_NOT_REPORTED,
@@ -78,6 +79,7 @@ import {
   AI_PROVENANCE,
   AI_RECOMMENDATION_LABEL,
   AI_SUMMARY_HEADING,
+  coverageNote,
   rejectedNote,
 } from "../report/commentaryView.ts";
 import {
@@ -196,6 +198,15 @@ export interface PdfAiSummary {
    * writes.
    */
   readonly rejectedNote: string | null;
+  /**
+   * What to say when more findings were made than were written about, or null.
+   *
+   * Beside `rejectedNote` because it answers the same reader: both explain a
+   * difference between the number of findings and the number of explanations,
+   * and a document that accounted for one gap and not the other would be worse
+   * than one that accounted for neither.
+   */
+  readonly coverageNote: string | null;
 }
 
 /**
@@ -632,6 +643,7 @@ export function buildPdfDocument(
           partial: job.explanation.partial,
           rejectedCount: job.explanation.rejected.length,
           rejectedNote: rejectedNote(job.explanation.rejected.length),
+          coverageNote: coverageNote(findings.length, MAX_EXPLAINED_FINDINGS),
         }
       : null;
 

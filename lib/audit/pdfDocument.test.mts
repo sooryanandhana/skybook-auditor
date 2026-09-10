@@ -1062,3 +1062,95 @@ test("a healthy certificate adds no problem row", () => {
 
   assert.equal(facts?.facts.find((f) => f.label === "Certificate problem"), undefined);
 });
+
+// ---------------------------------------------------------------------------
+// A big audit keeps every finding, whatever the model was asked about
+// ---------------------------------------------------------------------------
+
+/** Fifty findings, in the order the aggregator leaves them: worst first, then id. */
+function fiftyFindings(): Finding[] {
+  return Array.from({ length: 50 }, (_, index) => ({
+    id: `rule.${String(index).padStart(3, "0")}`,
+    title: `Finding ${index}`,
+    category: "seo",
+    severity: index < 25 ? "critical" : "high",
+    evidence: "The check named by this rule did not pass on the pages that were read.",
+    remediation: "Apply the fix described beside this finding and run the audit again.",
+    scope: "page",
+    affected: [{ url: "https://example.com/a", evidence: "The check did not pass." }],
+    affectedCount: 3,
+    evaluatedPages: 128,
+  })) as unknown as Finding[];
+}
+
+test("a fifty-finding audit puts all fifty in the document", () => {
+  /*
+   * THE INVARIANT THE COMMENTARY CAP MUST NOT BREAK. Twenty findings were sent
+   * to a model. Fifty were measured, and fifty are in the document, each with
+   * the severity, evidence, remediation and reach the audit gave it.
+   */
+  const audit = storedAudit();
+  const { store, jobId } = jobWith("completed", {
+    ...audit,
+    site: { ...audit.site, findings: fiftyFindings() },
+  } as SiteAuditResult);
+
+  store.setExplanation(jobId, explained(["rule.000", "rule.001"]));
+  const document = documentFor(store, jobId);
+
+  const inDocument = [
+    ...document.siteFindings.groups.flatMap((group) => group.findings),
+    ...document.pageFindings.groups.flatMap((group) => group.findings),
+  ];
+
+  assert.equal(inDocument.length, 50, "every measured finding is in the document");
+  assert.equal(
+    inDocument.filter((finding) => finding.commentary !== null).length,
+    2,
+    "and only the ones a validated answer covered carry commentary",
+  );
+});
+
+test("a finding with no commentary keeps everything that was measured about it", () => {
+  const audit = storedAudit();
+  const { store, jobId } = jobWith("completed", {
+    ...audit,
+    site: { ...audit.site, findings: fiftyFindings() },
+  } as SiteAuditResult);
+
+  store.setExplanation(jobId, explained(["rule.000"]));
+  const document = documentFor(store, jobId);
+
+  const plain = [
+    ...document.siteFindings.groups.flatMap((group) => group.findings),
+    ...document.pageFindings.groups.flatMap((group) => group.findings),
+  ].find((finding) => finding.ruleId === "rule.049");
+
+  assert.ok(plain !== undefined, "the fiftieth finding is in the document");
+  assert.equal(plain.commentary, null, "with no commentary");
+  assert.equal(plain.severity, "high", "and its measured severity");
+  assert.ok(plain.evidence.length > 0, "its evidence");
+  assert.ok(plain.remediation.length > 0, "and its remediation");
+});
+
+test("the summary accounts for the findings nobody wrote about", () => {
+  const audit = storedAudit();
+  const { store, jobId } = jobWith("completed", {
+    ...audit,
+    site: { ...audit.site, findings: fiftyFindings() },
+  } as SiteAuditResult);
+
+  store.setExplanation(jobId, explained(["rule.000"]));
+  const document = documentFor(store, jobId);
+
+  assert.ok(document.summary.ai !== null);
+  assert.match(document.summary.ai.coverageNote ?? "", /highest-priority findings/);
+  assert.match(document.summary.ai.coverageNote ?? "", /Every finding the audit made/);
+});
+
+test("a small audit says nothing about coverage, because nothing was left out", () => {
+  const { store, jobId } = jobWith();
+  store.setExplanation(jobId, explained());
+
+  assert.equal(documentFor(store, jobId).summary.ai?.coverageNote, null);
+});

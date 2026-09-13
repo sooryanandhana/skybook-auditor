@@ -33,6 +33,7 @@ import {
 } from "@/lib/report/siteFindingsView";
 import { MAX_EXPLAINED_FINDINGS } from "@/lib/ai/contract";
 import { exportableJobId } from "@/lib/report/pdfExport";
+import { withoutCredentials } from "@/lib/collector/url";
 import {
   AI_EXPLANATION_LABEL,
   AI_IMPACT_LABEL,
@@ -727,8 +728,16 @@ function Results({
         still come first among the report's own sections: this is an action,
         not one of them.
       */}
+      {/*
+        THE ADDRESS THE REPORT'S COVER CARRIES, not the raw one measured. The
+        projection that builds the document strips any credentials from it, and
+        the send panel fingerprints whatever it is given here. Handing over the
+        raw value would make the two disagree for a site reached through a
+        credential-bearing URL, and every send of that report would be refused
+        as unconfirmed with nothing on screen to explain why.
+      */}
       {reportJobId !== null && (
-        <ReportDownload jobId={reportJobId} auditedUrl={data.fetch.finalUrl} />
+        <ReportDownload jobId={reportJobId} auditedUrl={withoutCredentials(data.fetch.finalUrl)} />
       )}
 
       {/*

@@ -3,12 +3,10 @@
 import { useState } from "react";
 import {
   CONFIRM_LABEL,
-  NOT_CONNECTED,
   NO_RECIPIENT,
   PREVIEW_LABEL,
   SEND_HEADING,
   SEND_INTRO,
-  SEND_LABEL,
   UNCONFIRMED,
   canConfirm,
   canSend,
@@ -18,24 +16,39 @@ import {
   type SendContent,
   type SendGate,
 } from "@/lib/report/sendGate";
+import {
+  SEND_READY,
+  confirmBox,
+  runSend,
+  sendButton,
+  sentNote,
+  type SendState,
+} from "@/lib/report/sendRequest";
 import styles from "./page.module.css";
 
 /**
- * Reading what a client would receive, and saying so.
+ * Reading what a client would receive, agreeing to it, and sending it.
  *
- * WHAT THIS COMPONENT DECIDES: nothing. It holds two pieces of state and
- * renders them. What counts as a confirmation, what silently voids one, and
- * whether a send would be permitted are all in lib/report/sendGate.ts, where a
- * test can reach them without a browser.
+ * WHAT THIS COMPONENT DECIDES: nothing. It holds three pieces of state and
+ * renders them. What counts as a confirmation, what silently voids one and
+ * whether a send would be permitted are in lib/report/sendGate.ts; what one
+ * press of the button does, which fields cross to the server and whether a
+ * second press may start a second send are in lib/report/sendRequest.ts. Both
+ * are reachable by a test without a browser.
  *
  * THE CONFIRMATION LIVES INSIDE THE PREVIEW, deliberately. It cannot be given
  * without the content being on screen, and having it on screen gives nothing:
  * the rule that decides whether a send is permitted is never told the preview
  * was opened, because it has no parameter for it.
  *
- * NOTHING HERE SENDS ANYTHING and there is nowhere for it to send. There is no
- * provider, no address book and no request. The send control exists so the gate
- * in front of it can be built and tested before there is something behind it.
+ * THERE IS NO SECOND CONFIRMATION. The tick is the whole attestation and the
+ * fingerprint behind it is what the server checks; adding an "are you sure"
+ * on top would be a dialogue people learn to dismiss, and it would not be the
+ * thing that gates the send.
+ *
+ * IT KNOWS NOTHING ABOUT MAIL. No provider, no key, no sending address — the
+ * request it makes carries the job, the address typed here, the confirmation
+ * and the three report fields, and the server supplies everything else.
  */
 export function ReportSend({
   jobId,
@@ -56,7 +69,7 @@ export function ReportSend({
   const [recipient, setRecipient] = useState("");
   const [open, setOpen] = useState(false);
   const [gate, setGate] = useState<SendGate>(UNCONFIRMED);
-  const [note, setNote] = useState<string | null>(null);
+  const [state, setState] = useState<SendState>(SEND_READY);
 
   const content: SendContent = {
     jobId,
@@ -70,6 +83,8 @@ export function ReportSend({
   const preview = previewFor(content);
   const ready = canConfirm(content);
   const sendable = canSend(gate, content);
+  const button = sendButton(state, sendable);
+  const box = confirmBox(state, ready);
 
   return (
     <section className={styles.send} aria-labelledby="report-send-heading">
@@ -84,6 +99,7 @@ export function ReportSend({
           className={styles.exportInput}
           type="email"
           value={recipient}
+          disabled={state.kind === "sending"}
           onChange={(event) => {
             setRecipient(event.target.value);
             /*
@@ -91,9 +107,13 @@ export function ReportSend({
              * would refuse the send anyway, since the fingerprint no longer
              * matches; clearing it here is so the tick a person is looking at
              * agrees with that.
+             *
+             * The outcome is cleared too: a report that went to one address
+             * has not gone to the one now in the box, and leaving "Sent to…"
+             * under a different address would say it had.
              */
             setGate(withdraw());
-            setNote(null);
+            setState(SEND_READY);
           }}
         />
       </label>
@@ -138,10 +158,10 @@ export function ReportSend({
             <input
               type="checkbox"
               checked={sendable}
-              disabled={!ready}
+              disabled={box.disabled}
               onChange={(event) => {
                 setGate(event.target.checked ? confirm(content) : withdraw());
-                setNote(null);
+                if (state.kind === "failed") setState(SEND_READY);
               }}
             />
             <span>{CONFIRM_LABEL}</span>
@@ -153,16 +173,35 @@ export function ReportSend({
             <button
               className={styles.button}
               type="button"
-              onClick={() => setNote(NOT_CONNECTED)}
-              disabled={!sendable}
+              onClick={() =>
+                void runSend(state, gate, content, { onState: setState, onGate: setGate })
+              }
+              disabled={button.disabled}
+              aria-busy={state.kind === "sending"}
             >
-              {SEND_LABEL}
+              {button.label}
             </button>
           </div>
 
-          {note !== null && (
-            <p className={styles.exportProblem} role="status">
-              {note}
+          {/*
+            Announced, not merely shown. This is the one action on the page
+            with no undo, so the line saying it happened names the address it
+            happened to.
+          */}
+          {state.kind === "sent" && (
+            <p className={styles.exportDone} role="status">
+              {sentNote(state.recipient)}
+            </p>
+          )}
+
+          {/*
+            The server's own sentence, unchanged. It was written for a person
+            and it already guarantees that nothing internal is in it — no key,
+            no provider reply, no request id.
+          */}
+          {state.kind === "failed" && (
+            <p className={styles.exportProblem} role="alert">
+              {state.message}
             </p>
           )}
         </div>

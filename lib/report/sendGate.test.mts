@@ -15,7 +15,6 @@ import test from "node:test";
 import fs from "node:fs";
 import {
   CONFIRM_LABEL,
-  NOT_CONNECTED,
   SEND_INTRO,
   UNCONFIRMED,
   canConfirm,
@@ -210,11 +209,18 @@ test("two previews of the same content are the same preview", () => {
 
 const read = (relative: string) => fs.readFileSync(new URL(relative, import.meta.url), "utf8");
 
-test("nothing here can send anything", () => {
+test("neither the gate nor the panel sends anything itself", () => {
   /*
    * ASSERTED AGAINST THE SOURCE, because the strongest form of this is that
    * the code has no way to. A test that watched for a request would only prove
    * this one path did not make one today.
+   *
+   * WHAT THIS CLAIMS NOW THAT SENDING WORKS. Not that nothing can be sent --
+   * the button does send -- but that neither of these two files is where it
+   * happens. The gate decides whether a send is permitted; the panel renders
+   * that and calls `runSend`. The one request lives in `sendRequest.ts`, where
+   * it is tested, and the provider lives on the server, where it is the only
+   * thing that knows a key exists.
    */
   const source = read("./sendGate.ts") + read("../../app/ReportSend.tsx");
 
@@ -268,11 +274,17 @@ test("the wording a person agrees to says what they are agreeing to", () => {
   assert.match(CONFIRM_LABEL, /ready to send/);
 });
 
-test("the panel says outright that nothing is connected yet", () => {
-  // A button labelled Send that cannot send is worse than no button.
-  assert.match(SEND_INTRO, /not connected/);
-  assert.match(NOT_CONNECTED, /nothing was sent/);
-  assert.match(NOT_CONNECTED, /report above is unaffected/);
+test("the panel says outright that the button sends, and that nothing undoes it", () => {
+  /*
+   * THIS TEST USED TO PIN THE OPPOSITE, and rightly: while the button was
+   * inert, a panel that did not say so was a trap. Now that it sends, saying
+   * "not connected" would be the trap — a person who believes the button does
+   * nothing will press it to find out. Both versions pin the same rule, which
+   * is that this sentence must be true.
+   */
+  assert.ok(!SEND_INTRO.includes("not connected"), "it is connected now");
+  assert.match(SEND_INTRO, /no unsend/);
+  assert.match(SEND_INTRO, /emails the report/);
 });
 
 test("a confirmation does not survive a change the preview happens to hide", () => {

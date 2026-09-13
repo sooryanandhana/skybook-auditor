@@ -7,9 +7,11 @@
  * else's business. So the last step before a client sees anything is a person
  * saying they have read it.
  *
- * NOTHING HERE SENDS ANYTHING, and there is no provider to send with. This
- * decides when a send would be permitted. The sending itself is a later piece
- * of work, and it must ask this first.
+ * NOTHING HERE SENDS ANYTHING, AND THAT IS STILL TRUE NOW THAT SENDING WORKS.
+ * This module decides when a send would be permitted and composes what a
+ * person reads before agreeing to one. Asking the server is `sendRequest`
+ * beside it, which calls `canSend` rather than deciding again, and the server
+ * recomputes the same fingerprint a third time before anything leaves.
  *
  * SEPARATED FROM THE PAGE for the reason every decision in this project is:
  * the panel is a client component and cannot be imported by the unit tests
@@ -49,15 +51,21 @@ export interface EmailPreview {
 export const SEND_HEADING = "Send to the client";
 
 /**
- * What this panel is, and what it is not yet.
+ * What this panel does, said before it is used rather than after.
  *
- * SAID PLAINLY, because a button labelled Send that cannot send is worse than
- * no button. Email delivery is not connected, and a person about to hand a
- * laptop to a colleague should not have to find that out by pressing it.
+ * IT NOW SENDS. This sentence used to say that email delivery was not
+ * connected, which was the honest thing to say while the button did nothing.
+ * Saying it now would be worse than saying nothing: a person who believes the
+ * button is inert will press it to find out.
+ *
+ * THE SECOND CLAUSE IS THE POINT. Every other mistake this project can make is
+ * recoverable by running the audit again. This one reaches somebody else's
+ * inbox, and a salesperson about to press it should read that here rather than
+ * learn it afterwards.
  */
 export const SEND_INTRO =
-  "Read what the client would receive, then confirm. Nothing is sent by this " +
-  "application yet — email delivery is not connected.";
+  "Read what the client would receive, then confirm. Pressing send emails the " +
+  "report to the address below — there is no unsend.";
 
 /** The attestation. Its wording is the whole safeguard, so a test pins it. */
 export const CONFIRM_LABEL =
@@ -65,11 +73,6 @@ export const CONFIRM_LABEL =
 
 export const PREVIEW_LABEL = "Preview the email";
 export const SEND_LABEL = "Send to the client";
-
-/** Said when the send action is pressed. There is nothing behind it yet. */
-export const NOT_CONNECTED =
-  "Email delivery is not connected yet, so nothing was sent. The report above " +
-  "is unaffected.";
 
 /** Said when there is no address to send to. */
 export const NO_RECIPIENT = "Enter the client's email address to continue.";

@@ -33,7 +33,9 @@ import { SEND_FAILURE_MESSAGES, fakeProvider } from "../email/provider.ts";
 import { RESEND_API_KEY_VARIABLE, RESEND_ENDPOINT } from "../email/resend.ts";
 import { codeOnly } from "../email/provider.test.mts";
 import { MAX_SENDS, SEND_RATE_LIMITED, resetSendLimit, sendAllowance } from "../email/sendLimit.ts";
-import { contentFingerprint } from "../report/sendGate.ts";
+import { contentFingerprint, type SendContent } from "../report/sendGate.ts";
+import { sendBody } from "../report/sendRequest.ts";
+import { withoutCredentials } from "../collector/url.ts";
 import { SESSION_COOKIE, signSession } from "../auth/session.ts";
 import type { AuditJobStore } from "../jobs/auditJobs.ts";
 
@@ -1000,4 +1002,71 @@ test("no test in this file reached the network", async () => {
    */
   assert.deepEqual(reachedNetwork, [], "something opened a connection");
   assert.equal(globalThis.fetch, tripwire, "and every test put the global back");
+});
+
+
+/* ---------------------------------------------------------------------------
+   The browser's half and this route's half, meeting
+
+   EVERY OTHER TEST IN THIS FILE BUILDS ITS CONFIRMATION WITH `confirmationFor`,
+   which reads the audited address out of the DOCUMENT -- the server's own side
+   of the agreement. That proves this route is self-consistent and proves
+   nothing about the page, which reads that address from the audit result and
+   composes the request itself. If the two ever disagree about one string,
+   every send is refused as unconfirmed, the preview looks perfectly right, and
+   nothing on screen explains why.
+
+   So these build the request the way the BROWSER builds it, out of the modules
+   the browser actually imports, and hand it to the route unchanged.
+   --------------------------------------------------------------------------- */
+
+/** The address the page hands the send panel, derived as `AuditPage` derives it. */
+const pageAuditedUrl = () => withoutCredentials(REAL_AUDIT.data.fetch.finalUrl);
+
+test("a confirmation composed in the browser is accepted by this route", async () => {
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const mail = fakeProvider();
+
+  const browserContent: SendContent = {
+    jobId,
+    recipient: `  ${RECIPIENT}  `,
+    auditedUrl: pageAuditedUrl(),
+    companyName: "Harbour Dental",
+    contactName: "Ana",
+    preparedBy: "Sam",
+  };
+
+  const result = await sendReportRoute(
+    request(sendBody(browserContent, contentFingerprint(browserContent))),
+    deps({ store, render: recordingRenderer().render, provider: mail.provider }),
+  );
+
+  assert.equal(result.ok, true, result.ok === false ? result.error : "");
+  assert.equal(mail.sent.length, 1, "the report reached the provider");
+  assert.equal(mail.sent[0].to, RECIPIENT, "trimmed on both sides, identically");
+});
+
+test("the address the page fingerprints is the address the cover carries", () => {
+  /*
+   * The same claim as a value rather than as a round trip, so a failure says
+   * which string differed rather than only that a send was refused.
+   */
+  const { store, jobId } = storeWith("completed");
+  const outcome = buildPdfDocument(jobId, store, {});
+
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+
+  assert.equal(pageAuditedUrl(), outcome.document.cover.auditedUrl);
+});
+
+test("no client-visible confirmation can carry a credential-bearing address", () => {
+  /*
+   * Measured, not assumed. Stripping is not a no-op, so if the page ever
+   * stopped stripping, the two sides would silently disagree for exactly the
+   * sites where the address must not be shown to a client in the first place.
+   */
+  assert.equal(withoutCredentials("https://user:pass@example.com/"), "https://example.com/");
+  assert.ok(!pageAuditedUrl().includes("@"), "and the address in play carries none");
 });

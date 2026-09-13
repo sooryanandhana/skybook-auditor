@@ -133,6 +133,7 @@ const ROUTES = [
   "../../app/api/audit/performance/route.ts",
   "../../app/api/audit/explain/route.ts",
   "../../app/api/audit/pdf/route.ts",
+  "../../app/api/report/send/route.ts",
 ];
 
 const read = (relative: string) => fs.readFileSync(new URL(relative, import.meta.url), "utf8");

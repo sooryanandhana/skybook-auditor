@@ -329,6 +329,108 @@
   max-width: 66ch;
 }
 
+/*
+  The recipient box, which is NOT the client-details box.
+
+  Those sit in a wrapping row and carry a flex basis so three of them share a
+  line. This one sits alone in a column, where the same basis is a HEIGHT and
+  left a 190-pixel gap under the label. The project has now made this mistake
+  twice in this panel; the rule is that a flex basis written for a row does
+  not travel into a column.
+*/
+.sendField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-width: 32rem;
+}
+/*
+  Sending, and the gate in front of it.
+
+  Set apart from the download above it by a rule rather than a second box:
+  it is the next step of the same panel, not a different subject. Quiet on
+  purpose, because the loud thing on this page should be the findings.
+*/
+.send {
+  border-top: 1px solid #d8e0ea;
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* The four things a send would use, sunk so they read as quoted content. */
+.preview {
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #f7fafd;
+  padding: 0.85rem 1rem;
+  margin-top: 0.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.previewFields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.previewFields dt {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #5b6779;
+  margin-bottom: 0.1rem;
+}
+
+.previewFields dd {
+  font-size: 0.88rem;
+  color: #16202e;
+  word-break: break-word;
+}
+
+/* The body as written, line breaks and all. */
+.previewBody {
+  font-size: 0.88rem;
+  color: #16202e;
+  line-height: 1.55;
+  max-width: 66ch;
+  white-space: pre-wrap;
+  border-top: 1px solid #dde5ef;
+  padding-top: 0.6rem;
+}
+
+/* The one deliberate act. Given room so it cannot be ticked in passing. */
+.confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  font-size: 0.88rem;
+  color: #16202e;
+  max-width: 66ch;
+  margin-top: 0.3rem;
+  cursor: pointer;
+}
+
+.confirm input {
+  margin-top: 0.2rem;
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  accent-color: var(--brand);
+}
+
+.confirm input:disabled {
+  cursor: not-allowed;
+}
+
+.confirm input:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
 /* ---------- Measured facts table ---------- */
 
 .facts {
@@ -844,8 +946,31 @@
 
   .summary,
   .finding,
-  .export {
+  .export,
+  .preview {
     border-color: #2a3448;
+  }
+
+  .send {
+    border-top-color: #2a3448;
+  }
+
+  .preview {
+    background: #131b27;
+  }
+
+  .previewBody {
+    border-top-color: #232c3d;
+  }
+
+  .previewFields dt {
+    color: #9aa7be;
+  }
+
+  .previewFields dd,
+  .previewBody,
+  .confirm {
+    color: #e6edf5;
   }
 
   .exportIntro,

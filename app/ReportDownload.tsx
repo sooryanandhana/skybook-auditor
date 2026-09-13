@@ -14,6 +14,7 @@ import {
   type ExportState,
   type PdfClientFields,
 } from "@/lib/report/pdfExport";
+import { ReportSend } from "./ReportSend";
 import styles from "./page.module.css";
 
 /**
@@ -35,7 +36,7 @@ import styles from "./page.module.css";
  * check, or go anywhere near a model — and it cannot, because the only thing
  * it imports is the one function that sends that one request.
  */
-export function ReportDownload({ jobId }: { jobId: string }) {
+export function ReportDownload({ jobId, auditedUrl }: { jobId: string; auditedUrl: string }) {
   /** What the salesperson has typed. Empty until they open the details. */
   const [fields, setFields] = useState<PdfClientFields>({});
   const [state, setState] = useState<ExportState>(EXPORT_READY);
@@ -113,6 +114,20 @@ export function ReportDownload({ jobId }: { jobId: string }) {
           {state.message}
         </p>
       )}
+
+      {/*
+        Under the download, because that is the order the work happens in: the
+        report is produced, a person reads it, and only then is there anything
+        to agree to. It is handed the same client details the report carries so
+        the preview cannot describe a different document.
+      */}
+      <ReportSend
+        jobId={jobId}
+        auditedUrl={auditedUrl}
+        companyName={fields.companyName}
+        contactName={fields.contactName}
+        preparedBy={fields.preparedBy}
+      />
     </section>
   );
 }

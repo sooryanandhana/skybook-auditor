@@ -448,15 +448,17 @@ test("the export module drags no renderer into the browser", () => {
 
 test("the download panel decides nothing for itself", () => {
   /*
-   * It may reach React, its stylesheet and this module, and nothing else. The
-   * point of the split is that everything a test needs to check is on this
-   * side of it.
+   * It may reach React, its stylesheet, this module and the panel it renders
+   * underneath itself, and nothing else. The point of the split is that
+   * everything a test needs to check is on this side of it, and a sibling
+   * component brings its own tests rather than moving a decision in here.
    */
   const imports = [...read("../../app/ReportDownload.tsx").matchAll(/from "([^"]+)"/g)].map(
     (match) => match[1],
   );
 
   assert.deepEqual([...new Set(imports)].sort(), [
+    "./ReportSend",
     "./page.module.css",
     "@/lib/report/pdfExport",
     "react",
@@ -471,8 +473,12 @@ test("the page shows the download only when there is a report to download", () =
     "the page decides it from both facts",
   );
   assert.ok(
-    source.includes("{reportJobId !== null && <ReportDownload jobId={reportJobId} />}"),
+    source.includes("{reportJobId !== null && ("),
     "and renders nothing when the answer is null",
+  );
+  assert.ok(
+    source.includes("<ReportDownload jobId={reportJobId}"),
+    "handing the panel the audit it is allowed to export",
   );
 });
 

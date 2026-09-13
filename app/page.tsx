@@ -725,7 +725,9 @@ function Results({
         still come first among the report's own sections: this is an action,
         not one of them.
       */}
-      {reportJobId !== null && <ReportDownload jobId={reportJobId} />}
+      {reportJobId !== null && (
+        <ReportDownload jobId={reportJobId} auditedUrl={data.fetch.finalUrl} />
+      )}
 
       {/*
         FINDINGS FIRST.

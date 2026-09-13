@@ -466,7 +466,7 @@ test("the download panel decides nothing for itself", () => {
 });
 
 test("the page shows the download only when there is a report to download", () => {
-  const source = read("../../app/page.tsx");
+  const source = read("../../app/AuditPage.tsx");
 
   assert.ok(
     source.includes("exportableJobId(jobId, result !== null)"),
@@ -483,7 +483,7 @@ test("the page shows the download only when there is a report to download", () =
 });
 
 test("a new audit does not leave the previous one's report on offer", () => {
-  const source = read("../../app/page.tsx");
+  const source = read("../../app/AuditPage.tsx");
   const submit = source.slice(source.indexOf("async function handleSubmit"));
 
   assert.ok(

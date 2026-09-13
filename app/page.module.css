@@ -119,6 +119,50 @@
   outline-offset: 2px;
 }
 
+/* ---------- Signing in and out ---------- */
+
+/*
+  The sign-in form. Narrower than the audit form above it, because two short
+  fields stretched across a wide page read as a mistake.
+*/
+.signIn {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  max-width: 24rem;
+}
+
+/*
+  Pushed to the far end of the brand row, so it sits at the edge of the page
+  rather than next to the name. Quiet: it is not something anybody came here
+  to do.
+*/
+.signOut {
+  margin-left: auto;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+  font-family: inherit;
+  color: #5b6779;
+  background: transparent;
+  border: 1px solid #d8e0ea;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.signOut:hover:not(:disabled) {
+  color: var(--brand);
+  border-color: var(--brand);
+}
+
+.signOut:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.signOut:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
 /* ---------- Notices ---------- */
 
 .placeholderNotice {
@@ -995,6 +1039,11 @@
 
   .progressLine {
     color: #9aa7be;
+  }
+
+  .signOut {
+    color: #9aa7be;
+    border-color: #2a3448;
   }
 
   .error {

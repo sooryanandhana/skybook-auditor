@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireSession, unauthorised } from "@/lib/auth/guard";
 import { pdfExportRoute } from "@/lib/api/pdfExportRoute";
 
 /**
@@ -19,6 +20,15 @@ import { pdfExportRoute } from "@/lib/api/pdfExportRoute";
 export const runtime = "nodejs";
 
 export async function POST(request: Request): Promise<Response> {
+  /*
+   * THE SECURITY BOUNDARY, not the page redirect. A request that never
+   * rendered a page never passed the sign-in, so every route asks for
+   * itself. The decision is in lib/auth/guard.ts and is tested there.
+   */
+  if (requireSession(request) === null) {
+    const refused = unauthorised();
+    return NextResponse.json(refused.body, { status: refused.status });
+  }
   const result = await pdfExportRoute(request);
 
   if (!result.ok) {

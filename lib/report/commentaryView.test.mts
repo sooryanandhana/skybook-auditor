@@ -70,7 +70,7 @@ test("the results page uses these constants rather than its own copies", () => {
    * copy. The needles are assembled here so this test cannot match itself.
    */
   const page = fs.readFileSync(
-    new URL("../../app/page.tsx", import.meta.url),
+    new URL("../../app/AuditPage.tsx", import.meta.url),
     "utf8",
   );
 

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireSession, unauthorised } from "@/lib/auth/guard";
 import { explainRoute } from "@/lib/api/auditRoutes";
 import type { AuditExplanationResponse } from "@/lib/types";
 
@@ -14,6 +15,15 @@ import type { AuditExplanationResponse } from "@/lib/types";
  * no path by which a page could reach a model directly.
  */
 export async function POST(request: Request): Promise<NextResponse<AuditExplanationResponse>> {
+  /*
+   * THE SECURITY BOUNDARY, not the page redirect. A request that never
+   * rendered a page never passed the sign-in, so every route asks for
+   * itself. The decision is in lib/auth/guard.ts and is tested there.
+   */
+  if (requireSession(request) === null) {
+    const refused = unauthorised();
+    return NextResponse.json(refused.body, { status: refused.status });
+  }
   const { status, body } = await explainRoute(request);
   return NextResponse.json(body, { status });
 }

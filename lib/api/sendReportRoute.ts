@@ -41,6 +41,7 @@ import {
   type OutgoingEmail,
 } from "../email/provider.ts";
 import { SEND_RATE_LIMITED, recordSend, sendAllowance } from "../email/sendLimit.ts";
+import { resendConfigured, resendProvider } from "../email/resend.ts";
 
 /** Where the verified sending address is read from. Never anything a caller typed. */
 export const FROM_VARIABLE = "SKYBOOK_MAIL_FROM";
@@ -73,7 +74,13 @@ export interface SendReportDeps extends SessionOptions {
   readonly store?: AuditJobStore;
   /** Swapped by tests so no test launches a browser it does not need. */
   readonly render?: typeof renderPdf;
-  /** The seam. There is no real one yet; tests pass a fake. */
+  /**
+   * The seam.
+   *
+   * PRODUCTION LEAVES THIS UNSET and gets the real adapter. Tests pass a fake,
+   * which is the whole reason the parameter exists: no test needs a key, and
+   * none can reach the service by forgetting one.
+   */
   readonly provider?: EmailProvider;
   /** Overrides the configured sending address. */
   readonly from?: string;
@@ -175,12 +182,20 @@ export async function sendReportRoute(
   const from = (deps.from ?? process.env[FROM_VARIABLE] ?? "").trim();
   if (from === "") return { ok: false, status: 503, error: NO_SENDER };
 
-  if (deps.provider === undefined) {
-    /*
-     * FAILS CLOSED WITH NO PROVIDER. There is no real one yet, and a route
-     * that quietly did nothing and reported success would be the worst
-     * possible version of this feature.
-     */
+  /*
+   * THE REAL ADAPTER UNLESS A TEST HANDED ONE IN.
+   *
+   * ASKED HERE RATHER THAN LEFT TO THE PROVIDER, and the reason is the line
+   * further down that drives a headless browser. The adapter refuses without
+   * a key perfectly well, but it would refuse AFTER a report had been
+   * typeset for a client who was never going to receive it. A server that
+   * cannot send should cost nothing to ask.
+   *
+   * FAILS CLOSED EITHER WAY. A route that quietly did nothing and reported
+   * success would be the worst possible version of this feature.
+   */
+  const provider = deps.provider ?? resendProvider();
+  if (deps.provider === undefined && !resendConfigured()) {
     return { ok: false, status: 503, error: SEND_FAILURE_MESSAGES["not-configured"] };
   }
 
@@ -271,7 +286,7 @@ export async function sendReportRoute(
   };
 
   // 9. One send. No loop, nothing calls this again, and the seam offers no retry.
-  const delivery = await deps.provider.send(email);
+  const delivery = await provider.send(email);
   if (!delivery.ok) {
     /*
      * 502 for the service's problems and 429 for its limit. Never the
@@ -279,7 +294,15 @@ export async function sendReportRoute(
      * sometimes the message itself, and none of that belongs in front of a
      * person or in a log.
      */
-    const status = delivery.failure === "rate-limited" ? 429 : 502;
+    /*
+     * 503 for "this server is not set up", which is what a missing,
+     * restricted or suspended key becomes. It is the same answer the early
+     * check gives, so a key that disappears between the two does not change
+     * what a person is told. 429 for the service's limit, 502 for its
+     * problems and for a message it would not accept.
+     */
+    const status =
+      delivery.failure === "not-configured" ? 503 : delivery.failure === "rate-limited" ? 429 : 502;
     return { ok: false, status, error: SEND_FAILURE_MESSAGES[delivery.failure] };
   }
 

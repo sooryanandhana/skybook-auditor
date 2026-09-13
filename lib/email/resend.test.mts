@@ -1,10 +1,11 @@
 /**
  * Tests for the adapter that actually sends.
  *
- * NOT ONE OF THESE REACHES THE NETWORK. Every test passes its own `fetch`,
- * which records what it was handed and answers from memory, so the suite can
- * exercise a service that would otherwise cost money and deliver mail to
- * somebody. The real `fetch` is never called and no key is needed.
+ * NOT ONE OF THESE REACHES THE NETWORK. Every test that sends passes its own
+ * `fetch`, which records what it was handed and answers from memory, so the
+ * suite can exercise a service that would otherwise cost money and deliver
+ * mail to somebody. The rest ask about configuration, which is a question and
+ * not a request. The real `fetch` is never called and no key is needed.
  *
  * WHAT IS WORTH TESTING HERE. Not that a POST can be made -- that is one line.
  * What matters is the mapping: which status becomes which of the five failures
@@ -15,7 +16,13 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import fs from "node:fs";
 import { codeOnly } from "./provider.test.mts";
-import { RESEND_API_KEY_VARIABLE, RESEND_ENDPOINT, failureFor, resendProvider } from "./resend.ts";
+import {
+  RESEND_API_KEY_VARIABLE,
+  RESEND_ENDPOINT,
+  failureFor,
+  resendConfigured,
+  resendProvider,
+} from "./resend.ts";
 import type { OutgoingEmail } from "./provider.ts";
 
 const KEY = "re_test_key_that_is_not_real_0123456789";
@@ -313,4 +320,82 @@ test("the seam is implemented rather than redesigned", async () => {
 
   assert.deepEqual(Object.keys(provider), ["send"]);
   assert.equal(typeof provider.send, "function");
+});
+
+/* ---------------------------------------------------------------------------
+   Whether this server can send at all
+
+   ASKED BEFORE ANYTHING IS BUILT. The adapter refuses without a key perfectly
+   well, but it refuses at the end -- after a headless browser has typeset a
+   report for a client who was never going to receive it. This is the cheap
+   question that stops that, and the only thing it may ever answer is yes or no.
+   --------------------------------------------------------------------------- */
+
+test("a key makes this server configured and a blank one does not", () => {
+  assert.equal(resendConfigured({ apiKey: KEY }), true);
+
+  for (const apiKey of ["", "   ", "\t\n"]) {
+    assert.equal(resendConfigured({ apiKey }), false, JSON.stringify(apiKey));
+  }
+});
+
+test("with no option given it reads the environment", () => {
+  const env = process.env as Record<string, string | undefined>;
+  const previous = env[RESEND_API_KEY_VARIABLE];
+
+  try {
+    delete env[RESEND_API_KEY_VARIABLE];
+    assert.equal(resendConfigured(), false, "no variable at all");
+
+    env[RESEND_API_KEY_VARIABLE] = "   ";
+    assert.equal(resendConfigured(), false, "a variable holding nothing");
+
+    env[RESEND_API_KEY_VARIABLE] = KEY;
+    assert.equal(resendConfigured(), true);
+  } finally {
+    if (previous === undefined) delete env[RESEND_API_KEY_VARIABLE];
+    else env[RESEND_API_KEY_VARIABLE] = previous;
+  }
+});
+
+test("asking carries no key back", () => {
+  /*
+   * A BOOLEAN, DELIBERATELY. Returning the key, a masked key, its length or a
+   * built client would each be a way for a caller to end up holding one, and
+   * the only caller is a route that must never see it.
+   */
+  const answer = resendConfigured({ apiKey: KEY });
+
+  assert.equal(typeof answer, "boolean");
+  assert.ok(!String(answer).includes(KEY));
+});
+
+test("it is the same reading the send itself does, so the two cannot disagree", () => {
+  /*
+   * Two separate readings of the key would let a route be told it was
+   * configured and then be refused by its own provider. There is one
+   * resolver: whatever makes this predicate false makes a send refuse without
+   * opening anything, and that is asserted rather than assumed.
+   */
+  const code = source();
+  assert.equal(
+    (code.match(/process\.env\[RESEND_API_KEY_VARIABLE\]/g) || []).length,
+    1,
+    "the environment is read in exactly one place",
+  );
+
+  for (const apiKey of ["", "   "]) {
+    assert.equal(resendConfigured({ apiKey }), false);
+  }
+});
+
+test("a configured server still refuses a send its own provider cannot make", async () => {
+  // The predicate answers "is there a key", never "will the next send work".
+  const { calls, fetchImpl } = recordingFetch(() => json({ message: "no" }, 500));
+
+  assert.equal(resendConfigured({ apiKey: KEY }), true);
+  const outcome = await resendProvider({ apiKey: KEY, fetchImpl }).send(EMAIL);
+
+  assert.equal(outcome.ok, false);
+  assert.equal(calls.length, 1);
 });

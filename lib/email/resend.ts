@@ -50,6 +50,29 @@ export interface ResendOptions {
   readonly timeoutMs?: number;
 }
 
+const resolveKey = (options: ResendOptions) =>
+  (options.apiKey ?? process.env[RESEND_API_KEY_VARIABLE] ?? "").trim();
+
+/**
+ * Whether this server can send at all, in a form that is safe to log.
+ *
+ * SHAPED LIKE `geminiAvailability` AND `credentialsAvailable`, because the
+ * project already has this idea twice and a third shape for it would be a
+ * third thing to learn. It carries no key and no client -- only whether there
+ * is one.
+ *
+ * WHY THE SEAM DOES NOT ANSWER THIS INSTEAD. The seam has one method on
+ * purpose, and every capability added to it is a capability the orchestration
+ * can start depending on. The caller that needs this needs it BEFORE it builds
+ * anything, so that a server with no key refuses without first driving a
+ * headless browser to typeset a report nobody will receive. That is a question
+ * about configuration, like the sending address beside it, and it is answered
+ * the same way.
+ */
+export function resendConfigured(options: ResendOptions = {}): boolean {
+  return resolveKey(options) !== "";
+}
+
 /**
  * What a status code means, in the seam's own vocabulary.
  *
@@ -115,7 +138,7 @@ function payload(email: OutgoingEmail) {
  * "configured or not" question out of every caller.
  */
 export function resendProvider(options: ResendOptions = {}): EmailProvider {
-  const key = (options.apiKey ?? process.env[RESEND_API_KEY_VARIABLE] ?? "").trim();
+  const key = resolveKey(options);
   const request = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? SEND_TIMEOUT_MS;
 

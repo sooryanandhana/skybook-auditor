@@ -1,12 +1,19 @@
 /**
  * Tests for sending a finished report to a client.
  *
- * ONE REAL AUDIT, ONE FAKE PROVIDER, NO NETWORK. The audit comes from the
- * 7C-6 harness with only the socket replaced, because a projection that reads
+ * ONE REAL AUDIT, AND NO NETWORK ANYWHERE. The audit comes from the 7C-6
+ * harness with only the socket replaced, because a projection that reads
  * twenty measurement blocks needs twenty measurement blocks and a hand-built
- * fixture would be a fixture grown until it stopped throwing. The provider is
- * the fake that ships beside the seam, so nothing here can reach a service and
- * no test needs a key.
+ * fixture would be a fixture grown until it stopped throwing.
+ *
+ * TWO KINDS OF TEST, AND THE DIFFERENCE MATTERS. Most hand in the fake
+ * provider that ships beside the seam, which is what makes them tests of this
+ * route's decisions rather than of an email service. The last section hands in
+ * nothing at all, so the route builds the real adapter the way production does
+ * -- against a fetch that answers from memory and a key that belongs to
+ * nobody. Neither kind needs a key and neither can reach a service; a tripwire
+ * installed over the global `fetch` proves the second claim rather than
+ * asserting it.
  *
  * THE INTERESTING TESTS ARE THE REFUSALS, and there are nine ways to be
  * refused. Every one of them has to leave the client's inbox untouched, which
@@ -23,6 +30,7 @@ import { createJobStore } from "../jobs/jobStore.ts";
 import { buildPdfDocument } from "../audit/pdfDocument.ts";
 import { runRealAudit } from "../audit/pdf/realAudit.fixture.mts";
 import { SEND_FAILURE_MESSAGES, fakeProvider } from "../email/provider.ts";
+import { RESEND_API_KEY_VARIABLE, RESEND_ENDPOINT } from "../email/resend.ts";
 import { codeOnly } from "../email/provider.test.mts";
 import { MAX_SENDS, SEND_RATE_LIMITED, resetSendLimit, sendAllowance } from "../email/sendLimit.ts";
 import { contentFingerprint } from "../report/sendGate.ts";
@@ -120,6 +128,82 @@ const deps = (extra: Record<string, unknown> = {}) => ({
   now: NOW,
   ...extra,
 });
+
+/* ---------------------------------------------------------------------------
+   Nothing in this file may reach the network
+
+   THE ROUTE BUILDS A REAL ADAPTER when no fake is handed in -- that is what
+   wiring means -- and a developer's machine may well have a key sitting in its
+   environment. A convention would not survive that; a tripwire does. Every
+   test below either hands in a fake provider or installs its own answering
+   fetch, and anything that does neither is caught here rather than costing
+   money and delivering mail to somebody.
+   --------------------------------------------------------------------------- */
+
+const env = process.env as Record<string, string | undefined>;
+
+/** Shaped like a key and belonging to nobody. No test needs a real one. */
+const FAKE_KEY = "re_not_a_real_key_0123456789";
+
+/** Every address any test opened. Read at the end of the file; must be empty. */
+const reachedNetwork: string[] = [];
+
+const tripwire = (async (input: RequestInfo | URL) => {
+  reachedNetwork.push(String(input));
+  throw new Error("a test reached the network");
+}) as unknown as typeof fetch;
+
+globalThis.fetch = tripwire;
+
+const accepted = (body: unknown = { id: "receipt-from-the-service" }, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+function restoreEnvironment(previousKey: string | undefined) {
+  globalThis.fetch = tripwire;
+  if (previousKey === undefined) delete env[RESEND_API_KEY_VARIABLE];
+  else env[RESEND_API_KEY_VARIABLE] = previousKey;
+}
+
+/**
+ * A server that is configured to send, whose fetch answers from memory.
+ *
+ * THE KEY IS SET AND THE SOCKET IS NOT. Together those let a test drive the
+ * production path -- no provider handed in, the route building its own -- and
+ * still see exactly what would have gone on the wire.
+ */
+function wiredResend(answer: () => Response | Promise<Response> = () => accepted()) {
+  const calls: { url: string; init: RequestInit | undefined }[] = [];
+  const previousKey = env[RESEND_API_KEY_VARIABLE];
+
+  env[RESEND_API_KEY_VARIABLE] = FAKE_KEY;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return answer();
+  }) as unknown as typeof fetch;
+
+  return { calls, restore: () => restoreEnvironment(previousKey) };
+}
+
+/**
+ * A server with no key, whatever this machine happens to have in its
+ * environment. The fetch is left as the tripwire on purpose: a send that is
+ * refused for want of configuration must not open anything at all.
+ */
+function unconfiguredResend() {
+  const previousKey = env[RESEND_API_KEY_VARIABLE];
+  delete env[RESEND_API_KEY_VARIABLE];
+
+  return { restore: () => restoreEnvironment(previousKey) };
+}
+
+/** The request body the wired adapter put on the wire. */
+const wireBody = (init: RequestInit | undefined) =>
+  JSON.parse(String(init?.body)) as {
+    from: string;
+    to: string;
+    subject: string;
+    attachments: { filename: string; content: string }[];
+  };
 
 /* ---------------------------------------------------------------------------
    The one path that sends
@@ -405,22 +489,32 @@ test("a server with no sending address configured refuses", async () => {
   assert.equal(mail.sent.length, 0);
 });
 
-test("a server with no provider refuses rather than quietly succeeding", async () => {
+test("a server that is not set up to send refuses rather than quietly succeeding", async () => {
   /*
-   * THE STATE THIS FEATURE IS IN TODAY. There is no real provider, and a route
-   * that reported success while doing nothing would be the worst possible
-   * version of it.
+   * NO PROVIDER HANDED IN AND NO KEY TO BUILD ONE WITH. A route that reported
+   * success while doing nothing would be the worst possible version of this
+   * feature.
+   *
+   * THE KEY IS CLEARED EXPLICITLY rather than assumed absent. This test used
+   * to pass because the machine running it happened to have no key, which
+   * meant it proved nothing on a machine that did -- and on that machine it
+   * would have opened a real connection to find out.
    */
   resetSendLimit();
   const { store, jobId } = storeWith("completed");
+  const resend = unconfiguredResend();
 
-  const result = await sendReportRoute(
-    request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
-    deps({ store, render: recordingRenderer().render }),
-  );
+  try {
+    const result = await sendReportRoute(
+      request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+      deps({ store, render: recordingRenderer().render }),
+    );
 
-  assert.equal(result.ok === false && result.status, 503);
-  assert.equal(result.ok === false && result.error, SEND_FAILURE_MESSAGES["not-configured"]);
+    assert.equal(result.ok === false && result.status, 503);
+    assert.equal(result.ok === false && result.error, SEND_FAILURE_MESSAGES["not-configured"]);
+  } finally {
+    resend.restore();
+  }
 });
 
 /* ---------------------------------------------------------------------------
@@ -482,10 +576,29 @@ test("sending starts no audit, crawl, speed check or model request", async () =>
   }
 });
 
-test("sending stores nothing and names no provider", async () => {
+test("sending stores nothing, and knows the adapter's name but none of its workings", async () => {
+  /*
+   * THIS TEST USED TO FORBID THE ADAPTER'S NAME ENTIRELY, and that stopped
+   * being the right question the moment the route was wired: naming the
+   * provider it falls back to is what wiring IS. What must still hold is that
+   * the route knows nothing about how that provider works. It has no endpoint,
+   * no key, no header and no notion of HTTP, so swapping the adapter for
+   * another service touches this file's one import and nothing else.
+   */
   const source = read();
 
-  for (const forbidden of ["resend", "Resend", "postgres", "prisma", "writeFile", "localStorage"]) {
+  for (const forbidden of [
+    "api.resend.com",
+    "RESEND_API_KEY",
+    "Bearer",
+    "Authorization",
+    "fetch(",
+    "base64",
+    "postgres",
+    "prisma",
+    "writeFile",
+    "localStorage",
+  ]) {
     assert.ok(!source.includes(forbidden), `the send route must not reach ${forbidden}`);
   }
 });
@@ -668,4 +781,223 @@ test("the allowance is still checked before any expensive work", async () => {
 
   assert.equal(blocked.ok === false && blocked.status, 429);
   assert.equal(renderer.seen.length, 0, "no browser was launched for a refused caller");
+});
+
+/* ---------------------------------------------------------------------------
+   The wiring: the provider nobody passed in
+
+   EVERY TEST ABOVE HANDS IN A FAKE, which is what makes them tests of this
+   route's decisions rather than of an email service. Not one of them would
+   notice if the line that builds the real adapter were deleted tomorrow.
+   These would. None of them passes a provider, so what runs is the production
+   path exactly as a salesperson's request runs it, with a fetch that answers
+   from memory where the socket would be.
+   --------------------------------------------------------------------------- */
+
+test("a confirmed send reaches the configured provider, with no provider handed in", async () => {
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const renderer = recordingRenderer();
+  const resend = wiredResend();
+
+  try {
+    const result = await sendReportRoute(
+      request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+      deps({ store, render: renderer.render }),
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.ok === true && result.recipient, RECIPIENT);
+
+    assert.equal(resend.calls.length, 1, "one request, not two");
+    assert.equal(resend.calls[0].url, RESEND_ENDPOINT);
+    assert.equal(resend.calls[0].init?.method, "POST");
+
+    /*
+     * AND IT IS THE REPORT, not a second document composed on the way. The
+     * bytes the renderer produced are the bytes on the wire.
+     */
+    const body = wireBody(resend.calls[0].init);
+    assert.equal(body.to, RECIPIENT);
+    assert.equal(body.from, FROM);
+    assert.deepEqual(Buffer.from(body.attachments[0].content, "base64"), FAKE_PDF);
+  } finally {
+    resend.restore();
+  }
+});
+
+test("a server with no key fails closed, before a browser is ever launched", async () => {
+  /*
+   * THE COST OF THE REFUSAL, not just the refusal. The adapter would refuse
+   * perfectly well on its own -- but only after a headless browser had
+   * typeset a report for a client who was never going to receive it.
+   */
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const renderer = recordingRenderer();
+  const resend = unconfiguredResend();
+
+  try {
+    const result = await sendReportRoute(
+      request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+      deps({ store, render: renderer.render }),
+    );
+
+    assert.equal(result.ok === false && result.status, 503);
+    assert.equal(result.ok === false && result.error, SEND_FAILURE_MESSAGES["not-configured"]);
+    assert.equal(renderer.seen.length, 0, "nothing was typeset");
+    assert.deepEqual(reachedNetwork, [], "and nothing was opened");
+    assert.equal(remaining("1.2.3.4"), MAX_SENDS, "a server that cannot send spends nothing");
+  } finally {
+    resend.restore();
+  }
+});
+
+test("what the service refuses comes back as our failure, never in its own words", async () => {
+  /*
+   * THE MAPPING IS THE ADAPTER'S AND THE STATUS IS THIS ROUTE'S, and this is
+   * the only place both run together. 401 becoming 503 matters: a key that is
+   * revoked between the early check and the send must not suddenly read to a
+   * salesperson as something wrong with what they wrote.
+   */
+  for (const [serviceStatus, ourStatus, failure] of [
+    [401, 503, "not-configured"],
+    [422, 502, "rejected"],
+    [429, 429, "rate-limited"],
+    [500, 502, "provider-error"],
+  ] as const) {
+    resetSendLimit();
+    const { store, jobId } = storeWith("completed");
+    const resend = wiredResend(() =>
+      accepted(
+        {
+          name: "validation_error",
+          message: "The from address reports@skybook.example is not verified",
+          request_id: "req_abc123",
+        },
+        serviceStatus,
+      ),
+    );
+
+    try {
+      const result = await sendReportRoute(
+        request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+        deps({ store, render: recordingRenderer().render }),
+      );
+
+      assert.equal(result.ok, false, String(serviceStatus));
+      assert.equal(result.ok === false && result.status, ourStatus, String(serviceStatus));
+      assert.equal(
+        result.ok === false && result.error,
+        SEND_FAILURE_MESSAGES[failure],
+        String(serviceStatus),
+      );
+
+      const serialised = JSON.stringify(result);
+      for (const leak of ["validation_error", "not verified", "req_abc123", FAKE_KEY]) {
+        assert.ok(!serialised.includes(leak), `must not carry ${leak}`);
+      }
+    } finally {
+      resend.restore();
+    }
+  }
+});
+
+test("a send the service accepts spends exactly one allowance", async () => {
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const resend = wiredResend();
+
+  try {
+    const result = await sendReportRoute(
+      request(
+        { jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) },
+        true,
+        "7.7.9.1",
+      ),
+      deps({ store, render: recordingRenderer().render }),
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(resend.calls.length, 1);
+    assert.equal(remaining("7.7.9.1"), MAX_SENDS - 1, "exactly one, not two and not none");
+  } finally {
+    resend.restore();
+  }
+});
+
+test("a send the service refuses spends nothing", async () => {
+  /*
+   * The allowance counts what reached a client's inbox. A provider that said
+   * no put nothing there, and the salesperson must be able to fix whatever it
+   * objected to and try again.
+   */
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const resend = wiredResend(() => accepted({ message: "the service said no" }, 500));
+
+  try {
+    const result = await sendReportRoute(
+      request(
+        { jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) },
+        true,
+        "7.7.9.2",
+      ),
+      deps({ store, render: recordingRenderer().render }),
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(resend.calls.length, 1, "asked once, and not asked again");
+    assert.equal(remaining("7.7.9.2"), MAX_SENDS, "nothing arrived, nothing was spent");
+  } finally {
+    resend.restore();
+  }
+});
+
+test("a stranger and a stale confirmation still reach no provider once one is wired", async () => {
+  /*
+   * THE FAILURE THIS CATCHES is a provider reached before the guards have had
+   * their say. Both refusals are already proved against a fake above; what is
+   * new is that they are now proved against the line that opens connections.
+   */
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const confirmed = confirmationFor(store, jobId);
+  const renderer = recordingRenderer();
+  const resend = wiredResend();
+
+  try {
+    const stranger = await sendReportRoute(
+      request({ jobId, recipient: RECIPIENT, confirmedFor: confirmed }, false),
+      deps({ store, render: renderer.render }),
+    );
+    const stale = await sendReportRoute(
+      request({ jobId, recipient: RECIPIENT, confirmedFor: "a-fingerprint-from-an-older-page" }),
+      deps({ store, render: renderer.render }),
+    );
+
+    assert.equal(stranger.ok === false && stranger.status, 401);
+    assert.equal(stale.ok === false && stale.status, 409);
+    assert.equal(stale.ok === false && stale.error, NOT_CONFIRMED);
+
+    assert.equal(resend.calls.length, 0, "the service was never asked");
+    assert.equal(renderer.seen.length, 0, "and no browser was launched for either");
+  } finally {
+    resend.restore();
+  }
+});
+
+test("no test in this file reached the network", async () => {
+  /*
+   * THE TRIPWIRE, READ LAST. It has been the global `fetch` since before the
+   * first test ran, so any test that built a real adapter against a real key
+   * -- a developer's own key, sitting in the environment -- would have opened
+   * a connection and left its address here. Nothing did.
+   *
+   * The second assertion is the one that keeps the first honest: a test that
+   * installed its own fetch and forgot to put the tripwire back would have
+   * disarmed every test after it.
+   */
+  assert.deepEqual(reachedNetwork, [], "something opened a connection");
+  assert.equal(globalThis.fetch, tripwire, "and every test put the global back");
 });

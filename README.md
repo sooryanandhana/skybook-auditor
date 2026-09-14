@@ -334,9 +334,12 @@ What the suite is built on:
 
 ### Deferred work
 
-- **Verify a company sending domain.** Add it in Resend, publish its SPF and DKIM
-  records, confirm verification, and change `SKYBOOK_MAIL_FROM` to an address
-  on it. No code change is needed; the sender is read from the environment.
+- **Verify a company sending domain — blocked.** Waiting on the company's domain
+  administrator: the company's DNS and domain account are not accessible from
+  this project, and Resend's SPF and DKIM records must be published there before
+  the domain can be verified. Once it is, change `SKYBOOK_MAIL_FROM` to an
+  address on the domain. No code change is needed; the sender is read from the
+  environment.
 - **A first report to a real client address.** Untested, and blocked by the
   step above. It deserves the same care as the first live send: a real audit,
   an internal recipient on a different mailbox provider before any prospect,

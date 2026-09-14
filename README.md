@@ -160,7 +160,7 @@ for one.
 | `GEMINI_API_KEY` | AI commentary | Google AI Studio key. Without it, audits and reports work and carry no commentary. |
 | `PAGESPEED_API_KEY` | Speed checks | Google PageSpeed Insights key. Required, not optional — unkeyed requests are refused by Google. Without it the speed panel says so plainly and the rest of the audit is unaffected. |
 | `RESEND_API_KEY` | Sending | Resend API key. Without it, sending fails closed (see below). |
-| `SKYBOOK_MAIL_FROM` | Sending | The **verified** sender address mail is sent from. Read from the environment only — a browser can never supply it. |
+| `SKYBOOK_MAIL_FROM` | Sending | The sender address mail is sent from: an address on a domain verified in Resend to reach clients, or Resend's testing sender for sends to the account owner only. Read from the environment only — a browser can never supply it. |
 
 ### The password hash
 
@@ -232,8 +232,11 @@ fingerprint fit.
 
 - **Provider: Resend**, called directly over HTTPS. The key travels in an
   `Authorization` header and appears in no return value, error, log or UI.
-- **A verified sender is required.** `SKYBOOK_MAIL_FROM` must be an address on a
-  domain verified in Resend, or the service will refuse the message.
+- **Sending to clients requires a verified domain.** `SKYBOOK_MAIL_FROM` must be
+  an address on a domain verified in Resend to reach an arbitrary recipient.
+  Resend's testing sender on the `resend.dev` domain needs no verification, but
+  delivers **only** to the email address the Resend account was opened with, and
+  refuses anyone else with a 403.
 - **One request, no retry, no queue, no background send.** There is no unsend,
   and a second attempt is how one report becomes two in a client's inbox. The
   browser, the route and the provider adapter each contain exactly one call
@@ -259,10 +262,25 @@ It fails closed at every layer: the adapter with no key opens no connection at
 all, and a route that quietly did nothing while reporting success would be the
 worst possible version of this feature.
 
-**As the repository stands, `RESEND_API_KEY` and `SKYBOOK_MAIL_FROM` are not
-set on any machine here and no real email has ever been sent.** The path is
-implemented and tested end to end against an injected provider and an answering
-`fetch`; the first live send is still ahead.
+### Live sending: what has and has not been proven
+
+The first live send was made on 14 September 2026, with a local configuration
+using **Resend's testing sender**. A real website audit was completed and its
+report sent to the Resend account owner's own address. It arrived in the inbox
+rather than spam, the PDF attachment opened, and the subject and body matched
+the preview that had been confirmed. No sending error occurred.
+
+That proves the whole chain against the real service: sign-in, audit, preview,
+confirmation fingerprint, render and provider. It does **not** prove:
+
+- **A company sending domain.** None has been verified in Resend yet.
+- **Delivery to a client.** No report has been sent to any address other than
+  the account owner's — the testing sender cannot reach one.
+- **Other mailbox providers.** One Gmail inbox accepted the message; no other
+  provider has been tried.
+
+The server log for that send was not captured, so the one-request guarantee
+rests on the code and its tests rather than on an observation.
 
 ## Testing and verification
 
@@ -304,12 +322,25 @@ What the suite is built on:
   forgotten with the page. Nothing is keyed on a recipient anywhere.
 - **Speed depends on Google.** PageSpeed can be slow or refuse; the audit
   reports that as a measurement state rather than failing.
-- **The first live send has not happened.** See above.
+- **Reports can only reach the Resend account owner** while the testing sender
+  is configured. See *Live sending* above.
+- **A refused testing-sender recipient is misreported.** Resend returns 403 when
+  the testing sender is asked to deliver to anyone but the account owner, and
+  this application reads every 403 as a key problem — so the screen says
+  *"Email sending is not configured on this server"* when the real cause is the
+  recipient. Nothing is sent. It disappears once a domain is verified, and is
+  deliberately not changed yet: telling the two 403s apart would mean reading
+  the service's response body, which the adapter was designed not to depend on.
 
 ### Deferred work
 
-- **A live send.** Verify a domain in Resend, set the two variables, and send a
-  first report to yourself before any prospect sees one.
+- **Verify a company sending domain.** Add it in Resend, publish its SPF and DKIM
+  records, confirm verification, and change `SKYBOOK_MAIL_FROM` to an address
+  on it. No code change is needed; the sender is read from the environment.
+- **A first report to a real client address.** Untested, and blocked by the
+  step above. It deserves the same care as the first live send: a real audit,
+  an internal recipient on a different mailbox provider before any prospect,
+  and the server log open.
 - **Redirect chains are recorded but not graded for a downgrade.** A site is
   graded on the scheme it finally serves, so a chain that ends on plain HTTP is
   caught by `security.https`; one that dips through HTTP and returns to HTTPS

@@ -508,6 +508,7 @@ function toHeaderPresence(security: SecurityData): AIReportHeaderPresence {
   return {
     strictTransportSecurity: security.strictTransportSecurity.present,
     contentSecurityPolicy: security.contentSecurityPolicy.present,
+    contentSecurityPolicyMeta: security.contentSecurityPolicyMeta,
     contentSecurityPolicyReportOnly: security.contentSecurityPolicyReportOnly.present,
     xFrameOptions: security.xFrameOptions.present,
     xContentTypeOptions: security.xContentTypeOptions.present,

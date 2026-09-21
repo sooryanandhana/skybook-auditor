@@ -26,6 +26,7 @@ import { runPerformanceChecks } from "../collector/performanceChecks.ts";
 import { normalizeUrl } from "../collector/url.ts";
 import { createDeadline } from "../collector/deadline.ts";
 import { callerKey, checkRateLimit, type RateLimitResult } from "../rateLimit.ts";
+import { trustsProxy } from "../callerAddress.ts";
 import { runRules } from "../rules/runner.ts";
 import { SPEED_RULES } from "../rules/all.ts";
 import { PERFORMANCE_BUDGET_MS } from "../budgets.ts";
@@ -81,7 +82,9 @@ function tooManyRequests<T>(limit: RateLimitResult): ApiResult<T> {
  */
 async function readUrl<T>(
   request: Request,
-): Promise<{ ok: true; url: string } | { ok: false; refusal: ApiResult<T> }> {
+): Promise<
+  { ok: true; url: string; schemeWasAssumed: boolean } | { ok: false; refusal: ApiResult<T> }
+> {
   let raw: string;
   try {
     const body = await request.json();
@@ -108,7 +111,7 @@ async function readUrl<T>(
     };
   }
 
-  return { ok: true, url: normalized.url.toString() };
+  return { ok: true, url: normalized.url.toString(), schemeWasAssumed: normalized.schemeWasAssumed };
 }
 
 /** The `jobId` query parameter, trimmed. Empty when absent. */
@@ -124,15 +127,20 @@ function jobIdFrom(request: Request): string {
  */
 export async function startAuditRoute(
   request: Request,
-  deps: Pick<StartAuditOptions, "store" | "runImpl"> = {},
+  deps: Pick<StartAuditOptions, "store" | "runImpl"> & { trustProxy?: boolean } = {},
 ): Promise<ApiResult<AuditStartResponse>> {
-  const limit = checkRateLimit(callerKey(request));
+  const limit = checkRateLimit(callerKey(request, trustsProxy(deps.trustProxy)));
   if (!limit.allowed) return tooManyRequests<AuditStartResponse>(limit);
 
   const url = await readUrl<AuditStartResponse>(request);
   if (!url.ok) return url.refusal;
 
-  const { jobId } = startAudit(url.url, deps);
+  // Carry forward whether WE guessed the https:// scheme, so the audit may
+  // retry an assumed-https, unreachable entry over http (never an explicit one).
+  const { jobId } = startAudit(url.url, {
+    ...deps,
+    audit: { schemeWasAssumed: url.schemeWasAssumed },
+  });
 
   return { status: 202, body: { ok: true, jobId } };
 }
@@ -186,9 +194,9 @@ export function auditResultRoute(
  */
 export async function performanceRoute(
   request: Request,
-  deps: { measure?: typeof runPerformanceChecks; store?: AuditJobStore } = {},
+  deps: { measure?: typeof runPerformanceChecks; store?: AuditJobStore; trustProxy?: boolean } = {},
 ): Promise<ApiResult<PerformanceResponse>> {
-  const limit = checkRateLimit(callerKey(request));
+  const limit = checkRateLimit(callerKey(request, trustsProxy(deps.trustProxy)));
   if (!limit.allowed) return tooManyRequests<PerformanceResponse>(limit);
 
   const url = await readUrl<PerformanceResponse>(request);
@@ -257,6 +265,16 @@ export const EXPLAIN_IN_PROGRESS =
   "The written commentary is already being prepared. Ask again in a moment.";
 
 /**
+ * Said when the audit could not read a page.
+ *
+ * The audit finished and its findings are real; what is missing is anything
+ * page-shaped for a model to describe. Nothing was asked, so nothing here
+ * reports on a provider.
+ */
+export const EXPLAIN_NO_PAGE_MEASUREMENTS =
+  "No written commentary was prepared for this audit. Its entry page could not be fetched securely, so there are no page measurements to describe; the findings were measured and graded without one.";
+
+/**
  * POST /api/audit/explain?jobId=... — the written commentary for one audit.
  *
  * A POST BECAUSE IT MAY CAUSE WORK, and the status and result endpoints must
@@ -295,6 +313,11 @@ export async function explainRoute(
     if (outcome.reason === "in-progress") {
       // 409: the request is fine, the resource is not ready to answer it.
       return { status: 409, body: { ok: false, jobId, error: EXPLAIN_IN_PROGRESS } };
+    }
+    if (outcome.reason === "no-page-measurements") {
+      // 409 as well: the audit is finished, and no amount of waiting will give
+      // it the page measurements a model would be asked to describe.
+      return { status: 409, body: { ok: false, jobId, error: EXPLAIN_NO_PAGE_MEASUREMENTS } };
     }
     return { status: 409, body: { ok: false, jobId, error: EXPLAIN_NOT_FINISHED } };
   }

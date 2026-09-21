@@ -16,6 +16,11 @@ import {
   PASSWORD_HASH_VARIABLE,
   RATE_LIMITED,
   REJECTED,
+  UNATTRIBUTED,
+  ACCOUNT_FREE_ATTEMPTS,
+  ACCOUNT_BASE_DELAY_MS,
+  ACCOUNT_MAX_DELAY_MS,
+  accountDelayMs,
   checkPassword,
   credentialsAvailable,
   hashPassword,
@@ -316,4 +321,98 @@ test("the account is read from variables no bundler will publish", () => {
   for (const variable of [EMAIL_VARIABLE, PASSWORD_HASH_VARIABLE]) {
     assert.ok(!variable.startsWith("NEXT_PUBLIC"), variable);
   }
+});
+
+/* ---------------------------------------------------------------------------
+   The account-level slow-down
+   --------------------------------------------------------------------------- */
+
+test("the account delay is zero for the free attempts, then doubles to a cap", () => {
+  // Five free, then 500ms doubling: the sixth failed attempt is the first slowed.
+  assert.equal(accountDelayMs(0), 0);
+  assert.equal(accountDelayMs(ACCOUNT_FREE_ATTEMPTS - 1), 0, "the fifth attempt is still free");
+  assert.equal(accountDelayMs(ACCOUNT_FREE_ATTEMPTS), ACCOUNT_BASE_DELAY_MS, "the sixth is the first slowed");
+  assert.deepEqual(
+    [5, 6, 7, 8, 9, 10, 11, 12].map(accountDelayMs),
+    [500, 1000, 2000, 4000, 8000, 16000, ACCOUNT_MAX_DELAY_MS, ACCOUNT_MAX_DELAY_MS],
+  );
+});
+
+test("the account delay never exceeds its cap, however many failures pile up", () => {
+  for (const n of [30, 100, 10_000]) {
+    assert.equal(accountDelayMs(n), ACCOUNT_MAX_DELAY_MS, `n=${n}`);
+  }
+});
+
+test("an unattributed caller is slowed by the account, not hard-locked", () => {
+  // The default posture: no trusted proxy, so every guess is the shared bucket.
+  // It must never return rate-limited, or one attacker locks out the one user.
+  resetAttempts();
+
+  const delays: number[] = [];
+  for (let i = 0; i < 30; i += 1) {
+    const outcome = signIn("ana@skybook.example", "wrong", UNATTRIBUTED, account, NOW);
+    assert.equal(outcome.ok === false && outcome.reason, "rejected", `attempt ${i} must not be rate-limited`);
+    if (!outcome.ok) delays.push(outcome.delayMs);
+  }
+
+  assert.equal(delays.slice(0, ACCOUNT_FREE_ATTEMPTS).every((ms) => ms === 0), true, "the free ones are instant");
+  assert.ok(delays.some((ms) => ms === ACCOUNT_MAX_DELAY_MS), "and later ones reach the cap");
+});
+
+test("an attributed caller is still hard-locked after too many failures", () => {
+  // With a trusted address the per-caller limit stands, as it always did.
+  resetAttempts();
+  for (let i = 0; i < MAX_FAILED_ATTEMPTS; i += 1) {
+    signIn("ana@skybook.example", "wrong", "203.0.113.7", account, NOW);
+  }
+  const blocked = signIn("ana@skybook.example", "wrong", "203.0.113.7", account, NOW);
+  assert.equal(blocked.ok === false && blocked.reason, "rate-limited");
+});
+
+test("the account slow-down is shared, so a second address cannot reset it", () => {
+  // The bypass in miniature at the credential layer: guessing from a fresh
+  // address every time still climbs the one account counter.
+  resetAttempts();
+  for (let i = 0; i < ACCOUNT_FREE_ATTEMPTS + 3; i += 1) {
+    signIn("ana@skybook.example", "wrong", `10.0.0.${i}`, account, NOW);
+  }
+  const next = signIn("ana@skybook.example", "wrong", "10.0.0.250", account, NOW);
+  assert.ok(next.ok === false && next.delayMs > 0, "a brand-new address is slowed by the shared counter");
+});
+
+test("the right password still succeeds during an active account slow-down, and clears it", () => {
+  // No lockout: the point of the slow-down over a hard lock.
+  resetAttempts();
+  for (let i = 0; i < ACCOUNT_FREE_ATTEMPTS + 5; i += 1) {
+    signIn("ana@skybook.example", "wrong", UNATTRIBUTED, account, NOW);
+  }
+  const success = signIn("ana@skybook.example", PASSWORD, UNATTRIBUTED, account, NOW);
+  assert.equal(success.ok, true);
+
+  // Cleared: the next failure is a fresh, fast attempt.
+  const after = signIn("ana@skybook.example", "wrong", UNATTRIBUTED, account, NOW);
+  assert.equal(after.ok === false && after.delayMs, 0);
+});
+
+test("the account slow-down forgets failures once the window has passed", () => {
+  resetAttempts();
+  for (let i = 0; i < ACCOUNT_FREE_ATTEMPTS + 5; i += 1) {
+    signIn("ana@skybook.example", "wrong", UNATTRIBUTED, account, NOW);
+  }
+  const slowed = signIn("ana@skybook.example", "wrong", UNATTRIBUTED, account, NOW);
+  assert.ok(slowed.ok === false && slowed.delayMs > 0);
+
+  const later = signIn("ana@skybook.example", "wrong", UNATTRIBUTED, account, NOW + ATTEMPT_WINDOW_MS + 1);
+  assert.equal(later.ok === false && later.delayMs, 0, "old failures no longer count");
+});
+
+test("a wrong address, not just a wrong password, feeds the account slow-down", () => {
+  // Guessing the username is guessing too; both must climb the counter.
+  resetAttempts();
+  for (let i = 0; i < ACCOUNT_FREE_ATTEMPTS + 2; i += 1) {
+    signIn(`nobody-${i}@skybook.example`, "wrong", UNATTRIBUTED, account, NOW);
+  }
+  const slowed = signIn("still-wrong@skybook.example", "wrong", UNATTRIBUTED, account, NOW);
+  assert.ok(slowed.ok === false && slowed.delayMs > 0);
 });

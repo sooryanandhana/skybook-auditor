@@ -25,6 +25,27 @@ export type SafetyResult =
   | { safe: false; reason: string };
 
 /**
+ * Releases a response body we have received but will not read.
+ *
+ * Node's fetch (undici) keeps a response's connection open until its body is
+ * consumed or cancelled. The paths that read a body drain it; every path that
+ * abandons a received response — a redirect we follow, an error status, a type
+ * we will not parse — must cancel it here instead, or the socket is held open.
+ *
+ * Cancelling a body that was already read, already cancelled, or locked to a
+ * reader is a harmless no-op, so this is always safe to call on a response the
+ * code is finished with.
+ */
+export async function releaseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // A body already consumed, already cancelled, or locked to a reader cannot
+    // be cancelled again — and in each case nothing is left open.
+  }
+}
+
+/**
  * IPv4 ranges that are not public internet addresses.
  * Written as [first byte, matcher] for readability.
  */
@@ -33,7 +54,7 @@ function isPrivateIPv4(ip: string): boolean {
   if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
     return true; // unparseable — treat as unsafe
   }
-  const [a, b] = parts;
+  const [a, b, c] = parts;
 
   return (
     a === 0 || // 0.0.0.0/8      "this network"
@@ -42,27 +63,87 @@ function isPrivateIPv4(ip: string): boolean {
     (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10  carrier-grade NAT
     (a === 169 && b === 254) || // 169.254.0.0/16 link-local + cloud metadata
     (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12  private
-    (a === 192 && b === 0) || // 192.0.0.0/24   protocol assignments
+    // 192.0.0.0/24 (protocol assignments) and 192.0.2.0/24 (documentation).
+    // The third octet matters: IANA reserves only these two /24s inside
+    // 192.0.0.0/16, so 192.0.43.x (icann.org) and the rest are ordinary,
+    // routable, auditable address space. Blocking the whole /16 refused them.
+    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
     (a === 192 && b === 168) || // 192.168.0.0/16 private
     (a === 198 && (b === 18 || b === 19)) || // 198.18.0.0/15  benchmarking
     a >= 224 // 224.0.0.0/4 multicast and 240.0.0.0/4 reserved
   );
 }
 
-/** IPv6 equivalents of the above. */
+/**
+ * Parses a valid IPv6 address into its eight 16-bit groups.
+ *
+ * WHY NUMBERS, NOT STRINGS. The same address has many spellings -- "::1" and
+ * "0:0:0:0:0:0:0:1" are one address, "::ffff:127.0.0.1" and "::ffff:7f00:1"
+ * are another -- and a check that compares text has to know every spelling in
+ * advance. Reduced to sixteen bytes there is only one of each, so the range
+ * checks below decide on what the address IS rather than how it was written.
+ *
+ * The input has already passed `isIP` as an IPv6 address, so this handles the
+ * `::` zero-run and an optional trailing dotted-quad; anything it cannot make
+ * sense of returns null, and the caller then errs towards "private".
+ */
+function parseIpv6(ip: string): number[] | null {
+  let text = ip.toLowerCase();
+
+  // A trailing IPv4 tail ("::ffff:127.0.0.1") is the low 32 bits. Turn it into
+  // two hex groups so the whole address is groups of 16 bits.
+  const tail = text.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  if (tail) {
+    const octets = tail[1].split(".").map(Number);
+    if (octets.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return null;
+    const [a, b, c, d] = octets;
+    const high = ((a << 8) | b).toString(16);
+    const low = ((c << 8) | d).toString(16);
+    text = text.slice(0, tail.index) + `${high}:${low}`;
+  }
+
+  // Expand the single "::" zero-run, if there is one, to the missing groups.
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+
+  const head = halves[0] === "" ? [] : halves[0].split(":");
+  const rest = halves.length === 2 ? (halves[1] === "" ? [] : halves[1].split(":")) : null;
+
+  let groups: string[];
+  if (rest === null) {
+    groups = head; // no "::", so it must be the full eight
+  } else {
+    const missing = 8 - head.length - rest.length;
+    if (missing < 1) return null; // "::" must stand for at least one group
+    groups = [...head, ...Array<string>(missing).fill("0"), ...rest];
+  }
+
+  if (groups.length !== 8) return null;
+
+  const values = groups.map((group) => (/^[0-9a-f]{1,4}$/.test(group) ? parseInt(group, 16) : NaN));
+  return values.some((value) => Number.isNaN(value)) ? null : values;
+}
+
+/** IPv6 equivalents of the private-IPv4 ranges, decided on the parsed bytes. */
 function isPrivateIPv6(ip: string): boolean {
-  const lower = ip.toLowerCase();
+  const groups = parseIpv6(ip);
+  if (groups === null) return true; // unparseable -- treat as unsafe
 
-  // Some systems report IPv4 addresses in IPv6 form, e.g. "::ffff:127.0.0.1".
-  // Unwrap those and check the IPv4 rules instead.
-  const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return isPrivateIPv4(mapped[1]);
+  // An IPv4 address wearing an IPv6 costume: ::ffff:0:0/96. Judge the embedded
+  // IPv4 by the IPv4 rules, whatever spelling it arrived in.
+  if (groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) {
+    const a = groups[6] >> 8;
+    const b = groups[6] & 0xff;
+    const c = groups[7] >> 8;
+    const d = groups[7] & 0xff;
+    return isPrivateIPv4(`${a}.${b}.${c}.${d}`);
+  }
 
-  if (lower === "::" || lower === "::1") return true; // unspecified / loopback
+  const allZero = groups.every((g) => g === 0);
+  if (allZero) return true; // ::   unspecified
+  if (groups.slice(0, 7).every((g) => g === 0) && groups[7] === 1) return true; // ::1 loopback
 
-  const firstGroup = lower.split(":")[0];
-  const prefix = parseInt(firstGroup || "0", 16);
-
+  const prefix = groups[0];
   return (
     (prefix & 0xfe00) === 0xfc00 || // fc00::/7  unique local
     (prefix & 0xffc0) === 0xfe80 || // fe80::/10 link-local
@@ -164,6 +245,10 @@ export async function safeFetch(
 
     const location = response.headers.get("location");
     if (!location) return response;
+
+    // This redirect's body is not returned to the caller; release it before we
+    // follow or abandon the hop, so its connection is not left open.
+    await releaseBody(response);
 
     try {
       current = new URL(location, current);

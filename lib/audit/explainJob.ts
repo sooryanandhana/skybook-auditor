@@ -26,6 +26,7 @@
  * produced.
  */
 import { withSpeed } from "./withSpeed.ts";
+import { isCertificateFailureAudit } from "../report/siteFindingsView.ts";
 import { buildAIReportInput } from "../ai/buildReportInput.ts";
 import { explainAudit, type ExplainOptions, type ExplainResult } from "../ai/gemini/explain.ts";
 import type { AuditJobStore } from "../jobs/auditJobs.ts";
@@ -52,6 +53,17 @@ export type ExplainJobOutcome =
 export type ExplainJobRefusal =
   /** No such job. Unknown and expired cannot be told apart, and are not. */
   | "unknown-job"
+  /**
+   * The audit could not read a page, so there is nothing for a model to
+   * describe beyond findings it was not shown.
+   *
+   * NOT A PROVIDER FAILURE, and nothing is asked. The contract a model is
+   * given describes a page that was read -- its address, whether it was served
+   * over HTTPS, what was found on it -- and none of that exists here. Filling
+   * those fields in to make the shape fit is exactly the invention this
+   * project refuses, so the request is not made at all.
+   */
+  | "no-page-measurements"
   /** The audit is still running, or it failed. There is no report to describe. */
   | "not-finished"
   /** Someone else holds the claim and has not finished. Ask again shortly. */
@@ -105,6 +117,16 @@ export async function explainJob(
   const finished = job.status === "completed" || job.status === "partial";
   if (!finished || job.result === null) {
     return { ok: false, reason: "not-finished" };
+  }
+
+  /*
+   * NOTHING IS ASKED ABOUT AN AUDIT WITH NO PAGE. Checked before the claim, so
+   * a second request is refused the same way rather than reading a stored
+   * answer that was never produced. The findings this audit did make are
+   * measured and graded ones, and they reach the report without commentary.
+   */
+  if (isCertificateFailureAudit(job.result)) {
+    return { ok: false, reason: "no-page-measurements" };
   }
 
   /*

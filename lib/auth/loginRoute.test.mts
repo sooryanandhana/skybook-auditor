@@ -10,14 +10,20 @@ import test from "node:test";
 import fs from "node:fs";
 import { RATE_LIMITED, REJECTED, hashPassword, resetAttempts } from "./credentials.ts";
 import { readSession, sessionCookieOptions } from "./session.ts";
-import { AFTER_LOGIN, CANNOT_SIGN_IN, LOGIN_PATH, loginRoute, logoutRoute } from "./loginRoute.ts";
+import { AFTER_LOGIN, CANNOT_SIGN_IN, LOGIN_PATH, callerAddress, loginRoute, logoutRoute, normaliseCaller } from "./loginRoute.ts";
 
 const PASSWORD = "a-password-the-salesperson-chose";
 const HASH = hashPassword(PASSWORD);
 const SECRET = "test-secret-that-is-long-enough-to-be-accepted-0123456789";
 const NOW = 1_757_000_000_000;
 
-const options = { email: "ana@skybook.example", passwordHash: HASH, secret: SECRET };
+/**
+ * The shared options. `sleep` is instant so the account slow-down is exercised
+ * without a test ever waiting; `trustProxy` defaults off, exactly as production
+ * does, so a test that wants the per-caller limit asks for it explicitly.
+ */
+const options = { email: "ana@skybook.example", passwordHash: HASH, secret: SECRET, sleep: async () => {} };
+const trusting = { ...options, trustProxy: true };
 
 const attempt = (body: unknown, caller = "1.2.3.4") =>
   new Request("https://skybook.example/api/auth/login", {
@@ -114,14 +120,16 @@ test("extra fields in the body are ignored rather than read", async () => {
   assert.deepEqual(Object.keys(session ?? {}).sort(), ["email", "expiresAt"]);
 });
 
-test("too many attempts are refused with 429 rather than 401", async () => {
+test("behind a trusted proxy, too many attempts from one address are refused with 429", async () => {
+  // The hard per-caller limit is only meaningful when the caller can be
+  // trusted, which is when a proxy in front sets the forwarded address.
   resetAttempts();
 
   for (let n = 0; n < 10; n += 1) {
-    await loginRoute(attempt({ email: "ana@skybook.example", password: "no" }, "9.9.9.9"), options, NOW);
+    await loginRoute(attempt({ email: "ana@skybook.example", password: "no" }, "9.9.9.9"), trusting, NOW);
   }
 
-  const blocked = await loginRoute(attempt({ email: "ana@skybook.example", password: PASSWORD }, "9.9.9.9"), options, NOW);
+  const blocked = await loginRoute(attempt({ email: "ana@skybook.example", password: PASSWORD }, "9.9.9.9"), trusting, NOW);
 
   assert.equal(blocked.ok === false && blocked.status, 429);
   assert.equal(blocked.ok === false && blocked.error, RATE_LIMITED);
@@ -225,4 +233,153 @@ test("signing out touches no audit, no result and no report", () => {
 test("the two paths a person is sent to are named once each", () => {
   assert.equal(LOGIN_PATH, "/login");
   assert.equal(AFTER_LOGIN, "/");
+});
+
+/* ---------------------------------------------------------------------------
+   The rate-limit bypass, closed at the route
+   --------------------------------------------------------------------------- */
+
+/** Every failed guess in a run, tallied by HTTP status, and the delays spent. */
+async function guessRun(opts: Record<string, unknown>, count: number, headersFor: (i: number) => Record<string, string>) {
+  resetAttempts();
+  const waited: number[] = [];
+  const withRecorder = { ...opts, sleep: async (ms: number) => { waited.push(ms); } };
+  const status: Record<number, number> = {};
+  for (let i = 0; i < count; i += 1) {
+    const request = new Request("https://skybook.example/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headersFor(i) },
+      body: JSON.stringify({ email: "ana@skybook.example", password: "wrong" }),
+    });
+    const outcome = await loginRoute(request, withRecorder, NOW);
+    const code = outcome.ok ? 200 : outcome.status;
+    status[code] = (status[code] ?? 0) + 1;
+  }
+  return { status, waited };
+}
+
+test("by default the forwarded address is not trusted, so rotating it does not mint new callers", async () => {
+  // The whole bypass: change X-Forwarded-For every request and never be the
+  // same caller twice. Untrusted, every one of them is the single shared
+  // bucket, so the per-caller lock is never fooled into staying open.
+  const rotated = await guessRun({ ...options }, 40, (i) => ({ "x-forwarded-for": `198.51.100.${i}` }));
+
+  // No per-caller 429 in default mode — that would let one attacker lock the
+  // one user out. The account slow-down is the defence, and it is engaged.
+  assert.equal(rotated.status[429] ?? 0, 0);
+  assert.ok(rotated.waited.some((ms) => ms > 0), "the account slow-down is spent");
+});
+
+test("X-Real-IP is not trusted by default either", async () => {
+  const rotated = await guessRun({ ...options }, 40, (i) => ({ "x-real-ip": `198.51.100.${i}` }));
+  assert.equal(rotated.status[429] ?? 0, 0);
+  assert.ok(rotated.waited.some((ms) => ms > 0));
+});
+
+test("a spoofed first hop in front of the real proxy address is ignored when untrusted", async () => {
+  const spoofed = await guessRun({ ...options }, 40, (i) => ({ "x-forwarded-for": `10.0.0.${i}, 203.0.113.7` }));
+  assert.equal(spoofed.status[429] ?? 0, 0);
+});
+
+test("behind a trusted proxy, alternate spellings of one address share one bucket", async () => {
+  // ::ffff:127.0.0.1 and ::ffff:7f00:1 are 127.0.0.1; a limit that counted
+  // them apart would let one machine act as three.
+  const spellings = ["127.0.0.1", "::ffff:127.0.0.1", "::ffff:7f00:1", "::FFFF:127.0.0.1"];
+  const run = await guessRun({ ...trusting }, 40, (i) => ({ "x-forwarded-for": spellings[i % spellings.length] }));
+
+  // One bucket: after ten failures it locks, so most of the forty are 429.
+  assert.ok((run.status[429] ?? 0) >= 25, `expected a locked bucket, saw ${JSON.stringify(run.status)}`);
+});
+
+test("behind a trusted proxy, a header of junk cannot mint a fresh bucket per request", async () => {
+  // Not an address, so it is treated as unattributed rather than a new caller.
+  const junk = await guessRun({ ...trusting }, 40, (i) => ({ "x-forwarded-for": `not-an-ip-${i}` }));
+  assert.equal(junk.status[429] ?? 0, 0, "junk keys do not lock, but they also do not multiply");
+});
+
+test("the account slow-down grows and then holds, and the right password still gets through", async () => {
+  resetAttempts();
+  const waited: number[] = [];
+  const recording = { ...options, sleep: async (ms: number) => { waited.push(ms); } };
+  const wrong = (i: number) => new Request("https://skybook.example/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-forwarded-for": `198.51.100.${i}` },
+    body: JSON.stringify({ email: "ana@skybook.example", password: "wrong" }),
+  });
+
+  for (let i = 0; i < 13; i += 1) await loginRoute(wrong(i), recording, NOW);
+
+  assert.deepEqual(waited, [0, 0, 0, 0, 0, 500, 1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+
+  // No lockout: the real user, with the real password, still signs in.
+  const right = new Request("https://skybook.example/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "ana@skybook.example", password: PASSWORD }),
+  });
+  const success = await loginRoute(right, recording, NOW);
+  assert.equal(success.ok, true);
+});
+
+test("the trust-proxy flag is read from the environment when the option is absent", async () => {
+  const previous = process.env.SKYBOOK_TRUST_PROXY;
+  try {
+    process.env.SKYBOOK_TRUST_PROXY = "true";
+    resetAttempts();
+    const envOptions = { email: "ana@skybook.example", passwordHash: HASH, secret: SECRET, sleep: async () => {} };
+    for (let n = 0; n < 10; n += 1) {
+      await loginRoute(attempt({ email: "ana@skybook.example", password: "no" }, "9.9.9.9"), envOptions, NOW);
+    }
+    const blocked = await loginRoute(attempt({ email: "ana@skybook.example", password: PASSWORD }, "9.9.9.9"), envOptions, NOW);
+    assert.equal(blocked.ok === false && blocked.status, 429);
+  } finally {
+    if (previous === undefined) delete process.env.SKYBOOK_TRUST_PROXY;
+    else process.env.SKYBOOK_TRUST_PROXY = previous;
+  }
+});
+
+/* ---------------------------------------------------------------------------
+   Address normalisation
+   --------------------------------------------------------------------------- */
+
+test("one machine written many ways normalises to one key", () => {
+  const forms = ["127.0.0.1", "::ffff:127.0.0.1", "::FFFF:127.0.0.1", "::ffff:7f00:1"];
+  for (const form of forms) {
+    assert.equal(normaliseCaller(form), "127.0.0.1", form);
+  }
+});
+
+test("a public IPv4-mapped address unwraps too", () => {
+  assert.equal(normaliseCaller("::ffff:203.0.113.7"), "203.0.113.7");
+});
+
+test("an ordinary IPv6 address is lower-cased and kept", () => {
+  assert.equal(normaliseCaller("2001:DB8::1"), "2001:db8::1");
+});
+
+test("anything that is not an address is refused, so it cannot mint a bucket", () => {
+  for (const junk of ["not-an-ip", "127.000.000.001", "", "   ", "1.2.3.4.5", "example.com", "<script>"]) {
+    assert.equal(normaliseCaller(junk), null, JSON.stringify(junk));
+  }
+});
+
+test("callerAddress ignores the headers entirely when the proxy is not trusted", () => {
+  const request = new Request("https://skybook.example/api/auth/login", {
+    headers: { "x-forwarded-for": "203.0.113.7", "x-real-ip": "198.51.100.1" },
+  });
+  assert.equal(callerAddress(request, false), "unattributed");
+});
+
+test("callerAddress reads and normalises the first forwarded hop when trusted", () => {
+  const request = new Request("https://skybook.example/api/auth/login", {
+    headers: { "x-forwarded-for": "::ffff:203.0.113.7, 10.0.0.1" },
+  });
+  assert.equal(callerAddress(request, true), "203.0.113.7");
+});
+
+test("callerAddress falls back to unattributed when a trusted header is junk", () => {
+  const request = new Request("https://skybook.example/api/auth/login", {
+    headers: { "x-forwarded-for": "not-an-ip" },
+  });
+  assert.equal(callerAddress(request, true), "unattributed");
 });

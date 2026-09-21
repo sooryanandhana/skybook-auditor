@@ -19,6 +19,7 @@ import {
   UNDECLARED_CONTENT_TYPE,
 } from "./fetchPage.ts";
 import { createDeadline } from "./deadline.ts";
+import { classifyAuthorizationError } from "./sslChecks.ts";
 
 /** A public IP, so the safety check passes without contacting a DNS server. */
 const HOST = "93.184.216.34";
@@ -196,6 +197,97 @@ test("reports a redirect with no destination", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// A failure keeps what was gathered
+//
+// When a response actually arrived, the failure result carries the uptime it
+// proved and the redirect chain it walked. When NOTHING answered, it carries
+// neither — reporting either would be inventing a measurement, and a refused
+// hop is never disclosed.
+// ---------------------------------------------------------------------------
+
+test("a redirect that then 404s keeps the chain it walked (C12)", async () => {
+  queued = [redirectResponse(`https://${HOST}/gone`), htmlResponse("Not found", 404)];
+  const result = await fetchPage(`https://${HOST}/old`);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal("redirectChain" in result, true);
+  assert.deepEqual(result.redirectChain, [`https://${HOST}/old`, `https://${HOST}/gone`]);
+  assert.equal(result.uptime?.statusCode, 404);
+});
+
+test("a redirect that then answers with non-HTML keeps the chain", async () => {
+  queued = [
+    redirectResponse(`https://${HOST}/file`),
+    new Response("%PDF-1.4", { status: 200, headers: { "content-type": "application/pdf" } }),
+  ];
+  const result = await fetchPage(`https://${HOST}/doc`);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, NOT_A_WEB_PAGE);
+  assert.deepEqual(result.redirectChain, [`https://${HOST}/doc`, `https://${HOST}/file`]);
+});
+
+test("an incomplete redirect keeps the single-hop chain and stays online", async () => {
+  queued = [new Response(null, { status: 302 })]; // a response arrived, just no Location
+  const result = await fetchPage(`https://${HOST}/x`);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /incomplete redirect/i);
+  assert.deepEqual(result.redirectChain, [`https://${HOST}/x`]);
+  assert.equal(result.uptime?.statusCode, 302);
+});
+
+test("a redirect loop reaching the limit is online and keeps its chain (C6)", async () => {
+  // Six answers arrive before the limit is hit: the server is plainly online.
+  queued = Array.from({ length: 6 }, () => redirectResponse(`https://${HOST}/loop`, 302));
+  const result = await fetchPage(`https://${HOST}/loop`);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /redirected too many times/i);
+  assert.equal(result.uptime?.isOnline, true);
+  assert.equal(result.uptime?.statusCode, 302);
+  assert.equal(result.redirectChain?.length, 7); // requested address + six hops
+});
+
+test("a connection failure carries NO uptime and NO chain — nothing answered", async () => {
+  queued = [networkError("ECONNREFUSED")];
+  const result = await fetchPage(`https://${HOST}/`);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.uptime, null);
+  assert.equal("redirectChain" in result, false);
+});
+
+test("an address rejected before any request carries NO uptime and NO chain", async () => {
+  const result = await fetchPage("not a url");
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.uptime, null);
+  assert.equal("redirectChain" in result, false);
+  assert.equal(requested.length, 0);
+});
+
+test("a redirect to a private address is refused with NO chain and NO uptime (SSRF)", async () => {
+  // The first hop answered, but the refusal is a failure before the private
+  // hop's own response — and a refused hop is never disclosed in the chain.
+  queued = [redirectResponse("http://10.0.0.5/admin")];
+  const result = await fetchPage(`https://${HOST}/go`);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /private or internal network/i);
+  assert.equal(result.uptime, null);
+  assert.equal("redirectChain" in result, false);
+  assert.deepEqual(requested, [`https://${HOST}/go`], "the private host was never requested");
+});
+
+// ---------------------------------------------------------------------------
 // Content type
 // ---------------------------------------------------------------------------
 
@@ -262,6 +354,21 @@ test("keeps the certificate problem when the page loads over HTTP instead", asyn
   assert.equal(result.page.httpsUnavailable, true);
 });
 
+test("keeps a missing-issuer certificate problem when the page loads over HTTP instead", async () => {
+  // This code used to be unrecognised here, so the problem was dropped and the
+  // page read over HTTP carried no sign that its certificate had failed.
+  queued = [
+    networkError("UNABLE_TO_GET_ISSUER_CERT"),
+    htmlResponse("<html><body>Plain</body></html>"),
+  ];
+  const result = await fetchPage(HOST);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.page.certificateProblem, "untrusted");
+  assert.equal(result.page.httpsUnavailable, true);
+});
+
 test("marks a page read over HTTPS as such", async () => {
   queued = [htmlResponse("<html></html>")];
   const result = await fetchPage(`https://${HOST}/`);
@@ -281,7 +388,6 @@ test("names each kind of certificate problem", () => {
   const cases: Array<[string, string, RegExp]> = [
     ["CERT_HAS_EXPIRED", "expired", /expired/i],
     ["DEPTH_ZERO_SELF_SIGNED_CERT", "self-signed", /self-signed/i],
-    ["SELF_SIGNED_CERT_IN_CHAIN", "self-signed", /self-signed/i],
     ["ERR_TLS_CERT_ALTNAME_INVALID", "wrong-hostname", /different address/i],
     ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", "untrusted", /could not be verified/i],
   ];
@@ -289,6 +395,72 @@ test("names each kind of certificate problem", () => {
     const classified = classifyConnectionError(networkError(code));
     assert.equal(classified.certificateProblem, expectedProblem, `for ${code}`);
     assert.match(classified.reason, expectedMessage, `for ${code}`);
+  }
+});
+
+test("an untrusted authority in the chain is described as unverifiable, never as self-signed", () => {
+  // The site's own certificate was issued under an authority that is not
+  // trusted; it did not sign itself.
+  const classified = classifyConnectionError(networkError("SELF_SIGNED_CERT_IN_CHAIN"));
+  assert.equal(classified.certificateProblem, "untrusted");
+  assert.equal(classified.reason, "The website's security certificate could not be verified.");
+  assert.doesNotMatch(classified.reason, /self-signed/i);
+});
+
+test("a missing issuer certificate is a certificate failure, not a failure to connect", () => {
+  const classified = classifyConnectionError(networkError("UNABLE_TO_GET_ISSUER_CERT"));
+  assert.equal(classified.certificateProblem, "untrusted");
+  assert.equal(classified.reason, "The website's security certificate could not be verified.");
+});
+
+test("a certificate that is not valid yet is a certificate failure, and not an expiry", () => {
+  const classified = classifyConnectionError(networkError("CERT_NOT_YET_VALID"));
+  assert.equal(classified.certificateProblem, "untrusted");
+  assert.equal(classified.reason, "The website's security certificate could not be verified.");
+  assert.doesNotMatch(classified.reason, /expired|could not connect/i);
+});
+
+test("every certificate code the certificate check names, the page fetch names the same way", () => {
+  // OpenSSL's names for a server certificate failing verification, as Node
+  // reports them, and Node's own hostname check. The two paths once kept two
+  // lists, and a certificate the connection refused read "Could not connect".
+  const codes = [
+    "CERT_HAS_EXPIRED",
+    "DEPTH_ZERO_SELF_SIGNED_CERT",
+    "ERR_TLS_CERT_ALTNAME_INVALID",
+    "HOSTNAME_MISMATCH",
+    "SELF_SIGNED_CERT_IN_CHAIN",
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+    "UNABLE_TO_GET_ISSUER_CERT",
+    "CERT_NOT_YET_VALID",
+    "ERROR_IN_CERT_NOT_BEFORE_FIELD",
+    "ERROR_IN_CERT_NOT_AFTER_FIELD",
+    "CERT_SIGNATURE_FAILURE",
+    "UNABLE_TO_DECRYPT_CERT_SIGNATURE",
+    "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY",
+    "CERT_CHAIN_TOO_LONG",
+    "CERT_REVOKED",
+    "INVALID_CA",
+    "PATH_LENGTH_EXCEEDED",
+    "INVALID_PURPOSE",
+    "CERT_UNTRUSTED",
+    "CERT_REJECTED",
+  ];
+  for (const code of codes) {
+    const classified = classifyConnectionError(networkError(code));
+    assert.equal(classified.certificateProblem, classifyAuthorizationError(code), code);
+    assert.match(classified.reason, /^The website's security certificate /, code);
+  }
+});
+
+test("a TLS failure that is not about the certificate stays a failure to connect", () => {
+  // HTTPS spoken to a plain-HTTP server, a protocol error, a dropped socket:
+  // nothing here says anything about a certificate.
+  for (const code of ["ERR_SSL_WRONG_VERSION_NUMBER", "EPROTO", "UND_ERR_SOCKET"]) {
+    const classified = classifyConnectionError(networkError(code));
+    assert.equal(classified.reason, "Could not connect to that website.", code);
+    assert.equal(classified.certificateProblem, undefined, code);
   }
 });
 
@@ -636,4 +808,26 @@ test("an undeclared response still reports what the server DID tell us", async (
   assert.ok(!result.ok && result.uptime !== null);
   assert.equal(!result.ok && result.uptime?.isOnline, true);
   assert.equal(!result.ok && result.uptime?.statusCode, 200);
+});
+
+test("a refused certificate reports the address that presented it", async () => {
+  // The address matters when a page redirects before the connection fails: the
+  // certificate belongs to the host that offered it, and that is where anything
+  // reading it later has to look.
+  queued = [networkError("CERT_HAS_EXPIRED")];
+  const result = await fetchPage(`https://${HOST}/`);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.certificateProblem, "expired");
+  assert.equal(result.certificateUrl, `https://${HOST}/`);
+});
+
+test("a failure that is not about a certificate carries no address for one", async () => {
+  queued = [networkError("ENOTFOUND")];
+  const result = await fetchPage(`https://${HOST}/`);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal("certificateUrl" in result, false);
 });

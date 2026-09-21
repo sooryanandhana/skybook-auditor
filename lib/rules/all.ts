@@ -22,7 +22,7 @@ import { SECURITY_RULES } from "./security.ts";
 import { SEO_RULES } from "./seo.ts";
 import { TECHNICAL_RULES } from "./technical.ts";
 import { SPEED_RULES } from "./speed.ts";
-import type { CompiledRule } from "./types";
+import type { CompiledRule, SiteFacts } from "./types";
 
 /** Everything POST /api/audit has the measurements to grade. */
 export const AUDIT_RULES: readonly CompiledRule[] = [
@@ -49,8 +49,15 @@ export const PAGE_RULES: readonly CompiledRule[] = AUDIT_RULES.filter(
   (rule) => rule.scope === "page",
 );
 
-export const SITE_RULES: readonly CompiledRule[] = AUDIT_RULES.filter(
-  (rule) => rule.scope === "site",
+/**
+ * TYPED BY WHAT THEY READ, which is what lets them be evaluated without a
+ * page. Each site rule is declared over `SiteFacts` where it is defined, so
+ * the predicate below states a relation the compiler has already checked at
+ * every one of those definitions; `scope.test.mts` then proves at runtime
+ * that no site rule reaches for a page measurement.
+ */
+export const SITE_RULES: readonly CompiledRule<SiteFacts>[] = AUDIT_RULES.filter(
+  (rule): rule is CompiledRule<SiteFacts> => rule.scope === "site",
 );
 
 export { SPEED_RULES };

@@ -12,6 +12,7 @@
  * Workspace later leaves the second, and this, untouched.
  */
 import { signIn, type CredentialOptions } from "./credentials.ts";
+import { trustedCaller, trustsProxy as trustsProxyFlag } from "../callerAddress.ts";
 import { sessionCookieOptions, signSession, type SessionOptions } from "./session.ts";
 
 /** Where a person goes after signing in, and where they are sent to sign in. */
@@ -28,7 +29,34 @@ export const LOGIN_PATH = "/login";
 export const CANNOT_SIGN_IN =
   "Sign-in is not configured on this server. Nothing you typed was wrong.";
 
-export interface LoginOptions extends SessionOptions, CredentialOptions {}
+export interface LoginOptions extends SessionOptions, CredentialOptions {
+  /**
+   * Whether a trusted proxy sits in front, so the forwarded client-address
+   * headers may be believed.
+   *
+   * FALSE BY DEFAULT, and that is the safe posture: reached directly, the only
+   * source of these headers is the client itself, and a client that rewrites
+   * them on every request would otherwise be a new caller each time and never
+   * reach a limit. Set the SKYBOOK_TRUST_PROXY environment variable only when
+   * the deployment really does terminate behind a proxy that sets them.
+   */
+  readonly trustProxy?: boolean;
+  /**
+   * How the account slow-down waits. Injected by tests so none of them spends
+   * real seconds; production waits with a timer.
+   */
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
+export { TRUST_PROXY_VARIABLE, normaliseCaller } from "../callerAddress.ts";
+
+/** This route's own trust reading, from its options or the environment. */
+function trustsProxy(options: LoginOptions): boolean {
+  return trustsProxyFlag(options.trustProxy);
+}
+
+const realSleep = (ms: number): Promise<void> =>
+  ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * What one sign-in attempt produced.
@@ -76,9 +104,19 @@ export async function loginRoute(
   }
 
   const { email, password } = submitted(body);
-  const caller = callerAddress(request);
+  const caller = callerAddress(request, trustsProxy(options));
 
   const attempt = signIn(email, password, caller, options, now);
+
+  /*
+   * THE SLOW-DOWN IS SPENT HERE, once, whatever the outcome. `signIn` decided
+   * the number from the account's own recent failures and stays synchronous;
+   * this is the only place a real wait happens, and it is injectable so a test
+   * never sleeps. A right password waits exactly as a wrong one would during
+   * an attack, so the pause reveals nothing about the guess.
+   */
+  await (options.sleep ?? realSleep)(attempt.delayMs);
+
   if (!attempt.ok) {
     /*
      * 429 for too many attempts, 401 for a wrong one, and 503 when the server
@@ -116,12 +154,9 @@ export async function loginRoute(
  * never reaches the limit, which is why the limit is not the only defence. The
  * slow hash is, and it applies to every attempt regardless.
  */
-function callerAddress(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for");
-  const first = forwarded?.split(",")[0]?.trim();
-  if (first) return first;
-
-  return request.headers.get("x-real-ip")?.trim() || "unknown";
+/** Who is asking, read once for the whole application. See callerAddress.ts. */
+export function callerAddress(request: Request, trustProxy: boolean): string {
+  return trustedCaller(request, trustProxy);
 }
 
 /**

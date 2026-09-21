@@ -18,6 +18,8 @@ import {
   validateExplanations,
 } from "./validateExplanations.ts";
 import { AI_CONTRACT_VERSION, type AIReportInput } from "./contract.ts";
+import { findingsVerdict } from "../report/measurementsView.ts";
+import type { Finding } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // The audit these answers are checked against
@@ -792,4 +794,242 @@ test("the validator knows nothing about any provider and reaches no network", ()
 
   const imports = [...source.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]);
   assert.deepEqual(imports.sort(), ["./contract.ts", "./explanation.ts"]);
+});
+
+// ---------------------------------------------------------------------------
+// Addresses written without a scheme
+// ---------------------------------------------------------------------------
+
+test("an unmeasured address without http:// is refused, exactly as one with it is", () => {
+  // The hole this closed: the same destination, minus four characters, used to
+  // go straight through the address check.
+  for (const written of [
+    "https://www.competitor-example.com/login",
+    "www.competitor-example.com/login",
+    "//www.competitor-example.com/login",
+    "competitor-example.com/login",
+    "WWW.Competitor-Example.COM/login",
+  ]) {
+    const result = accept(answer({ explanations: [explanation({ recommendation: `Compare with ${written}.` })] }));
+    assert.equal(result.accepted.explanations.length, 0, written);
+    assert.match(result.rejected[0]?.reason ?? "", /address the audit did not measure/, written);
+  }
+});
+
+test("a measured address is still accepted however it is written", () => {
+  // The other half: recognising an address must not become refusing every one.
+  for (const written of [SAMPLE_URL, SAMPLE_URL.replace("https://", ""), "example.com/about"]) {
+    const result = accept(answer({ explanations: [explanation({ explanation: `The page ${written} has none.` })] }));
+    assert.equal(result.accepted.explanations.length, 1, written);
+  }
+});
+
+test("an address that merely contains a measured one is not treated as measured", () => {
+  for (const written of [
+    "https://example.com.evil.test/about",
+    "evil.test/example.com/about",
+    "https://evil.test/?go=example.com/about",
+    "example.com.evil.test/about",
+  ]) {
+    const result = accept(answer({ explanations: [explanation({ businessImpact: `See ${written} for more.` })] }));
+    assert.equal(result.accepted.explanations.length, 0, written);
+  }
+});
+
+test("file names and technology names are not mistaken for addresses", () => {
+  // These are the things a website audit talks about constantly. Reading them
+  // as links would refuse honest writing about the very files it reports on.
+  const prose =
+    "Your robots.txt allows crawling and sitemap.xml lists every page. " +
+    "The theme ships a large bundle built with Node.js, and index.html loads style.css before it.";
+  const result = accept(answer({ explanations: [explanation({ explanation: prose })] }));
+
+  assert.equal(result.accepted.explanations.length, 1);
+});
+
+test("a scheme that is not a web address is left to the fields that own it", () => {
+  // mailto: is not a page, and the address guarantee is written about pages.
+  const result = accept(answer({ explanations: [explanation({ recommendation: "Email mailto:owner@example.com." })] }));
+  assert.equal(result.accepted.explanations.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Figures the audit never measured
+// ---------------------------------------------------------------------------
+
+test("a figure the audit never measured is refused, whatever it claims to be", () => {
+  const invented = [
+    "Your Largest Contentful Paint is 9.8 seconds.",
+    "73% of your pages are affected.",
+    "This problem affects 400 pages across the site.",
+    "Your performance score is 94.6 out of 100.",
+    "Fixing this typically brings a 42% lift in traffic.",
+    "We counted 1,234 broken links.",
+  ];
+
+  for (const prose of invented) {
+    const result = accept(answer({ explanations: [explanation({ businessImpact: prose })] }));
+    assert.equal(result.accepted.explanations.length, 0, prose);
+    assert.match(result.rejected[0]?.reason ?? "", /figure the audit did not measure/, prose);
+  }
+});
+
+test("a figure the audit did measure may be explained", () => {
+  // The whole point of the boundary: the model explains what was measured.
+  // `reportInput` carries 900 characters of body text, 3 images of which 1
+  // has no alt text, and a finding affecting 4 of 12 evaluated pages.
+  for (const prose of [
+    "The page carries 900 characters of visible text, which is thin.",
+    "Of its 3 images, 1 has no alt text.",
+    "It affects 4 of the 12 pages that were read.",
+    "The remediation asks for about 155 characters, which this page does not have.",
+  ]) {
+    const result = accept(answer({ explanations: [explanation({ explanation: prose })] }));
+    assert.equal(result.accepted.explanations.length, 1, prose);
+  }
+});
+
+test("names that contain digits are not read as claims about quantity", () => {
+  // "h1" is a heading, not a number, and a validator that could not tell would
+  // refuse most honest writing about page structure.
+  const prose =
+    "The page has no h1, its h2 headings are used for styling, and it is served over HTTP/2 with UTF-8 encoding.";
+  const result = accept(answer({ explanations: [explanation({ explanation: prose })] }));
+
+  assert.equal(result.accepted.explanations.length, 1);
+});
+
+test("qualitative recommendations with no figures at all are untouched", () => {
+  for (const prose of [
+    "Improve the alt text on images so screen readers can describe them.",
+    "Consider reducing unused JavaScript on the template.",
+    "Review the content security policy before tightening it.",
+    "Improve the heading structure so the page has one clear title.",
+  ]) {
+    const result = accept(answer({ explanations: [explanation({ recommendation: prose })] }));
+    assert.equal(result.accepted.explanations.length, 1, prose);
+  }
+});
+
+test("a summary quoting a figure nobody measured is refused whole, and the report keeps its own", () => {
+  const result = validateExplanations(
+    reportInput(),
+    answer({ executiveSummary: "We found 8 critical issues and a 73% drop in speed." }),
+  );
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /figure the audit did not measure/);
+});
+
+test("a summary written from the measurements is accepted", () => {
+  const result = accept(answer({ executiveSummary: "Two issues stand out, and 1 of them affects the home page." }));
+  assert.equal(result.accepted.executiveSummary, "Two issues stand out, and 1 of them affects the home page.");
+});
+
+test("credentials in front of a measured page are refused however the address is written", () => {
+  /*
+   * The PAGE was measured; the address being offered is not that page. It is
+   * that page with a username and password attached, and printing it in a
+   * client's report hands those to whoever reads it. Stripping the credentials
+   * to compare would make the two look identical, which is precisely the
+   * comparison this must not make.
+   */
+  for (const written of [
+    "https://admin:hunter2@example.com/about",
+    "admin:hunter2@example.com/about",
+    "//admin:hunter2@example.com/about",
+  ]) {
+    const result = accept(answer({ explanations: [explanation({ explanation: `Try ${written} now.` })] }));
+    assert.equal(result.accepted.explanations.length, 0, written);
+    assert.match(result.rejected[0]?.reason ?? "", /address the audit did not measure/, written);
+  }
+});
+
+test("a bare email address is left to the decision that owns it", () => {
+  // Corpus I13: whether the address guarantee should cover email is an open
+  // product decision. Recognising scheme-less addresses must not settle it by
+  // accident, so an email with no path is still not read as a destination.
+  const result = accept(
+    answer({ explanations: [explanation({ recommendation: "Email owner@competitor-example.com for help." })] }),
+  );
+
+  assert.equal(result.accepted.explanations.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// A summary that contradicts the findings
+// ---------------------------------------------------------------------------
+
+test("a summary claiming nothing was found is refused when the audit found problems", () => {
+  for (const summary of [
+    "No problems were found. This website is fully secure and needs no work.",
+    "We found no issues on this site.",
+    "All clear — nothing to fix.",
+    "The site has a clean bill of health.",
+  ]) {
+    const result = validateExplanations(reportInput(), answer({ executiveSummary: summary }));
+    assert.equal(result.ok, false, summary);
+    if (result.ok) continue;
+    assert.match(result.reason, /found nothing, and it found problems/, summary);
+  }
+});
+
+test("the same claim is accepted when the audit really did find nothing", () => {
+  // The prompt asks for exactly this sentence on a clean audit, and a check
+  // that refused it would make an honest report impossible to write.
+  const clean = reportInput({ findings: [] });
+  const result = validateExplanations(clean, answer({ executiveSummary: "No problems were found." }));
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.accepted.executiveSummary, "No problems were found.");
+});
+
+test("passing checks are not problems, so an all-clear summary stands beside them", () => {
+  const passesOnly = reportInput({
+    findings: reportInput().findings.map((finding) => ({ ...finding, severity: "good" as const })),
+  });
+  const result = validateExplanations(passesOnly, answer({ executiveSummary: "No problems were found." }));
+
+  assert.equal(result.ok, true);
+});
+
+test("a summary that opens with an all-clear and then reports the problems is accepted", () => {
+  // The false positive this guard must not have: the sentence is true, and
+  // refusing it would cost the report an honest summary.
+  for (const summary of [
+    "No problems were found with the certificate, but three other checks failed and need attention.",
+    "No issues were found in the markup, however the missing description is worth fixing.",
+    "Nothing to fix on the security headers; the description issue remains.",
+  ]) {
+    const result = validateExplanations(reportInput(), answer({ executiveSummary: summary }));
+    assert.equal(result.ok, true, summary);
+  }
+});
+
+test("a paraphrase the guard cannot see is still not the report's verdict", () => {
+  /*
+   * Stated rather than hidden: this check catches flat all-clears, not every
+   * way English can imply one. "Your site is in great shape" gets through —
+   * and the reader still meets the measured verdict, which the report prints
+   * from the findings above wherever this paragraph appears.
+   */
+  const result = validateExplanations(reportInput(), answer({ executiveSummary: "Your site is in great shape overall." }));
+  assert.equal(result.ok, true);
+
+  // What the reader is told regardless, built from the same findings.
+  const measured = reportInput().findings.map(
+    (finding) =>
+      ({
+        id: finding.ruleId,
+        title: finding.ruleId,
+        category: finding.category,
+        severity: finding.severity,
+        evidence: "e",
+        remediation: "r",
+      }) as Finding,
+  );
+  assert.match(findingsVerdict(measured), /^This audit found /);
+  assert.notEqual(findingsVerdict(measured), "");
 });

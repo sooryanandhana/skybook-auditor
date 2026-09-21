@@ -543,6 +543,32 @@ test("Disallow: /* blocks the whole site, because the pattern matcher says so", 
   );
 });
 
+test("Disallow: /$ blocks only the home page, so the whole site is NOT blocked", () => {
+  // `$` anchors the end of the path, so the pattern matches only the exact
+  // address "/" -- /about and every other page stay crawlable. Reporting the
+  // whole site as blocked here was a false Critical (was a defect, J3).
+  assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /$"), false);
+});
+
+test("the three canonical root patterns are told apart", () => {
+  // The whole point of probing a non-root path as well as "/".
+  assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /"), true, "/ blocks everything");
+  assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /*"), true, "/* blocks everything");
+  assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /$"), false, "/$ blocks only the root");
+});
+
+test("under Disallow: /$ a non-root page really is allowed", () => {
+  // The behaviour the finding depends on, asserted through the same policy the
+  // crawler obeys so the rule and the crawler cannot drift: /about is crawlable.
+  const policy = parseRobots("User-agent: *\nDisallow: /$");
+  assert.equal(policy.isAllowed("https://example.com/"), false, "the home page is disallowed");
+  assert.equal(policy.isAllowed("https://example.com/about"), true, "but /about is not");
+});
+
+test("Disallow: /$ with an Allow exception is still not a whole-site block", () => {
+  assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /$\nAllow: /public/"), false);
+});
+
 test("the wildcard group on its own still fires", () => {
   assert.equal(blocksEveryCrawler(BLOCKS_ALL), true);
 });

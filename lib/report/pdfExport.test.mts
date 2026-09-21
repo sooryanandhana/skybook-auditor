@@ -469,8 +469,8 @@ test("the page shows the download only when there is a report to download", () =
   const source = read("../../app/AuditPage.tsx");
 
   assert.ok(
-    source.includes("exportableJobId(jobId, result !== null)"),
-    "the page decides it from both facts",
+    source.includes("exportableJobId(jobId, result !== null || certificateFailure !== null)"),
+    "the page decides it from the job and whichever kind of result is on screen",
   );
   assert.ok(
     source.includes("{reportJobId !== null && ("),

@@ -608,6 +608,8 @@ export interface AIReportPageMeasurements {
 export interface AIReportHeaderPresence {
   readonly strictTransportSecurity: boolean;
   readonly contentSecurityPolicy: boolean;
+  /** A policy delivered in a <meta> tag, which browsers enforce but weakly. */
+  readonly contentSecurityPolicyMeta: boolean;
   /** Monitored but NOT enforced, so it protects nobody. Kept distinct. */
   readonly contentSecurityPolicyReportOnly: boolean;
   readonly xFrameOptions: boolean;

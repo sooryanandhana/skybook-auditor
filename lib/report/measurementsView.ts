@@ -31,6 +31,7 @@
  * somewhere else.
  */
 import { ALL_RULES } from "../rules/all.ts";
+import { findingsSummary, type FindingsState } from "./findingsState.ts";
 import type { CrawlStopReason } from "../collector/crawlFrontier.ts";
 import type { SiteCrawlSummary } from "../collector/crawlSite.ts";
 import type { RobotsStatus } from "../collector/robots.ts";
@@ -245,7 +246,7 @@ export function certificateFacts(ssl: SslData): FactRow[] {
     note: certificate.subjectAltNames.length > 0 ? namesNote(certificate.subjectAltNames) : undefined,
   });
 
-  rows.push({ label: "Trusted", value: trustText(ssl.trusted), note: ssl.problem ? problemNote(ssl.problem) : undefined });
+  rows.push({ label: "Trusted", value: trustText(ssl.trusted), note: ssl.problem ? certificateProblemLabel(ssl.problem) : undefined });
 
   if (certificate.protocol) rows.push({ label: "Protocol", value: certificate.protocol });
 
@@ -280,19 +281,6 @@ function namesNote(names: string[]): string {
 function trustText(trusted: boolean | null): string {
   if (trusted === null) return NOT_CHECKED;
   return trusted ? "Yes, by the system's certificate store" : "No — it did not pass validation";
-}
-
-function problemNote(problem: NonNullable<SslData["problem"]>): string {
-  switch (problem) {
-    case "expired":
-      return "The certificate has expired";
-    case "self-signed":
-      return "The certificate is self-signed, so browsers will not trust it";
-    case "wrong-hostname":
-      return "The certificate was issued for a different address";
-    case "untrusted":
-      return "The certificate could not be verified";
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -988,6 +976,48 @@ export function severityCounts(findings: readonly Finding[]): SeverityCount[] {
   })).filter((entry) => entry.count > 0);
 }
 
+
+/**
+ * What this audit found, in one sentence of its own.
+ *
+ * THE REPORT'S VERDICT IS THE MEASUREMENT'S, NOT THE MODEL'S. A written
+ * summary sits beside these findings, and a reader must never have to take
+ * that paragraph's word for whether anything is wrong. This sentence is built
+ * from the graded findings themselves, so the answer to "how did the site do?"
+ * is on the page whatever any model wrote, or wrote nothing at all.
+ *
+ * Empty when nothing was found, because the clean states have their own
+ * wording in `findingsSummary` and two sentences saying it would be one too
+ * many. Counts come from `severityCounts`, which already excludes passes.
+ */
+export function findingsVerdict(findings: readonly Finding[]): string {
+  const counts = severityCounts(findings);
+  if (counts.length === 0) return "";
+
+  const parts = counts.map((entry) => `${entry.count} ${entry.label}`);
+  const listed =
+    parts.length === 1
+      ? parts[0]
+      : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  const total = counts.reduce((running, entry) => running + entry.count, 0);
+
+  return `This audit found ${listed} ${total === 1 ? "issue" : "issues"}.`;
+}
+
+/**
+ * The audit's own sentence about what it found, whichever state it is in.
+ *
+ * ONE FUNCTION FOR BOTH SURFACES, so the browser report and the PDF cannot
+ * disagree about the verdict the way two copies of a sentence eventually do.
+ */
+export function findingsHeadline(
+  findings: readonly Finding[],
+  state: FindingsState,
+): string {
+  const verdict = findingsVerdict(findings);
+  return verdict === "" ? findingsSummary(state) : verdict;
+}
+
 // ---------------------------------------------------------------------------
 // Checks that could not run, in words a client can read
 // ---------------------------------------------------------------------------
@@ -1156,6 +1186,9 @@ export function hstsSummary(hsts: SecurityData["hsts"], headerPresent: boolean):
  */
 export function cspSummary(security: SecurityData): string {
   if (security.contentSecurityPolicy.present) return "Present";
+  if (security.contentSecurityPolicyMeta) {
+    return "Present in a meta tag — enforced, but weaker than a header";
+  }
   if (security.contentSecurityPolicyReportOnly.present) {
     return "Report-only — monitored but not enforced";
   }
@@ -1167,13 +1200,22 @@ export function cspSummary(security: SecurityData): string {
  *
  * READS NAMES AND FLAGS ONLY. The audit never captures a cookie's value, so
  * there is none here to leak into a report a client keeps.
+ *
+ * THE GAPS ARE COUNTED OVER STORED COOKIES ONLY, because those are the ones
+ * the rules grade. A header that clears a cookie states a lifetime already
+ * past, so nothing is kept and its missing flags protect nothing — counting it
+ * here would put a number in the facts that no finding accounts for. It is
+ * still reported as sent, because it was.
  */
 export function cookieSummary(cookies: SecurityData["cookies"]): string {
   if (cookies.total === 0) return "None set by this page";
 
-  const missingSecure = cookies.cookies.filter((c) => !c.secure).length;
-  const missingHttpOnly = cookies.cookies.filter((c) => !c.httpOnly).length;
-  const missingSameSite = cookies.cookies.filter((c) => c.sameSite === null).length;
+  const stored = cookies.cookies.filter((cookie) => !cookie.expired);
+  const cleared = cookies.cookies.length - stored.length;
+
+  const missingSecure = stored.filter((c) => !c.secure).length;
+  const missingHttpOnly = stored.filter((c) => !c.httpOnly).length;
+  const missingSameSite = stored.filter((c) => c.sameSite === null).length;
 
   const gaps = [
     missingSecure > 0 ? `${missingSecure} without Secure` : null,
@@ -1182,9 +1224,14 @@ export function cookieSummary(cookies: SecurityData["cookies"]): string {
   ].filter(Boolean);
 
   const plural = cookies.total === 1 ? "" : "s";
+  const clearedNote =
+    cleared === 0 ? "" : ` (${cleared} already expired, so ${cleared === 1 ? "it is" : "they are"} not stored)`;
+
+  if (stored.length === 0) return `${cookies.total} cookie${plural}${clearedNote}`;
+
   return gaps.length === 0
-    ? `${cookies.total} cookie${plural}, all flags set`
-    : `${cookies.total} cookie${plural} — ${gaps.join(", ")}`;
+    ? `${cookies.total} cookie${plural}, all flags set${clearedNote}`
+    : `${cookies.total} cookie${plural} — ${gaps.join(", ")}${clearedNote}`;
 }
 
 /**
@@ -1199,6 +1246,15 @@ export function mixedContentSummary(mixed: SecurityData["mixedContent"]): string
   if (mixed.total === 0) return "None found in the page HTML";
 
   const blocking = mixed.activeCount > 0 ? `, ${mixed.activeCount} likely blocked by browsers` : "";
+
+  // The references are real and still worth disclosing, but an enforced
+  // upgrade-insecure-requests policy makes browsers rewrite them to HTTPS before
+  // loading — so they are not loaded over plain HTTP. Said plainly, without
+  // grading the policy.
+  if (mixed.upgradeInsecureRequests) {
+    return `${mixed.total} found in the page HTML${blocking}, but an enforced upgrade-insecure-requests policy makes browsers load them over HTTPS`;
+  }
+
   return `${mixed.total} found in the page HTML, loaded over plain HTTP${blocking}`;
 }
 
@@ -1269,9 +1325,13 @@ export function securityFacts(security: SecurityData): SecurityFactRow[] {
               .slice(0, MAX_COOKIES_LISTED)
               .map(
                 (cookie) =>
-                  `${cookie.name}: ${cookie.secure ? "Secure" : "no Secure"}, ${
-                    cookie.httpOnly ? "HttpOnly" : "no HttpOnly"
-                  }, SameSite=${cookie.sameSite ?? "not set"}`,
+                  cookie.expired
+                    ? // Already expired: the browser keeps nothing, so its flags
+                      // are not listed as though they protected something.
+                      `${cookie.name}: already expired, not stored`
+                    : `${cookie.name}: ${cookie.secure ? "Secure" : "no Secure"}, ${
+                        cookie.httpOnly ? "HttpOnly" : "no HttpOnly"
+                      }, SameSite=${cookie.sameSite ?? "not set"}`,
               )
               .join("  ·  ")
           : undefined,

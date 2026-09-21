@@ -10,6 +10,7 @@ import test from "node:test";
 import fs from "node:fs";
 import { codeOnly } from "./provider.test.mts";
 import {
+  GLOBAL_SENDS,
   MAX_SENDS,
   SEND_RATE_LIMITED,
   SEND_WINDOW_MS,
@@ -150,4 +151,55 @@ test("spending is what counts down, one at a time", () => {
   }
 
   assert.equal(sendAllowance("1.2.3.4", NOW).allowed, false);
+});
+
+/* ---------------------------------------------------------------------------
+   The server-wide ceiling
+   --------------------------------------------------------------------------- */
+
+test("the whole server may send GLOBAL_SENDS before it refuses everyone", () => {
+  resetSendLimit();
+  // Spread across many distinct callers, each well under their own MAX_SENDS.
+  let sent = 0;
+  for (let i = 0; i < GLOBAL_SENDS + 10; i += 1) {
+    const caller = `203.0.113.${i}`;
+    if (sendAllowance(caller, NOW).allowed) {
+      recordSend(caller, NOW);
+      sent += 1;
+    }
+  }
+  assert.equal(sent, GLOBAL_SENDS, "the ceiling holds however the sends are spread");
+});
+
+test("the ceiling refuses a caller who still has their own allowance", () => {
+  resetSendLimit();
+  for (let i = 0; i < GLOBAL_SENDS; i += 1) {
+    const caller = `203.0.113.${i}`;
+    recordSend(caller, NOW);
+  }
+  // A brand-new caller, nothing spent individually, is still refused.
+  const fresh = sendAllowance("198.51.100.99", NOW);
+  assert.equal(fresh.allowed, false);
+  assert.ok(fresh.retryAfterSeconds >= 1);
+});
+
+test("the ceiling sits above one caller's own limit", () => {
+  // A single caller is still stopped at MAX_SENDS, before the ceiling matters.
+  resetSendLimit();
+  let sent = 0;
+  for (let i = 0; i < GLOBAL_SENDS + 5; i += 1) {
+    if (sendAllowance("203.0.113.7", NOW).allowed) {
+      recordSend("203.0.113.7", NOW);
+      sent += 1;
+    }
+  }
+  assert.equal(sent, MAX_SENDS);
+  assert.ok(MAX_SENDS < GLOBAL_SENDS);
+});
+
+test("the ceiling forgets sends once the window has passed", () => {
+  resetSendLimit();
+  for (let i = 0; i < GLOBAL_SENDS; i += 1) recordSend(`203.0.113.${i}`, NOW);
+  assert.equal(sendAllowance("198.51.100.99", NOW).allowed, false);
+  assert.equal(sendAllowance("198.51.100.99", NOW + SEND_WINDOW_MS + 1).allowed, true);
 });

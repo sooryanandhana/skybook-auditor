@@ -246,28 +246,36 @@ test("says nothing when the setting is valid or absent", () => {
   assert.deepEqual(warnings, [], "no setting at all is not a problem either");
 });
 
-test("identifies the caller from the forwarding header", () => {
+test("the forwarding header is ignored unless a proxy is trusted", () => {
   const request = new Request("http://localhost/api/audit", {
     headers: { "x-forwarded-for": "203.0.113.5, 70.41.3.18" },
   });
-  // The first entry is the original client; the rest are proxies.
-  assert.equal(callerKey(request), "203.0.113.5");
+  // Default: the header is the client's own word and is not believed, so every
+  // request is the one shared bucket rather than a caller of its choosing.
+  assert.equal(callerKey(request), "unattributed");
 });
 
-test("falls back to x-real-ip, then to a shared key", () => {
+test("behind a trusted proxy, the first forwarding hop is the caller", () => {
+  const request = new Request("http://localhost/api/audit", {
+    headers: { "x-forwarded-for": "203.0.113.5, 70.41.3.18" },
+  });
+  assert.equal(callerKey(request, true), "203.0.113.5");
+});
+
+test("behind a trusted proxy, x-real-ip is the fallback, then the shared key", () => {
   const withRealIp = new Request("http://localhost/api/audit", {
     headers: { "x-real-ip": "203.0.113.9" },
   });
-  assert.equal(callerKey(withRealIp), "203.0.113.9");
+  assert.equal(callerKey(withRealIp, true), "203.0.113.9");
 
   const withNeither = new Request("http://localhost/api/audit");
-  assert.equal(callerKey(withNeither), "unknown");
+  assert.equal(callerKey(withNeither, true), "unattributed");
 });
 
 test("callers with no identifying header share one allowance", () => {
   // Better to limit them together than to leave them unlimited.
   const anonymous = new Request("http://localhost/api/audit");
-  const key = callerKey(anonymous);
+  const key = callerKey(anonymous, true);
 
   for (let i = 0; i < 10; i++) checkRateLimit(key);
   assert.equal(checkRateLimit(key).allowed, false);
@@ -320,9 +328,10 @@ test("a blocked caller stays blocked, and does not extend their own lockout", ()
 
 test("changing X-Forwarded-For does NOT buy unlimited audits", () => {
   /*
-   * The bug, stated as a test. Every request here looks like a different
-   * caller and every one of them passes its own allowance untouched. Without
-   * the ceiling this loop would return `allowed` two hundred times.
+   * The bug, closed. Every request sets a different header, but by default the
+   * header is not trusted, so all two hundred are the one shared bucket and the
+   * per-caller limit stops them at ten. Without the fix this returned allowed
+   * two hundred times; before the global ceiling, it returned thirty.
    */
   let allowed = 0;
   for (let i = 0; i < 200; i += 1) {
@@ -330,19 +339,21 @@ test("changing X-Forwarded-For does NOT buy unlimited audits", () => {
     if (checkRateLimit(caller).allowed) allowed += 1;
   }
 
-  assert.equal(allowed, GLOBAL_LIMIT, "the ceiling held, whatever the header said");
+  assert.equal(allowed, DEFAULT_LIMIT, "rotation buys nothing; the per-caller limit holds");
   assert.ok(allowed < 200);
 });
 
-test("the spoofer is refused by the GLOBAL limit, not their own", () => {
+test("in the default posture a rotated header is refused by the per-caller limit", () => {
+  // Untrusted, every spoofed request is the shared bucket, so it is that
+  // bucket's own ten that stops them -- not the global ceiling.
   const fresh = (i: number) => callerKey(requestWith({ "x-forwarded-for": `203.0.113.${i}` }));
 
-  for (let i = 0; i < GLOBAL_LIMIT; i += 1) checkRateLimit(fresh(i));
+  for (let i = 0; i < DEFAULT_LIMIT; i += 1) checkRateLimit(fresh(i));
 
-  const next = checkRateLimit(fresh(GLOBAL_LIMIT + 1));
+  const next = checkRateLimit(fresh(DEFAULT_LIMIT + 1));
   assert.equal(next.allowed, false);
-  assert.equal(next.scope, "global", "this caller has done nothing individually");
-  assert.equal(next.limit, GLOBAL_LIMIT);
+  assert.equal(next.scope, "caller");
+  assert.equal(next.limit, DEFAULT_LIMIT);
   assert.ok(next.retryAfterSeconds >= 1);
 });
 
@@ -450,4 +461,55 @@ test("a 429 still carries a usable Retry-After, whichever limit refused it", () 
   assert.equal(global.scope, "global");
   assert.ok(global.retryAfterSeconds >= 1 && global.retryAfterSeconds <= 60);
   assert.equal(global.remaining, 0);
+});
+
+/* ---------------------------------------------------------------------------
+   The trust posture and address normalisation
+   --------------------------------------------------------------------------- */
+
+test("behind a trusted proxy, thirty distinct callers still hit the global ceiling", () => {
+  // The ceiling is the same value keyed on nobody, so distinct trusted callers
+  // fill it just as spoofed ones would have — but now they must be distinct.
+  resetRateLimits();
+  for (let i = 0; i < GLOBAL_LIMIT; i += 1) {
+    checkRateLimit(callerKey(requestWith({ "x-forwarded-for": `203.0.113.${i}` }), true));
+  }
+  const next = checkRateLimit(callerKey(requestWith({ "x-forwarded-for": "203.0.113.200" }), true));
+  assert.equal(next.allowed, false);
+  assert.equal(next.scope, "global");
+  assert.equal(next.limit, GLOBAL_LIMIT);
+});
+
+test("behind a trusted proxy, alternate spellings of one address share one bucket", () => {
+  resetRateLimits();
+  const spellings = ["127.0.0.1", "::ffff:127.0.0.1", "::ffff:7f00:1", "::FFFF:127.0.0.1"];
+  let allowed = 0;
+  for (let i = 0; i < 40; i += 1) {
+    if (checkRateLimit(callerKey(requestWith({ "x-forwarded-for": spellings[i % spellings.length] }), true)).allowed) {
+      allowed += 1;
+    }
+  }
+  assert.equal(allowed, DEFAULT_LIMIT, "one machine, one allowance, whatever the spelling");
+});
+
+test("behind a trusted proxy, a junk header cannot mint a fresh bucket per request", () => {
+  resetRateLimits();
+  let allowed = 0;
+  for (let i = 0; i < 40; i += 1) {
+    if (checkRateLimit(callerKey(requestWith({ "x-forwarded-for": `not-an-ip-${i}` }), true)).allowed) allowed += 1;
+  }
+  assert.equal(allowed, DEFAULT_LIMIT, "junk collapses to the shared bucket");
+});
+
+test("the trust posture is read from SKYBOOK_TRUST_PROXY when no flag is passed", () => {
+  const previous = process.env.SKYBOOK_TRUST_PROXY;
+  try {
+    process.env.SKYBOOK_TRUST_PROXY = "1";
+    assert.equal(callerKey(requestWith({ "x-forwarded-for": "203.0.113.5" })), "203.0.113.5");
+    delete process.env.SKYBOOK_TRUST_PROXY;
+    assert.equal(callerKey(requestWith({ "x-forwarded-for": "203.0.113.5" })), "unattributed");
+  } finally {
+    if (previous === undefined) delete process.env.SKYBOOK_TRUST_PROXY;
+    else process.env.SKYBOOK_TRUST_PROXY = previous;
+  }
 });

@@ -152,6 +152,15 @@ const SEARCH_ENGINE_AGENTS = ["googlebot", "bingbot"] as const;
  * even though its root is. That is a property of the parsed rules rather than
  * a second reading of the text.
  */
+/**
+ * A stand-in for "any page that is not the home page".
+ *
+ * Used to tell a whole-site block from one that only names the root. Its exact
+ * value does not matter, only that it is a non-root path a broad `Disallow: /`
+ * or `Disallow: /*` matches while an end-anchored `Disallow: /$` does not.
+ */
+const NON_ROOT_PROBE_PATH = "/robots-scope-probe";
+
 export function blocksEveryCrawler(robotsTxt: string): boolean {
   const groups = parseGroups(robotsTxt);
 
@@ -166,7 +175,18 @@ export function blocksEveryCrawler(robotsTxt: string): boolean {
     // An exception anywhere in the group means some of the site is reachable.
     if (rules.some((rule) => rule.allow)) return false;
 
-    return !isPathAllowed(rules, "/");
+    /*
+     * "BLOCKS THE WHOLE SITE" IS MORE THAN "BLOCKS THE HOME PAGE".
+     *
+     * `Disallow: /$` matches only the exact path "/" -- the `$` anchors the end
+     * -- so /about and every other page stay crawlable and the site is NOT
+     * entirely blocked. Probing the root alone read that as a full block and
+     * raised a false Critical. So a representative non-root path is probed too,
+     * and the site counts as entirely blocked only when BOTH are disallowed:
+     * `Disallow: /` and `Disallow: /*` block both, `Disallow: /$` blocks only
+     * the root.
+     */
+    return !isPathAllowed(rules, "/") && !isPathAllowed(rules, NON_ROOT_PROBE_PATH);
   });
 }
 

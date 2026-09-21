@@ -143,6 +143,8 @@ export function runSecurityChecks(
   html: string,
   servedOverHttps: boolean,
   setCookieHeaders: string[] = [],
+  /** When the response was read. Injectable so a cookie's expiry can be tested. */
+  now: Date = new Date(),
 ): SecurityData {
   const strictTransportSecurity = readHeader(headers, "strict-transport-security");
 
@@ -152,14 +154,19 @@ export function runSecurityChecks(
     strictTransportSecurity,
     contentSecurityPolicy: readHeader(headers, "content-security-policy"),
     contentSecurityPolicyReportOnly: readHeader(headers, "content-security-policy-report-only"),
+    contentSecurityPolicyMeta: hasMetaContentSecurityPolicy(html),
     xFrameOptions: readHeader(headers, "x-frame-options"),
     xContentTypeOptions: readHeader(headers, "x-content-type-options"),
     referrerPolicy: readHeader(headers, "referrer-policy"),
     permissionsPolicy: readHeader(headers, "permissions-policy"),
 
     hsts: parseHsts(strictTransportSecurity.value, servedOverHttps),
-    mixedContent: findMixedContent(html, servedOverHttps),
-    cookies: parseCookies(setCookieHeaders),
+    mixedContent: findMixedContent(
+      html,
+      servedOverHttps,
+      hasEnforcedUpgradeInsecureRequests(headers, html),
+    ),
+    cookies: parseCookies(setCookieHeaders, now),
     insecureFormActions: findInsecureFormActions(html),
 
     serverHeader: readHeader(headers, "server"),
@@ -185,7 +192,56 @@ const COOKIES_NOT_INSPECTED = [
  * session token, and an audit has no reason to hold one — let alone put it in
  * a report emailed to a client.
  */
-export function parseCookies(setCookieHeaders: string[]): CookieData {
+/**
+ * Whether the header's own lifetime has already ended when it arrives.
+ *
+ * RFC 6265 §5.2.1-5.2.2, and only what the header itself states:
+ *
+ *   Max-Age wins over Expires whenever it is present and readable, which is
+ *   what the specification says and what browsers do.
+ *   Max-Age of zero or less expires the cookie immediately.
+ *   Otherwise an Expires date already in the past does the same.
+ *   A cookie with neither attribute lasts for the browsing session, so it is
+ *   not expired.
+ *
+ * WHY THIS IS MEASURED AT ALL. A response that clears a cookie -- a logout,
+ * most often -- carries the same shape as one that sets it, and without this
+ * the audit graded that header as if a cookie were being stored. "This cookie
+ * lacks Secure" about a cookie that no browser keeps is a finding about
+ * nothing.
+ *
+ * "ALREADY EXPIRED" IS NOT "A DELETION". Whether some earlier cookie is being
+ * cleared is not in the header and is not claimed here. What the header states
+ * is that nothing is stored, and that is all this records.
+ */
+function isAlreadyExpired(attributes: readonly string[], now: Date): boolean {
+  const maxAge = attributes.find((part) => part.startsWith("max-age="));
+  if (maxAge !== undefined) {
+    /*
+     * Max-Age is a whole number of seconds. RFC 6265 §5.2.2 says an attribute
+     * that does not read as one is ignored entirely -- so "Max-Age=" and
+     * "Max-Age=soon" say nothing, and Expires is consulted instead. Reading an
+     * empty value as zero would turn a malformed header into a deletion.
+     */
+    const seconds = maxAge.slice("max-age=".length).trim();
+    if (/^-?\d+$/.test(seconds)) return Number(seconds) <= 0;
+  }
+
+  const expires = attributes.find((part) => part.startsWith("expires="));
+  if (expires === undefined) return false;
+
+  const at = new Date(expires.slice("expires=".length).trim());
+  // An unreadable date says nothing, so nothing is concluded from it.
+  return Number.isNaN(at.getTime()) ? false : at.getTime() <= now.getTime();
+}
+
+/**
+ * The cookies a response sets, as the flags that protect them.
+ *
+ * `now` is injectable so a test can state what "already expired" means for it;
+ * production passes the moment the response was read.
+ */
+export function parseCookies(setCookieHeaders: string[], now: Date = new Date()): CookieData {
   const cookies: CookieInfo[] = [];
 
   for (const header of setCookieHeaders) {
@@ -206,6 +262,7 @@ export function parseCookies(setCookieHeaders: string[]): CookieData {
       secure: attributes.includes("secure"),
       httpOnly: attributes.includes("httponly"),
       sameSite: sameSiteAttribute ? sameSiteAttribute.slice("samesite=".length).trim() || null : null,
+      expired: isAlreadyExpired(attributes, now),
     });
   }
 
@@ -323,12 +380,25 @@ export function parseHsts(value: string | null, servedOverHttps: boolean): HstsD
  * Links (<a href="http://...">) are not counted either. A link is somewhere
  * the visitor may choose to go, not something this page loads.
  */
-export function findMixedContent(html: string, servedOverHttps: boolean): MixedContentData {
+export function findMixedContent(
+  html: string,
+  servedOverHttps: boolean,
+  /**
+   * Whether an enforced CSP upgrades these references before they load. Measured
+   * by the caller (see `hasEnforcedUpgradeInsecureRequests`) and only recorded
+   * here — the raw references are still found and listed either way. Defaults to
+   * false so a caller that has not measured it gets the plain reading.
+   */
+  upgradeInsecureRequests = false,
+): MixedContentData {
   if (!servedOverHttps) {
     return {
       applicable: false,
       total: 0,
       activeCount: 0,
+      // Mixed content does not apply on a plain HTTP page, so whether a policy
+      // would upgrade it is moot: recorded as false rather than measured.
+      upgradeInsecureRequests: false,
       items: [],
       truncated: false,
       notInspected: NOT_INSPECTED,
@@ -341,6 +411,7 @@ export function findMixedContent(html: string, servedOverHttps: boolean): MixedC
     applicable: true,
     total: found.length,
     activeCount: found.filter((item) => item.kind === "active").length,
+    upgradeInsecureRequests,
     items: found.slice(0, MIXED_CONTENT_LIMIT),
     truncated: found.length > MIXED_CONTENT_LIMIT,
     notInspected: NOT_INSPECTED,
@@ -595,6 +666,100 @@ function matchAllWithText(text: string, pattern: RegExp): Array<{ url: string; t
  * Unlike mixed content, this is reported on HTTP pages too — the risk to the
  * person typing is the same either way.
  */
+/**
+ * Whether the page's HTML delivers a Content-Security-Policy in a meta element.
+ *
+ * READS THE HTML, LIKE THE MIXED-CONTENT AND FORM CHECKS. The CSP specification
+ * defines `<meta http-equiv="Content-Security-Policy" content="...">` as a way
+ * to deliver a policy, and browsers enforce it. So a page carrying only this,
+ * and no header, is not a page with no policy.
+ *
+ * The `http-equiv` value is compared in code rather than in the selector,
+ * because an attribute-value selector is case-sensitive and the pragma is not:
+ * "Content-Security-Policy" and "content-security-policy" are the same pragma.
+ * A meta element cannot carry a report-only policy -- the specification forbids
+ * it -- so anything found here is an enforcing policy. An empty `content` is
+ * not a policy and does not count.
+ */
+export function hasMetaContentSecurityPolicy(html: string): boolean {
+  const $ = cheerio.load(html);
+  let found = false;
+
+  $("meta[http-equiv]").each((_, element) => {
+    const pragma = $(element).attr("http-equiv")?.trim().toLowerCase();
+    const content = $(element).attr("content")?.trim();
+    if (pragma === "content-security-policy" && content) found = true;
+  });
+
+  return found;
+}
+
+/**
+ * The policy text of every ENFORCING `<meta>` Content-Security-Policy.
+ *
+ * The same scan as `hasMetaContentSecurityPolicy` -- same selector, same
+ * case-insensitive pragma, same non-empty-content rule -- but it KEEPS the
+ * content string so a directive can be read from it. A `<meta>` element cannot
+ * carry a report-only policy (the specification forbids it), so anything found
+ * here is enforcing.
+ */
+function metaContentSecurityPolicies(html: string): string[] {
+  const $ = cheerio.load(html);
+  const policies: string[] = [];
+
+  $("meta[http-equiv]").each((_, element) => {
+    const pragma = $(element).attr("http-equiv")?.trim().toLowerCase();
+    const content = $(element).attr("content")?.trim();
+    if (pragma === "content-security-policy" && content) policies.push(content);
+  });
+
+  return policies;
+}
+
+/**
+ * Whether a CSP policy string contains one directive, matched by NAME.
+ *
+ * A policy is a list of directives separated by semicolons, each a name
+ * optionally followed by whitespace-separated values. So the name is the first
+ * whitespace-delimited token of a segment, and only that token is compared.
+ *
+ * DELIBERATELY EXACT, NOT A SUBSTRING TEST. `upgrade-insecure-requests-foo` is a
+ * different (unknown) directive and must not match, and the same word appearing
+ * inside another directive's value -- `default-src 'self' upgrade-insecure-requests`
+ * -- is a source expression, not this directive, so its segment's first token is
+ * `default-src` and it does not match either.
+ */
+function policyHasDirective(policy: string, directive: string): boolean {
+  return policy
+    .split(";")
+    .some((segment) => segment.trim().toLowerCase().split(/\s+/)[0] === directive);
+}
+
+/**
+ * Whether an ENFORCED Content-Security-Policy carries
+ * `upgrade-insecure-requests`.
+ *
+ * Reads two enforcing delivery channels and no others:
+ *   - the `Content-Security-Policy` response header, and
+ *   - an enforcing `<meta http-equiv="Content-Security-Policy">` element.
+ *
+ * `Content-Security-Policy-Report-Only` is NEVER consulted: a report-only policy
+ * is observed but not enforced, so its `upgrade-insecure-requests` upgrades
+ * nothing and must not suppress a mixed-content finding. This reads exactly one
+ * directive for exactly one purpose -- CSP strength is not graded here (E13).
+ */
+export function hasEnforcedUpgradeInsecureRequests(
+  headers: Record<string, string>,
+  html: string,
+): boolean {
+  const header = readHeader(headers, "content-security-policy");
+  const policies = [
+    ...(header.present && header.value ? [header.value] : []),
+    ...metaContentSecurityPolicies(html),
+  ];
+  return policies.some((policy) => policyHasDirective(policy, "upgrade-insecure-requests"));
+}
+
 export function findInsecureFormActions(html: string): string[] {
   const $ = cheerio.load(html);
   const actions: string[] = [];

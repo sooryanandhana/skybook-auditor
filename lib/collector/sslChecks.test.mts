@@ -14,6 +14,7 @@ import {
   matchHostname,
   describeCertificate,
   parseSubjectAltNames,
+  certificateProblemForCode,
   classifyAuthorizationError,
   classifyConnectionFailure,
   summarise,
@@ -348,13 +349,78 @@ test("names each kind of certificate problem", () => {
   const cases: Array<[string, string]> = [
     ["CERT_HAS_EXPIRED", "expired"],
     ["DEPTH_ZERO_SELF_SIGNED_CERT", "self-signed"],
-    ["SELF_SIGNED_CERT_IN_CHAIN", "self-signed"],
     ["ERR_TLS_CERT_ALTNAME_INVALID", "wrong-hostname"],
     ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", "untrusted"],
   ];
   for (const [code, expected] of cases) {
     assert.equal(classifyAuthorizationError(code), expected, `for ${code}`);
     assert.equal(classifyAuthorizationError({ code }), expected, `for {code:${code}}`);
+  }
+});
+
+test("an untrusted authority in the chain is not called self-signed", () => {
+  /*
+   * SELF_SIGNED_CERT_IN_CHAIN: the chain ends at a self-signed authority that
+   * is not trusted. OpenSSL reports it only for a chain longer than the site's
+   * own certificate, which was issued under that authority rather than by
+   * itself — telling a client it is self-signed sends them to fix the wrong thing.
+   * A certificate that signed itself is DEPTH_ZERO_SELF_SIGNED_CERT.
+   */
+  assert.equal(classifyAuthorizationError("SELF_SIGNED_CERT_IN_CHAIN"), "untrusted");
+  assert.equal(certificateProblemForCode("SELF_SIGNED_CERT_IN_CHAIN"), "untrusted");
+  assert.equal(certificateProblemForCode("DEPTH_ZERO_SELF_SIGNED_CERT"), "self-signed");
+});
+
+test("a certificate that is not valid yet is untrusted, never expired", () => {
+  assert.equal(classifyAuthorizationError("CERT_NOT_YET_VALID"), "untrusted");
+  assert.equal(certificateProblemForCode("CERT_NOT_YET_VALID"), "untrusted");
+});
+
+test("an issuer certificate that could not be found is untrusted", () => {
+  for (const code of ["UNABLE_TO_GET_ISSUER_CERT", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "UNABLE_TO_VERIFY_LEAF_SIGNATURE"]) {
+    assert.equal(certificateProblemForCode(code), "untrusted", code);
+  }
+});
+
+test("every certificate verification code Node names has a problem, and the certificate check agrees", () => {
+  // OpenSSL's names for the ways a server certificate fails verification, as
+  // Node reports them, plus Node's own hostname check. Written out here rather
+  // than read from the implementation, so a code dropped from it fails.
+  const named: Record<string, string> = {
+    CERT_HAS_EXPIRED: "expired",
+    DEPTH_ZERO_SELF_SIGNED_CERT: "self-signed",
+    ERR_TLS_CERT_ALTNAME_INVALID: "wrong-hostname",
+    HOSTNAME_MISMATCH: "wrong-hostname",
+    SELF_SIGNED_CERT_IN_CHAIN: "untrusted",
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: "untrusted",
+    UNABLE_TO_GET_ISSUER_CERT_LOCALLY: "untrusted",
+    UNABLE_TO_GET_ISSUER_CERT: "untrusted",
+    CERT_NOT_YET_VALID: "untrusted",
+    ERROR_IN_CERT_NOT_BEFORE_FIELD: "untrusted",
+    ERROR_IN_CERT_NOT_AFTER_FIELD: "untrusted",
+    CERT_SIGNATURE_FAILURE: "untrusted",
+    UNABLE_TO_DECRYPT_CERT_SIGNATURE: "untrusted",
+    UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY: "untrusted",
+    CERT_CHAIN_TOO_LONG: "untrusted",
+    CERT_REVOKED: "untrusted",
+    INVALID_CA: "untrusted",
+    PATH_LENGTH_EXCEEDED: "untrusted",
+    INVALID_PURPOSE: "untrusted",
+    CERT_UNTRUSTED: "untrusted",
+    CERT_REJECTED: "untrusted",
+  };
+  for (const [code, problem] of Object.entries(named)) {
+    assert.equal(certificateProblemForCode(code), problem, code);
+    assert.equal(classifyAuthorizationError(code), problem, code);
+  }
+});
+
+test("a code that is not a certificate verification code names no certificate problem", () => {
+  // The page fetch meets these, and a refused connection is not a certificate
+  // that failed. Only the certificate check, which is told validation failed,
+  // may call an unknown code untrusted.
+  for (const code of ["", "ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EPROTO", "ERR_SSL_WRONG_VERSION_NUMBER", "UND_ERR_SOCKET", "SOME_NEW_CODE"]) {
+    assert.equal(certificateProblemForCode(code), null, code);
   }
 });
 

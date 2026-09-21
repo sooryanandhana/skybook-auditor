@@ -12,7 +12,6 @@ import {
   SKIPPED_HEADING,
   SKIPPED_INTRO,
   findingsState,
-  findingsSummary,
   showsSkippedPanel,
 } from "@/lib/report/findingsState";
 import {
@@ -23,7 +22,10 @@ import {
   SITE_FINDINGS_INTRO,
   affectedView,
   auditStatusText,
+  CERTIFICATE_FAILURE_HEADING,
+  certificateFailureView,
   crawlView,
+  isCertificateFailureAudit,
   hasAffectedList,
   partitionByScope,
   robotsNote,
@@ -53,6 +55,7 @@ import {
   groupByCategory,
   crawlCountTiles,
   crawlStateFacts,
+  findingsHeadline,
   groupSkippedByReason,
   headingCountText,
   securityFacts,
@@ -66,6 +69,7 @@ import type { AIExplanation } from "@/lib/ai/explanation";
 import type {
   AuditData,
   AuditExplanationResponse,
+  CertificateFailureAudit,
   AuditResultResponse,
   AuditStartResponse,
   AuditStatusResponse,
@@ -175,6 +179,17 @@ export function AuditPage() {
    */
   const [jobId, setJobId] = useState<string | null>(null);
 
+  /**
+   * An audit whose entry page could not be fetched securely.
+   *
+   * ITS OWN PIECE OF STATE, beside `result` rather than inside it. There is
+   * no entry page, so every section built from one is simply not rendered --
+   * which is what stops a page measurement appearing for a page nobody read.
+   */
+  const [certificateFailure, setCertificateFailure] = useState<CertificateFailureAudit | null>(
+    null,
+  );
+
   const [result, setResult] = useState<AuditData | null>(null);
   const [error, setError] = useState<string | null>(null);
   // A failed audit can still have measured something — see AuditResponse.
@@ -194,6 +209,7 @@ export function AuditPage() {
     setErrorUptime(null);
     setResult(null);
     setSiteResult(null);
+    setCertificateFailure(null);
     setJobStatus(null);
     setProgress(null);
     setPerformance(null);
@@ -306,6 +322,18 @@ export function AuditPage() {
 
       if (!payload.ok) {
         setError("error" in payload ? payload.error : "The audit produced no report.");
+        return;
+      }
+
+      /*
+       * AN AUDIT WITH NO PAGE IS SHOWN, NOT DISCARDED. Its certificate was
+       * read and graded, and that is the finding a salesperson needs. The
+       * speed check and the commentary are deliberately not started: Google
+       * would be asked about a page this server could not fetch securely, and
+       * there are no page measurements for a model to describe.
+       */
+      if (isCertificateFailureAudit(payload.result)) {
+        setCertificateFailure(payload.result);
         return;
       }
 
@@ -453,7 +481,7 @@ export function AuditPage() {
    * which audit is current, and whether it finished with something to typeset.
    * An audit that is queued, running or failed leaves this null.
    */
-  const reportJobId = exportableJobId(jobId, result !== null);
+  const reportJobId = exportableJobId(jobId, result !== null || certificateFailure !== null);
 
   return (
     <main className={styles.main}>
@@ -568,6 +596,10 @@ export function AuditPage() {
             </p>
           )}
         </div>
+      )}
+
+      {certificateFailure !== null && (
+        <CertificateFailureResults audit={certificateFailure} reportJobId={reportJobId} />
       )}
 
       {result && (
@@ -801,6 +833,97 @@ function Results({
 }
 
 /**
+ * An audit whose entry page could not be fetched securely.
+ *
+ * WHAT IS ON SCREEN IS WHAT WAS MEASURED: the certificate that failed, the
+ * domain's records, and the findings the rules made from them. There is no
+ * summary of the page, no speed panel and no commentary, because there was no
+ * page to measure and nothing was asked about one.
+ *
+ * THE LIMIT IS STATED FIRST, above the findings, in the report layer's own
+ * words -- the same sentences the PDF carries, so the two cannot disagree.
+ * The checks that did not run are listed by `FindingsSection` exactly as they
+ * are in any other audit: a check that did not run is neither a problem nor a
+ * pass, and this report is mostly made of them.
+ */
+function CertificateFailureResults({
+  audit,
+  reportJobId,
+}: {
+  audit: CertificateFailureAudit;
+  reportJobId: string | null;
+}) {
+  const view = certificateFailureView(audit);
+
+  return (
+    <section className={styles.results}>
+      <div className={styles.summary}>
+        <p className={styles.completeBadge}>{auditStatusText(false)}</p>
+        <h2 className={styles.resultsUrl}>{withoutCredentials(audit.failedUrl)}</h2>
+        <p className={styles.checkedAt}>
+          Checked {new Date(audit.website.checkedAt).toLocaleString()}
+        </p>
+      </div>
+
+      <section className={styles.crawlPartial} aria-labelledby="partial-scope">
+        <h2 id="partial-scope" className={styles.crawlHeading}>
+          {CERTIFICATE_FAILURE_HEADING}
+        </h2>
+        <p className={styles.crawlHeadline}>{view.headline}</p>
+        {view.reason !== null && <p className={styles.crawlReason}>{view.reason}</p>}
+        <dl className={styles.crawlFacts}>
+          {view.facts.map((fact) => (
+            <div key={fact.label} className={styles.crawlFact}>
+              <dt className={styles.crawlFactLabel}>{fact.label}</dt>
+              <dd className={styles.crawlFactValue}>{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      {reportJobId !== null && (
+        <ReportDownload jobId={reportJobId} auditedUrl={withoutCredentials(audit.failedUrl)} />
+      )}
+
+      <FindingsSection
+        findings={audit.site.findings}
+        skipped={audit.site.skippedChecks}
+        explanations={new Map()}
+      />
+
+      <section className={styles.facts}>
+        <h3 className={styles.findingsHeading}>Certificate</h3>
+        <p className={styles.groupIntro}>Measured once, for the whole site.</p>
+        <dl className={styles.factList}>
+          {certificateProblemFacts(audit.certificateProblem).map((row) => (
+            <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+          ))}
+          {certificateFacts(audit.ssl).map((row) => (
+            <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+          ))}
+        </dl>
+
+        <h3 className={styles.findingsHeading}>Domain and email records</h3>
+        <p className={styles.groupIntro}>
+          One set of records for the whole domain, looked up once.
+        </p>
+        <dl className={styles.factList}>
+          {dnsFacts(audit.dns).map((row) => (
+            <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+          ))}
+          {spfFacts(audit.dns).map((row) => (
+            <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+          ))}
+          {dmarcFacts(audit.dns).map((row) => (
+            <Fact key={row.label} label={row.label} value={row.value} note={row.note} />
+          ))}
+        </dl>
+      </section>
+    </section>
+  );
+}
+
+/**
  * What the rules concluded, and what they could not look at.
  *
  * Four states, because collapsing them is how a report ends up saying
@@ -824,7 +947,7 @@ function FindingsSection({
   explanations: Map<string, AIExplanation>;
 }) {
   const state = findingsState(findings.length, skipped.length);
-  const summary = findingsSummary(state);
+  const summary = findingsHeadline(findings, state);
 
   /*
    * Worst first. The findings arrive from two requests, each sorted within

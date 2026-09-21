@@ -43,6 +43,8 @@ import {
   expiryNote,
   certificateProblemFacts,
   certificateProblemLabel,
+  findingsHeadline,
+  findingsVerdict,
   cookieSummary,
   cspSummary,
   hstsSummary,
@@ -56,6 +58,7 @@ import {
   severityLabel,
 } from "./measurementsView.ts";
 import type {
+  CookieInfo,
   DnsData,
   DnsRecordSet,
   FieldPerformance,
@@ -1197,6 +1200,7 @@ const mixedWith = (over: Record<string, unknown> = {}): SecurityData["mixedConte
     applicable: true,
     total: 0,
     activeCount: 0,
+    upgradeInsecureRequests: false,
     truncated: false,
     notInspected: [],
     ...over,
@@ -1225,6 +1229,20 @@ test("insecure resources are counted, with the likely-blocked ones said separate
   assert.equal(
     mixedContentSummary(mixedWith({ total: 3, activeCount: 2 })),
     "3 found in the page HTML, loaded over plain HTTP, 2 likely blocked by browsers",
+  );
+});
+
+test("an enforced upgrade-insecure-requests policy is disclosed, not hidden", () => {
+  // The references are still counted and named, but the summary says the browser
+  // upgrades them rather than claiming they load over plain HTTP. It is not a new
+  // grade -- the wording states a browser behaviour, not a verdict on the policy.
+  assert.equal(
+    mixedContentSummary(mixedWith({ total: 3, upgradeInsecureRequests: true })),
+    "3 found in the page HTML, but an enforced upgrade-insecure-requests policy makes browsers load them over HTTPS",
+  );
+  assert.equal(
+    mixedContentSummary(mixedWith({ total: 3, activeCount: 2, upgradeInsecureRequests: true })),
+    "3 found in the page HTML, 2 likely blocked by browsers, but an enforced upgrade-insecure-requests policy makes browsers load them over HTTPS",
   );
 });
 
@@ -1392,6 +1410,7 @@ const fullSecurity = (over: Record<string, unknown> = {}): SecurityData =>
     servedOverHttps: true,
     strictTransportSecurity: header(null),
     contentSecurityPolicy: header(null),
+    contentSecurityPolicyMeta: false,
     contentSecurityPolicyReportOnly: header(null),
     xFrameOptions: header(null),
     xContentTypeOptions: header(null),
@@ -1480,6 +1499,7 @@ test("the HSTS and policy rows carry the raw header as their note", () => {
 
 test("a report-only policy falls back to its own header for the note", () => {
   const reportOnly = fullSecurity({
+    contentSecurityPolicyMeta: false,
     contentSecurityPolicyReportOnly: header("default-src 'self'; report-uri /csp"),
   });
 
@@ -1746,5 +1766,115 @@ test("no other security row asks a document to print something different", () =>
   assert.deepEqual(
     narrowed.map((row) => row.label),
     ["Server software announced"],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The audit's own verdict, in words
+// ---------------------------------------------------------------------------
+
+test("the verdict names every severity band that fired, worst first", () => {
+  const verdict = findingsVerdict([
+    sev("a", "critical"),
+    sev("b", "high"),
+    sev("c", "medium"),
+    sev("d", "medium"),
+  ]);
+
+  assert.equal(verdict, "This audit found 1 Critical, 1 High and 2 Medium issues.");
+});
+
+test("one issue reads as one issue", () => {
+  assert.equal(findingsVerdict([sev("a", "medium")]), "This audit found 1 Medium issue.");
+});
+
+test("passes are not issues, and an audit with only passes has no verdict to state", () => {
+  // `severityCounts` already excludes "good"; this says so at the sentence
+  // level, because "This audit found 2 Good issues" would be nonsense.
+  assert.equal(findingsVerdict([sev("a", "good"), sev("b", "good")]), "");
+  assert.equal(findingsVerdict([]), "");
+  assert.equal(
+    findingsVerdict([sev("a", "good"), sev("b", "high")]),
+    "This audit found 1 High issue.",
+  );
+});
+
+test("the headline is the verdict when something was found, and the clean sentence when nothing was", () => {
+  const problems = [sev("a", "critical")];
+
+  assert.equal(findingsHeadline(problems, "findings"), "This audit found 1 Critical issue.");
+  assert.equal(
+    findingsHeadline(problems, "findings-with-skipped"),
+    "This audit found 1 Critical issue.",
+    "a skipped check does not change what was found",
+  );
+  assert.equal(findingsHeadline([], "clean"), "No issues found by the checks that were run.");
+  assert.match(findingsHeadline([], "clean-with-skipped"), /some checks could not be evaluated/);
+});
+
+// ---------------------------------------------------------------------------
+// Cookies the browser never keeps
+// ---------------------------------------------------------------------------
+
+const cookieOf = (name: string, over: Partial<CookieInfo> = {}): CookieInfo => ({
+  name,
+  secure: false,
+  httpOnly: false,
+  sameSite: null,
+  expired: false,
+  ...over,
+});
+
+const cookieData = (cookies: CookieInfo[]) => ({ total: cookies.length, cookies, notInspected: [] });
+
+test("a cleared cookie is reported as sent, and not counted as a gap", () => {
+  // The facts and the findings have to agree: a number here that no finding
+  // accounts for is exactly the contradiction this pair exists to avoid.
+  const summary = cookieSummary(cookieData([cookieOf("old_session", { expired: true })]));
+
+  assert.match(summary, /1 cookie/, "it was sent, and the report says so");
+  assert.match(summary, /already expired, so it is not stored/);
+  assert.doesNotMatch(summary, /without Secure/);
+});
+
+test("gaps are counted over the cookies that are stored", () => {
+  const summary = cookieSummary(cookieData([cookieOf("old", { expired: true }), cookieOf("sid")]));
+
+  assert.match(summary, /2 cookies/);
+  assert.match(summary, /1 without Secure/, "the stored one, and only it");
+  assert.match(summary, /1 already expired/);
+});
+
+test("a response of ordinary cookies reads exactly as it did before", () => {
+  assert.equal(
+    cookieSummary(cookieData([cookieOf("sid")])),
+    "1 cookie — 1 without Secure, 1 without HttpOnly, 1 without SameSite",
+  );
+  assert.equal(
+    cookieSummary(cookieData([cookieOf("sid", { secure: true, httpOnly: true, sameSite: "lax" })])),
+    "1 cookie, all flags set",
+  );
+  assert.equal(cookieSummary(cookieData([])), "None set by this page");
+});
+
+test("the cookie row lists flags for stored cookies and says the others are not kept", () => {
+  const rows = securityFacts(
+    fullSecurity({ cookies: cookieData([cookieOf("old", { expired: true }), cookieOf("sid")]) }),
+  );
+  const note = rows.find((row) => row.label === "Cookies set by this page")?.note ?? "";
+
+  assert.match(note, /old: already expired, not stored/);
+  assert.match(note, /sid: no Secure, no HttpOnly/);
+});
+
+test("a CSP delivered only in a meta tag is shown as present-but-weaker, not Missing", () => {
+  assert.equal(
+    cspSummary(securityWith({ contentSecurityPolicyMeta: true })),
+    "Present in a meta tag — enforced, but weaker than a header",
+  );
+  // A header still reads as plainly Present, meta tag or not.
+  assert.equal(
+    cspSummary(securityWith({ contentSecurityPolicy: { present: true }, contentSecurityPolicyMeta: true })),
+    "Present",
   );
 });

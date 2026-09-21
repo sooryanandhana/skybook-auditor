@@ -16,7 +16,9 @@
  * to second-guess any of them.
  */
 import type { SiteCrawlSummary } from "../collector/crawlSite";
-import type { Finding, SiteFileStatus } from "../types";
+import { withoutCredentials } from "../collector/url.ts";
+import { certificateProblemLabel } from "./measurementsView.ts";
+import type { AuditResult, CertificateFailureAudit, Finding, SiteFileStatus } from "../types";
 
 /** Whether a finding is about one page or the whole site. */
 export type FindingScope = "site" | "page";
@@ -283,3 +285,69 @@ export function robotsNote(crawl: SiteCrawlSummary): string | null {
   if (crawl.robots.enforced) return null;
   return "This site's robots.txt could not be read, so its crawling rules were not applied.";
 }
+
+// ---------------------------------------------------------------------------
+// An audit whose entry page could not be fetched securely
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether this audit is the kind that could not read a page.
+ *
+ * THE ONE TEST, so no reader of an audit has to know the shape of two. It is
+ * a value, never a guess from a missing field: an audit that read pages does
+ * not carry `kind` at all.
+ */
+export function isCertificateFailureAudit(
+  result: AuditResult,
+): result is CertificateFailureAudit {
+  return "kind" in result && result.kind === "certificate-failure";
+}
+
+/**
+ * What such an audit covered, in the same shape `crawlView` returns.
+ *
+ * IT NEVER USES THE CRAWL'S COUNTS. A crawl whose only page failed drained
+ * its queue and so reports itself complete, and `crawlView` would turn that
+ * into "0 pages read. Every page we found was visited." -- which reads as a
+ * whole-site audit of a site with no pages. What happened is said instead.
+ *
+ * THE REASON IS THE COLLECTOR'S OWN SENTENCE, carried rather than reworded,
+ * so the report says what the fetch said.
+ */
+export function certificateFailureView(audit: CertificateFailureAudit): CrawlView {
+  return {
+    partial: true,
+    headline:
+      "The entry page could not be fetched securely, so no page on this site was read.",
+    reason: audit.reason,
+    facts: [
+      { label: "Address", value: withoutCredentials(audit.failedUrl) },
+      {
+        label: "Certificate problem",
+        value: certificateProblemLabel(audit.certificateProblem),
+      },
+      {
+        label: "Checked",
+        value: "The certificate and the domain's records, measured once for the whole site",
+      },
+      {
+        label: "Not checked",
+        value: "Every check that reads a page, and page speed. Each is listed below.",
+      },
+    ],
+  };
+}
+
+/** The heading this audit's coverage section carries on screen. */
+export const CERTIFICATE_FAILURE_HEADING = "Partial audit";
+
+/**
+ * What the speed section says when there was no page to measure.
+ *
+ * The speed check is never started for such an audit: Google would be asked
+ * to load a page this server could not load securely, and an answer about it
+ * would describe something the audit did not see. Said in the section rather
+ * than leaving it blank, because a blank speed panel reads as a fast site.
+ */
+export const SPEED_NOT_MEASURED_WITHOUT_PAGE =
+  "Page speed was not measured. The entry page could not be fetched securely, so there was no page to measure.";

@@ -21,6 +21,7 @@ import { startAudit, UNEXPECTED_FAILURE } from "../jobs/auditJobs.ts";
 import { createJobStore } from "../jobs/jobStore.ts";
 import { statusAnswer, resultAnswer, JOB_NOT_FOUND, NOT_READY } from "../jobs/jobResponses.ts";
 import { AUDIT_RULES, PAGE_RULES, SITE_RULES } from "../rules/all.ts";
+import { isCertificateFailureAudit } from "../report/siteFindingsView.ts";
 import type { CrawlResult, CrawlProgress } from "../collector/crawlSite.ts";
 import { runTechnicalChecks } from "../collector/technicalChecks.ts";
 import type { RobotsMeasurement, RobotsStatus } from "../collector/robots.ts";
@@ -123,7 +124,21 @@ const audit = (
   result: CrawlResult,
   requestedUrl = SITE,
   siteChecksImpl: SiteAuditOptions["siteChecksImpl"] = healthySite,
-) => runSiteAudit({ requestedUrl, crawlImpl: crawlReturning(result).impl, siteChecksImpl });
+) => siteAudit({ requestedUrl, crawlImpl: crawlReturning(result).impl, siteChecksImpl });
+
+/**
+ * A whole-site audit, asserted to be one.
+ *
+ * `runSiteAudit` can also produce an audit of a site whose entry page could
+ * not be fetched securely, which has no pages and no entry-page data. Those
+ * have their own tests below; everywhere else, receiving one instead of a
+ * site audit is a failure rather than a silent `undefined`.
+ */
+async function siteAudit(options: SiteAuditOptions): Promise<SiteAuditResult> {
+  const result = await runSiteAudit(options);
+  assert.ok(!isCertificateFailureAudit(result), "expected an audit that read its entry page");
+  return result;
+}
 
 function codeOf(file: string): string {
   return fs
@@ -329,7 +344,7 @@ test("unavailable, non-HTML and robots-excluded pages are never graded", async (
     pages: [read],
     attempts: [
       { url: "https://example.com/read", outcome: "evaluated", page: read },
-      { url: "https://example.com/gone", outcome: "unavailable", reason: "timeout" },
+      { url: "https://example.com/gone", outcome: "unavailable", reason: "timeout", serverResponded: false },
       { url: "https://example.com/x.pdf", outcome: "non-html", reason: "not a web page" },
     ],
     summary: {
@@ -342,7 +357,7 @@ test("unavailable, non-HTML and robots-excluded pages are never graded", async (
     },
   });
 
-  const result = await runSiteAudit({
+  const result = await siteAudit({
     requestedUrl: "https://example.com/read",
     crawlImpl: crawlReturning(crawl).impl,
     siteChecksImpl: healthySite,
@@ -363,7 +378,7 @@ test("unavailable, non-HTML and robots-excluded pages are never graded", async (
 test("an entry page that could not be read fails the audit, in the crawler's words", async () => {
   const crawl = crawlResult({
     pages: [],
-    attempts: [{ url: SITE, outcome: "unavailable", reason: "The website took too long to respond." }],
+    attempts: [{ url: SITE, outcome: "unavailable", reason: "The website took too long to respond.", serverResponded: false }],
     summary: {
       ...crawlResult().summary,
       evaluated: 0,
@@ -372,7 +387,7 @@ test("an entry page that could not be read fails the audit, in the crawler's wor
   });
 
   await assert.rejects(
-    () => runSiteAudit({
+    () => siteAudit({
       requestedUrl: SITE,
       crawlImpl: crawlReturning(crawl).impl,
       siteChecksImpl: healthySite,
@@ -449,7 +464,7 @@ test("a crawl stopped by a limit is never described as complete", async () => {
     const crawl = crawlResult();
     crawl.summary = { ...crawl.summary, stoppedBecause, complete: false };
 
-    const result = await runSiteAudit({
+    const result = await siteAudit({
       requestedUrl: SITE,
       crawlImpl: crawlReturning(crawl).impl,
       siteChecksImpl: healthySite,
@@ -470,7 +485,7 @@ test("incomplete sitemap discovery also makes the crawl partial", async () => {
     sitemapDiscovery: { attempted: true, complete: false, stoppedBecause: "max-files" },
   };
 
-  const result = await runSiteAudit({
+  const result = await siteAudit({
       requestedUrl: SITE,
       crawlImpl: crawlReturning(crawl).impl,
       siteChecksImpl: healthySite,
@@ -484,7 +499,7 @@ test("a partial crawl produces no finding about being partial", async () => {
   const crawl = crawlResult();
   crawl.summary = { ...crawl.summary, stoppedBecause: "max-pages", complete: false };
 
-  const result = await runSiteAudit({
+  const result = await siteAudit({
       requestedUrl: SITE,
       crawlImpl: crawlReturning(crawl).impl,
       siteChecksImpl: healthySite,
@@ -910,7 +925,7 @@ const blockedByRobots = siteWhere({
 test("a FIRING site rule appears once, and never inside a page's findings", async () => {
   const pages = Array.from({ length: 7 }, (_, i) => page(`https://example.com/p${i}`));
 
-  const result = await runSiteAudit({
+  const result = await siteAudit({
     requestedUrl: "https://example.com/p0",
     crawlImpl: crawlReturning(crawlResult({ pages })).impl,
     siteChecksImpl: blockedByRobots,
@@ -936,7 +951,7 @@ test("a FIRING site rule appears once, and never inside a page's findings", asyn
 });
 
 test("a firing site rule still reaches the entry page's own report", async () => {
-  const result = await runSiteAudit({
+  const result = await siteAudit({
     requestedUrl: SITE,
     crawlImpl: crawlReturning(crawlResult()).impl,
     siteChecksImpl: blockedByRobots,
@@ -963,7 +978,7 @@ test("MIXED: a firing site rule and varying page rules keep their own counts", a
     ),
   );
 
-  const result = await runSiteAudit({
+  const result = await siteAudit({
     requestedUrl: "https://example.com/p0",
     crawlImpl: crawlReturning(crawlResult({ pages: [...withoutTitle, ...withTitle] })).impl,
     siteChecksImpl: blockedByRobots,
@@ -1003,7 +1018,9 @@ test("every audit in this file injects BOTH network boundaries", () => {
    */
   const source = fs.readFileSync(new URL("./siteAudit.test.mts", import.meta.url), "utf8");
 
-  const calls = [...source.matchAll(/runSiteAudit\(\{/g)];
+  // Both spellings: every audit here goes through this file's own `siteAudit`
+  // helper, which asserts the kind of result and then calls the real one.
+  const calls = [...source.matchAll(/[sS]iteAudit[(][{]/g)];
   assert.ok(calls.length > 0, "the scan must actually find the calls");
 
   for (const call of calls) {
@@ -1014,10 +1031,10 @@ test("every audit in this file injects BOTH network boundaries", () => {
     const options = window.slice(0, optionsEnd === -1 ? undefined : optionsEnd);
 
     const line = source.slice(0, call.index).split("\n").length;
-    assert.ok(options.includes("crawlImpl"), `runSiteAudit at line ${line} does not inject crawlImpl`);
+    assert.ok(options.includes("crawlImpl"), `the audit at line ${line} does not inject crawlImpl`);
     assert.ok(
       options.includes("siteChecksImpl"),
-      `runSiteAudit at line ${line} does not inject siteChecksImpl — it would hit the real network`,
+      `the audit at line ${line} does not inject siteChecksImpl — it would hit the real network`,
     );
   }
 });
@@ -1084,7 +1101,7 @@ test("the site checks are handed the crawl's own robots measurement", async () =
 
   for (const robots of states) {
     let handed: RobotsMeasurement | undefined;
-    await runSiteAudit({
+    await siteAudit({
       requestedUrl: SITE,
       crawlImpl: crawlReturning(crawlResult({ robots })).impl,
       siteChecksImpl: async (_url, _https, _deadline, given) => {
@@ -1103,7 +1120,7 @@ test("an unreadable robots.txt never reaches the report as absent", async () => 
    * read while the site checks, having fetched it separately, said the server
    * had told them it was not there. Both statements were in one report.
    */
-  const result = await runSiteAudit({
+  const result = await siteAudit({
     requestedUrl: SITE,
     crawlImpl: crawlReturning(crawlResult({ robots: { status: "unavailable" } })).impl,
     // The real projection, so the status is derived rather than asserted.
@@ -1143,7 +1160,7 @@ test("the two robots states in a result can no longer disagree", async () => {
       excluded: 0,
     };
 
-    const result = await runSiteAudit({
+    const result = await siteAudit({
       requestedUrl: SITE,
       crawlImpl: crawlReturning(crawl).impl,
       siteChecksImpl: async (_url, _https, deadline, robots) => ({
@@ -1267,4 +1284,104 @@ test("the response time is measured by the collector, never by the AI layer", ()
   assert.match(source, /from "\.\.\/collector\/responseTime\.ts"/);
   assert.ok(!/from\s+["'][^"']*\/ai\//.test(source), "the audit imports from the AI layer");
   assert.ok(!source.includes("@google/genai"));
+});
+
+// ---------------------------------------------------------------------------
+// An entry page whose certificate failed
+// ---------------------------------------------------------------------------
+
+/** A crawl that read nothing because the entry page's certificate was refused. */
+function certificateRefused(overrides: { url?: string; certificateUrl?: string } = {}): CrawlResult {
+  const url = overrides.url ?? SITE;
+  const reason = "The website's security certificate has expired.";
+  return crawlResult({
+    pages: [],
+    attempts: [
+      {
+        url,
+        outcome: "unavailable",
+        reason,
+        serverResponded: false,
+        certificateProblem: "expired",
+        certificateUrl: overrides.certificateUrl ?? url,
+      },
+    ],
+    summary: {
+      ...crawlResult().summary,
+      evaluated: 0,
+      unavailable: [{ url, reason }],
+    },
+  });
+}
+
+test("a refused certificate is audited from the address that presented it, not the one asked for", async () => {
+  /*
+   * The entry page redirected before the connection failed, so the certificate
+   * that failed belongs to the address it redirected TO. Reading the requested
+   * host's certificate instead would describe one the visitor never met, and
+   * could contradict the failure in the same report.
+   */
+  const asked: string[] = [];
+  const result = await runSiteAudit({
+    requestedUrl: SITE,
+    crawlImpl: crawlReturning(
+      certificateRefused({ certificateUrl: "https://www.example.com/" }),
+    ).impl,
+    siteChecksImpl: async (entryUrl, servedOverHttps) => {
+      asked.push(entryUrl);
+      assert.equal(servedOverHttps, true, "an address with a certificate is an HTTPS one");
+      return healthySite();
+    },
+  });
+
+  assert.deepEqual(asked, ["https://www.example.com/"]);
+  assert.ok(isCertificateFailureAudit(result));
+  if (!isCertificateFailureAudit(result)) return;
+  assert.equal(result.failedUrl, "https://www.example.com/");
+  assert.equal(result.website.requestedUrl, SITE);
+});
+
+test("a crawl that read other pages is still an audit of those pages, not a certificate report", async () => {
+  /*
+   * The entry page failed, and the crawl reached pages elsewhere on the site.
+   * Those pages were genuinely read, so reporting "no page on this site was
+   * read" would be false — this stays the failure it always was.
+   */
+  const crawl = certificateRefused();
+  const withOtherPages: CrawlResult = {
+    ...crawl,
+    pages: [page("https://example.com/about")],
+  };
+
+  await assert.rejects(
+    () =>
+      runSiteAudit({
+        requestedUrl: SITE,
+        crawlImpl: crawlReturning(withOtherPages).impl,
+        siteChecksImpl: healthySite,
+      }),
+    EntryPageUnavailableError,
+  );
+});
+
+test("the site rules are graded on the site's own facts, with no page among them", async () => {
+  // The certificate the check read is the one graded, and its finding is the
+  // report's. Nothing here has an entry page to read anything else from.
+  const result = await runSiteAudit({
+    requestedUrl: SITE,
+    crawlImpl: crawlReturning(certificateRefused()).impl,
+    siteChecksImpl: async () => {
+      const checks = await healthySite();
+      return {
+        ...checks,
+        ssl: { ...checks.ssl, trusted: false, problem: "untrusted" as const },
+      };
+    },
+  });
+
+  assert.ok(isCertificateFailureAudit(result));
+  if (!isCertificateFailureAudit(result)) return;
+  const untrusted = result.site.findings.find((finding) => finding.id === "security.ssl.untrusted");
+  assert.ok(untrusted, "a site rule ran and fired on the certificate that was read");
+  assert.equal(untrusted.scope, "site");
 });

@@ -21,6 +21,7 @@ import {
   findCssResources,
   stripCssComments,
   parseCookies,
+  hasEnforcedUpgradeInsecureRequests,
 } from "./securityChecks.ts";
 
 const HTTPS = true;
@@ -414,6 +415,120 @@ test("reports a clean HTTPS page as having no mixed content", () => {
   assert.equal(result.applicable, true);
   assert.equal(result.total, 0);
   assert.equal(result.truncated, false);
+});
+
+// ---------------------------------------------------------------------------
+// Enforced upgrade-insecure-requests — measured, not graded
+//
+// The directive makes a browser rewrite http:// to https:// before the request,
+// so the reference is not loaded insecurely. The collector still LISTS the
+// reference; it only records whether an enforced policy upgrades it. Report-only
+// is never enforced and must never count.
+// ---------------------------------------------------------------------------
+
+const HTTP_IMG = '<html><body><img src="http://x.com/a.png"></body></html>';
+const metaUir = (content: string) =>
+  `<html><head><meta http-equiv="Content-Security-Policy" content="${content}"></head><body><img src="http://x.com/a.png"></body></html>`;
+
+test("enforced UIR in the CSP header is detected", () => {
+  assert.equal(
+    hasEnforcedUpgradeInsecureRequests(
+      { "content-security-policy": "default-src 'self'; upgrade-insecure-requests" },
+      HTTP_IMG,
+    ),
+    true,
+  );
+});
+
+test("enforced UIR in an enforcing <meta> is detected", () => {
+  assert.equal(hasEnforcedUpgradeInsecureRequests({}, metaUir("upgrade-insecure-requests")), true);
+});
+
+test("report-only UIR is NOT treated as enforced", () => {
+  assert.equal(
+    hasEnforcedUpgradeInsecureRequests(
+      { "content-security-policy-report-only": "upgrade-insecure-requests" },
+      HTTP_IMG,
+    ),
+    false,
+  );
+});
+
+test("no UIR directive present is not detected", () => {
+  assert.equal(
+    hasEnforcedUpgradeInsecureRequests({ "content-security-policy": "default-src 'self'" }, HTTP_IMG),
+    false,
+  );
+  assert.equal(hasEnforcedUpgradeInsecureRequests({}, HTTP_IMG), false);
+});
+
+test("the directive is matched by exact name, not as a substring", () => {
+  // A different, unknown directive that merely starts with the same text.
+  assert.equal(
+    hasEnforcedUpgradeInsecureRequests({ "content-security-policy": "upgrade-insecure-requests-foo" }, HTTP_IMG),
+    false,
+  );
+  // The token appearing inside another directive's value is a source
+  // expression, not this directive.
+  assert.equal(
+    hasEnforcedUpgradeInsecureRequests(
+      { "content-security-policy": "default-src 'self' upgrade-insecure-requests" },
+      HTTP_IMG,
+    ),
+    false,
+  );
+});
+
+test("the directive name is matched case-insensitively", () => {
+  assert.equal(
+    hasEnforcedUpgradeInsecureRequests({ "content-security-policy": "UPGRADE-INSECURE-REQUESTS" }, HTTP_IMG),
+    true,
+  );
+  assert.equal(hasEnforcedUpgradeInsecureRequests({}, metaUir("Upgrade-Insecure-Requests")), true);
+});
+
+test("an enforced header UIR counts even when the header has other directives after it", () => {
+  assert.equal(
+    hasEnforcedUpgradeInsecureRequests(
+      { "content-security-policy": "upgrade-insecure-requests; default-src 'self'" },
+      HTTP_IMG,
+    ),
+    true,
+  );
+});
+
+test("findMixedContent records the enforced-UIR flag it is given, and still lists the reference", () => {
+  const upgraded = findMixedContent(HTTP_IMG, HTTPS, true);
+  assert.equal(upgraded.upgradeInsecureRequests, true);
+  assert.equal(upgraded.total, 1, "the reference is still measured");
+  assert.equal(upgraded.items.length, 1, "and still listed truthfully");
+
+  const plain = findMixedContent(HTTP_IMG, HTTPS);
+  assert.equal(plain.upgradeInsecureRequests, false, "defaults to false when not measured");
+  assert.equal(plain.total, 1);
+});
+
+test("an HTTP page reports upgradeInsecureRequests: false, even if asked to upgrade", () => {
+  const result = findMixedContent(HTTP_IMG, HTTP, true);
+  assert.equal(result.applicable, false);
+  assert.equal(result.upgradeInsecureRequests, false);
+});
+
+test("runSecurityChecks wires the enforced-UIR fact into the mixed-content measurement", () => {
+  const withUir = runSecurityChecks(
+    { "content-security-policy": "upgrade-insecure-requests" },
+    HTTP_IMG,
+    HTTPS,
+  );
+  assert.equal(withUir.mixedContent.upgradeInsecureRequests, true);
+  assert.equal(withUir.mixedContent.total, 1);
+
+  const reportOnly = runSecurityChecks(
+    { "content-security-policy-report-only": "upgrade-insecure-requests" },
+    HTTP_IMG,
+    HTTPS,
+  );
+  assert.equal(reportOnly.mixedContent.upgradeInsecureRequests, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -937,4 +1052,105 @@ test("a form action is NOT counted as mixed content", () => {
   const html = '<html><body><form action="http://x.com/submit"></form></body></html>';
   assert.equal(findMixedContent(html, HTTPS).total, 0);
   assert.equal(findInsecureFormActions(html).length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// A cookie's own stated lifetime
+// ---------------------------------------------------------------------------
+
+/** A fixed moment, so "already expired" means the same thing every run. */
+const NOW = new Date("2026-09-16T12:00:00.000Z");
+
+test("a cookie with no expiry attribute lasts the session, and is not expired", () => {
+  const { cookies } = parseCookies(["sid=abc; Path=/; Secure"], NOW);
+  assert.equal(cookies[0].expired, false);
+});
+
+test("Max-Age of zero or less expires the cookie immediately", () => {
+  for (const header of ["old=; Max-Age=0", "old=; Max-Age=-1", "old=; max-age=0"]) {
+    assert.equal(parseCookies([header], NOW).cookies[0].expired, true, header);
+  }
+});
+
+test("a positive Max-Age stores the cookie, however short", () => {
+  for (const header of ["sid=abc; Max-Age=1", "sid=abc; Max-Age=600"]) {
+    assert.equal(parseCookies([header], NOW).cookies[0].expired, false, header);
+  }
+});
+
+test("an Expires date in the past expires the cookie, and one in the future does not", () => {
+  assert.equal(
+    parseCookies(["old=deleted; Expires=Thu, 01 Jan 1970 00:00:00 GMT"], NOW).cookies[0].expired,
+    true,
+  );
+  assert.equal(
+    parseCookies(["sid=abc; Expires=Tue, 01 Jan 2030 00:00:00 GMT"], NOW).cookies[0].expired,
+    false,
+  );
+});
+
+test("Max-Age wins over Expires, in both directions, as RFC 6265 requires", () => {
+  // A browser reads Max-Age first when it can read it at all, so the audit
+  // must agree with the browser rather than with whichever attribute came last.
+  assert.equal(
+    parseCookies(["sid=abc; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:00 GMT"], NOW).cookies[0].expired,
+    false,
+    "a live Max-Age keeps the cookie despite a past Expires",
+  );
+  assert.equal(
+    parseCookies(["old=; Max-Age=0; Expires=Tue, 01 Jan 2030 00:00:00 GMT"], NOW).cookies[0].expired,
+    true,
+    "Max-Age=0 clears it despite a future Expires",
+  );
+});
+
+test("an unreadable expiry attribute concludes nothing", () => {
+  // Neither attribute can be read, so the header says nothing about a lifetime
+  // and the cookie is treated as one the browser keeps.
+  for (const header of ["sid=abc; Max-Age=soon", "sid=abc; Expires=never", "sid=abc; Max-Age="]) {
+    assert.equal(parseCookies([header], NOW).cookies[0].expired, false, header);
+  }
+});
+
+test("a deletion and a real cookie in one response are told apart", () => {
+  const { cookies } = parseCookies(["old=; Max-Age=0", "sid=abc; Path=/"], NOW);
+
+  assert.deepEqual(
+    cookies.map((cookie) => [cookie.name, cookie.expired]),
+    [["old", true], ["sid", false]],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// A Content-Security-Policy delivered in the page's HTML
+// ---------------------------------------------------------------------------
+
+const metaCsp = (content: string, pragma = "Content-Security-Policy") =>
+  `<html><head><meta http-equiv="${pragma}" content="${content}"></head><body>x</body></html>`;
+
+test("a policy in a meta tag is detected, whatever the case of http-equiv", () => {
+  for (const pragma of ["Content-Security-Policy", "content-security-policy", "CONTENT-SECURITY-POLICY"]) {
+    const result = runSecurityChecks({}, metaCsp("default-src 'self'", pragma), true);
+    assert.equal(result.contentSecurityPolicyMeta, true, pragma);
+    // The header itself is still absent — the two facts are kept apart.
+    assert.equal(result.contentSecurityPolicy.present, false, pragma);
+  }
+});
+
+test("a meta tag with an empty policy is not counted as a policy", () => {
+  for (const content of ["", "   "]) {
+    assert.equal(runSecurityChecks({}, metaCsp(content), true).contentSecurityPolicyMeta, false, JSON.stringify(content));
+  }
+});
+
+test("a page with no meta CSP records none", () => {
+  assert.equal(runSecurityChecks({}, "<html><head></head><body>x</body></html>", true).contentSecurityPolicyMeta, false);
+  // An unrelated pragma is not a CSP.
+  assert.equal(runSecurityChecks({}, metaCsp("text/html", "Content-Type"), true).contentSecurityPolicyMeta, false);
+});
+
+test("the header and the meta tag are measured independently", () => {
+  const both = runSecurityChecks({ "content-security-policy": "default-src 'self'" }, metaCsp("default-src 'self'"), true);
+  assert.equal(both.contentSecurityPolicy.present, true);
+  assert.equal(both.contentSecurityPolicyMeta, true);
 });

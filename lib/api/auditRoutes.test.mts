@@ -22,6 +22,7 @@ import {
   explainRoute,
   EXPLAIN_IN_PROGRESS,
   EXPLAIN_NOT_FINISHED,
+  EXPLAIN_NO_PAGE_MEASUREMENTS,
 } from "./auditRoutes.ts";
 import { createJobStore } from "../jobs/jobStore.ts";
 import { AI_CONTRACT_VERSION } from "../ai/contract.ts";
@@ -31,7 +32,7 @@ import { JOB_TTL_MS } from "../jobs/jobStore.ts";
 import { resetRateLimits, DEFAULT_LIMIT, GLOBAL_LIMIT } from "../rateLimit.ts";
 import { runSeoChecks } from "../collector/seoChecks.ts";
 import { runSecurityChecks } from "../collector/securityChecks.ts";
-import type { PerformanceData, SiteAuditResult, SpeedResult } from "../types.ts";
+import type { AuditResult, PerformanceData, SiteAuditResult, SpeedResult } from "../types.ts";
 import { withSpeed } from "../audit/withSpeed.ts";
 import { buildAIReportInput } from "../ai/buildReportInput.ts";
 
@@ -202,6 +203,25 @@ test("the route cannot be freed by changing X-Forwarded-For", async () => {
     const result = await startAuditRoute(
       postJson({ url: "https://example.com" }, { "x-forwarded-for": `203.0.113.${i}` }),
       { store, runImpl: auditReturning(true) },
+    );
+    if (result.status === 202) accepted += 1;
+  }
+
+  // Default posture: the header is not trusted, so every rotated request is the
+  // one shared bucket and the per-caller limit stops it well short.
+  assert.equal(accepted, DEFAULT_LIMIT);
+});
+
+test("behind a trusted proxy, distinct callers are bounded by the global ceiling", async () => {
+  // The ceiling still exists and still bites; it just now takes genuinely
+  // distinct trusted addresses to reach, not a header a client rewrites.
+  const store = createJobStore<SiteAuditResult>();
+  let accepted = 0;
+
+  for (let i = 0; i < 60; i += 1) {
+    const result = await startAuditRoute(
+      postJson({ url: "https://example.com" }, { "x-forwarded-for": `203.0.113.${i}` }),
+      { store, runImpl: auditReturning(true), trustProxy: true },
     );
     if (result.status === 202) accepted += 1;
   }
@@ -1113,4 +1133,75 @@ test("explain: no key, no provider detail and no raw response reach the wire", a
   assert.ok(!wire.includes("x-goog-api-key"));
   assert.ok(!wire.includes("InternalServerError"));
   assert.ok(!wire.includes("gemini"), "the payload names no provider");
+});
+
+test("explain: an audit that could not read a page is refused without asking", async () => {
+  /*
+   * The contract a model is shown describes a page that was read. This audit
+   * has none, and filling those fields in to make the shape fit is the
+   * invention the whole design refuses — so nothing is asked, and the answer
+   * says why rather than reporting a provider failure that never happened.
+   */
+  const store = createJobStore<AuditResult, SpeedResult, ExplainResult>();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "partial", {
+    kind: "certificate-failure",
+    website: { requestedUrl: "https://example.com/", checkedAt: "2026-09-16T10:00:00.000Z" },
+    failedUrl: "https://example.com/",
+    reason: "The website's security certificate has expired.",
+    certificateProblem: "expired",
+    ssl: {} as never,
+    dns: {} as never,
+    technical: null,
+    site: { findings: [], skippedChecks: [], evaluatedPages: 0 },
+    crawl: {} as never,
+  });
+  let asked = 0;
+
+  const answer = await explainRoute(explainRequestFor(job.id), {
+    store,
+    explain: async () => {
+      asked += 1;
+      return goodExplanation;
+    },
+  });
+
+  assert.equal(asked, 0, "no provider request was made");
+  assert.equal(answer.status, 409);
+  assert.equal(
+    answer.body.ok === false && "error" in answer.body ? answer.body.error : "",
+    EXPLAIN_NO_PAGE_MEASUREMENTS,
+  );
+  assert.equal(store.get(job.id)?.explanation, null);
+});
+
+test("result: a partial audit of a refused certificate is handed over, with its problem", async () => {
+  const store = createJobStore<AuditResult, SpeedResult, ExplainResult>();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "partial", {
+    kind: "certificate-failure",
+    website: { requestedUrl: "https://example.com/", checkedAt: "2026-09-16T10:00:00.000Z" },
+    failedUrl: "https://example.com/",
+    reason: "The website's security certificate has expired.",
+    certificateProblem: "expired",
+    ssl: {} as never,
+    dns: {} as never,
+    technical: null,
+    site: { findings: [], skippedChecks: [], evaluatedPages: 0 },
+    crawl: {} as never,
+  });
+
+  const answer = auditResultRoute(
+    new Request(`https://audit.test/api/audit/result?jobId=${job.id}`),
+    { store },
+  );
+
+  assert.equal(answer.status, 200);
+  assert.equal(answer.body.ok, true);
+  if (!answer.body.ok) return;
+  assert.equal(answer.body.status, "partial");
+  assert.equal(
+    "kind" in answer.body.result ? answer.body.result.certificateProblem : null,
+    "expired",
+  );
 });

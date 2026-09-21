@@ -3433,3 +3433,39 @@ test("an empty robots.txt leaves as read, with the text it had", async () => {
 
   assert.deepEqual(result.robots, { status: "found", text: "" });
 });
+
+test("a certificate failure is recorded with its classification, not only its sentence", async () => {
+  /*
+   * The sentence is English written for a person. An audit deciding what to do
+   * about the failure needs the value the fetcher already classified, and the
+   * address that presented the certificate — which is not always the address
+   * asked for, because a page may redirect before the connection fails.
+   */
+  const fetcher = scriptedFetch(() => ({
+    ok: false as const,
+    reason: "The website's security certificate has expired.",
+    certificateProblem: "expired" as const,
+    certificateUrl: "https://www.example.com/",
+    uptime: null,
+  }));
+  const result = await crawl({ requestedUrl: SITE, fetchImpl: fetcher.impl });
+
+  const attempt = result.attempts[0];
+  assert.equal(attempt.outcome, "unavailable");
+  if (attempt.outcome !== "unavailable") return;
+  assert.equal(attempt.certificateProblem, "expired");
+  assert.equal(attempt.certificateUrl, "https://www.example.com/");
+  // The summary is unchanged: it counts pages, and says why in the same words.
+  assert.equal(result.summary.unavailable[0].reason, "The website's security certificate has expired.");
+});
+
+test("an ordinary failure carries no certificate fields at all", async () => {
+  const fetcher = scriptedFetch(() => FAILED("That website address could not be found."));
+  const result = await crawl({ requestedUrl: SITE, fetchImpl: fetcher.impl });
+
+  const attempt = result.attempts[0];
+  assert.equal(attempt.outcome, "unavailable");
+  if (attempt.outcome !== "unavailable") return;
+  assert.equal("certificateProblem" in attempt, false, "nothing claims a certificate was involved");
+  assert.equal("certificateUrl" in attempt, false);
+});

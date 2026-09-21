@@ -36,7 +36,7 @@
  * so a site's own navigation order is the order it gets crawled in.
  */
 import { capDeadline, createDeadline, type Deadline } from "./deadline.ts";
-import { fetchPage, NOT_A_WEB_PAGE, type FetchedPage } from "./fetchPage.ts";
+import { fetchPage, NOT_A_WEB_PAGE, type CertificateProblem, type FetchedPage } from "./fetchPage.ts";
 import { dedupKey, isSameSite, normalizeCrawlUrl, type CrawlUrlRejection } from "./crawlUrl.ts";
 import { extractLinks } from "./extractLinks.ts";
 import {
@@ -73,7 +73,35 @@ export const PAGE_BUDGET_MS = 20_000;
 /** One page the crawl visited, and what came of it. */
 export type CrawlPageOutcome =
   | { url: string; outcome: "evaluated"; page: FetchedPage }
-  | { url: string; outcome: "unavailable"; reason: string }
+  | {
+      url: string;
+      outcome: "unavailable";
+      reason: string;
+      /**
+       * Whether the server answered at all before the fetch failed.
+       *
+       * True when a response arrived (an error status, a redirect that then
+       * failed) and false when nothing did (a refused or reset connection, a
+       * DNS failure, a timeout before any answer). Taken straight from the
+       * fetcher's own `uptime`, which is null exactly when nothing responded. It
+       * travels here so an audit can tell a server that is up but failed this
+       * one fetch apart from one that never answered, without reading the prose
+       * reason.
+       */
+      serverResponded: boolean;
+      /**
+       * The certificate problem that stopped this page, when one did.
+       *
+       * THE SENTENCE IS NOT ENOUGH. `reason` is English written for a person;
+       * deciding what to do about a failure from it would mean matching on
+       * prose. The value the fetcher already classified travels beside it, so
+       * an audit can tell a certificate it could read from a server that never
+       * answered without reading either.
+       */
+      certificateProblem?: CertificateProblem;
+      /** The address that presented that certificate. See `FetchPageResult`. */
+      certificateUrl?: string;
+    }
   | { url: string; outcome: "non-html"; reason: string };
 
 /**
@@ -594,7 +622,19 @@ export async function crawlSite(options: CrawlOptions): Promise<CrawlResult> {
      * the other would put a fault in a report that the site may not have.
      */
     frontier.recordUnavailable(url, result.reason);
-    attempts.push({ url: address, outcome: "unavailable", reason: result.reason });
+    attempts.push({
+      url: address,
+      outcome: "unavailable",
+      reason: result.reason,
+      // Null uptime is the fetcher's own record that nothing answered.
+      serverResponded: result.uptime !== null,
+      ...(result.certificateProblem === undefined
+        ? {}
+        : {
+            certificateProblem: result.certificateProblem,
+            certificateUrl: result.certificateUrl ?? address,
+          }),
+    });
   };
 
   /*

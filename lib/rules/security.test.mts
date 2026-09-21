@@ -34,6 +34,7 @@ function healthySecurity(overrides: Partial<SecurityData> = {}): SecurityData {
     servedOverHttps: true,
     strictTransportSecurity: header(true, "max-age=31536000"),
     contentSecurityPolicy: header(true, "default-src 'self'"),
+    contentSecurityPolicyMeta: false,
     contentSecurityPolicyReportOnly: header(false),
     xFrameOptions: header(true, "DENY"),
     xContentTypeOptions: header(true, "nosniff"),
@@ -51,6 +52,7 @@ function healthySecurity(overrides: Partial<SecurityData> = {}): SecurityData {
       applicable: true,
       total: 0,
       activeCount: 0,
+      upgradeInsecureRequests: false,
       items: [],
       truncated: false,
       notInspected: [],
@@ -204,6 +206,8 @@ const cookie = (over: Partial<CookieInfo> = {}): CookieInfo => ({
   secure: true,
   httpOnly: true,
   sameSite: "lax",
+  // A cookie the browser keeps, unless a case says otherwise.
+  expired: false,
   ...over,
 });
 
@@ -315,6 +319,115 @@ test("trusted: null is unknown and must never become untrusted", () => {
   assert.equal(findingFor("security.ssl.untrusted", { ssl: healthySsl({ trusted: null }) }), undefined);
 });
 
+// ---------------------------------------------------------------------------
+// One certificate cause, one finding
+// ---------------------------------------------------------------------------
+
+/** A certificate the platform rejected, with its own facts adjusted. */
+function rejected(
+  problem: SslData["problem"],
+  facts: Partial<NonNullable<SslData["certificate"]>> = {},
+): Partial<AuditFacts> {
+  return {
+    ssl: healthySsl({ trusted: false, problem, certificate: { ...healthySsl().certificate!, ...facts } }),
+  };
+}
+
+/** The certificate findings that fired, in a fixed order. */
+function certificateIds(overrides: Partial<AuditFacts>): string[] {
+  return firedIds(overrides).filter((id) => id.startsWith("security.ssl.")).sort();
+}
+
+test("an expired certificate, rejected for expiring, is one Critical finding, not two", () => {
+  const overrides = rejected("expired", { daysUntilExpiry: -9, validTo: "2026-08-25" });
+
+  assert.deepEqual(certificateIds(overrides), ["security.ssl.expired"]);
+  assert.equal(findingFor("security.ssl.expired", overrides)?.severity, "critical");
+});
+
+test("a certificate for another address, rejected for that, is one Critical finding, not two", () => {
+  const overrides = rejected("wrong-hostname", { coversHostname: false, subjectAltNames: ["other.example"] });
+
+  assert.deepEqual(certificateIds(overrides), ["security.ssl.hostname"]);
+  assert.equal(findingFor("security.ssl.hostname", overrides)?.severity, "critical");
+});
+
+test("an authority that is not trusted is reported as not trusted, once", () => {
+  // SELF_SIGNED_CERT_IN_CHAIN and a missing issuer both arrive as "untrusted".
+  const overrides = rejected("untrusted");
+
+  assert.deepEqual(certificateIds(overrides), ["security.ssl.untrusted"]);
+  assert.match(findingFor("security.ssl.untrusted", overrides)?.evidence ?? "", /\(untrusted\)/);
+});
+
+test("a certificate not valid yet is reported as not trusted, and never as expired", () => {
+  // Its expiry date is in the future; CERT_NOT_YET_VALID arrives as "untrusted".
+  assert.deepEqual(certificateIds(rejected("untrusted", { daysUntilExpiry: 471 })), ["security.ssl.untrusted"]);
+});
+
+test("an expiry the site's own certificate does not show is still reported, not silently dropped", () => {
+  /*
+   * An expired intermediate. The platform rejects the chain as "expired", but
+   * the certificate we read — the site's own — has months left, so the expiry
+   * rule rightly stays silent. Without this rule the rejection would reach the
+   * report as nothing at all.
+   */
+  assert.deepEqual(certificateIds(rejected("expired", { daysUntilExpiry: 107 })), ["security.ssl.untrusted"]);
+  assert.deepEqual(certificateIds(rejected("expired", { daysUntilExpiry: null, validTo: null })), ["security.ssl.untrusted"]);
+});
+
+test("a hostname rejection the certificate's names cannot show is still reported", () => {
+  // No names to compare, so the hostname rule cannot say "does not cover".
+  // The platform's verdict is still a measurement.
+  assert.deepEqual(
+    certificateIds(rejected("wrong-hostname", { coversHostname: null, subjectAltNames: [] })),
+    ["security.ssl.untrusted"],
+  );
+});
+
+test("two different causes are still two findings", () => {
+  // Expired AND for another address: the platform names only the first.
+  assert.deepEqual(
+    certificateIds(rejected("expired", { daysUntilExpiry: -258, coversHostname: false })),
+    ["security.ssl.expired", "security.ssl.hostname"],
+  );
+  // For another address AND under an authority that is not trusted.
+  assert.deepEqual(
+    certificateIds(rejected("untrusted", { coversHostname: false })),
+    ["security.ssl.hostname", "security.ssl.untrusted"],
+  );
+  // Self-signed AND expired.
+  assert.deepEqual(
+    certificateIds(rejected("self-signed", { daysUntilExpiry: -1 })),
+    ["security.ssl.expired", "security.ssl.untrusted"],
+  );
+});
+
+test("every rejection is reported, and no cause is ever reported twice", () => {
+  /*
+   * Every combination of the platform's reason and the certificate's own
+   * facts. Read from the rules' actual findings, not restated conditions, so
+   * the expiry or hostname rule changing without this one fails here.
+   */
+  const problems: Array<SslData["problem"]> = [null, "expired", "self-signed", "wrong-hostname", "untrusted"];
+
+  for (const problem of problems) {
+    for (const daysUntilExpiry of [null, -30, 0, 30]) {
+      for (const coversHostname of [null, false, true]) {
+        const fired = certificateIds(rejected(problem, { daysUntilExpiry, coversHostname }));
+        const label = `problem ${problem}, days ${daysUntilExpiry}, covers ${coversHostname}`;
+
+        assert.ok(fired.length > 0, `${label}: a rejected certificate produced no finding`);
+
+        const reportedByItsOwnRule =
+          (problem === "expired" && fired.includes("security.ssl.expired")) ||
+          (problem === "wrong-hostname" && fired.includes("security.ssl.hostname"));
+        assert.equal(fired.includes("security.ssl.untrusted"), !reportedByItsOwnRule, label);
+      }
+    }
+  }
+});
+
 test("mixed content: high, and names how many a browser will block", () => {
   const finding = findingFor("security.mixed-content", {
     security: healthySecurity({
@@ -342,6 +455,40 @@ test("insecure form action: critical, naming the addresses", () => {
   assert.match(finding.evidence, /http:\/\/example\.com\/login/);
 });
 
+// An enforced upgrade-insecure-requests policy makes browsers rewrite these
+// references to https:// before loading them, so they are not the live exposure
+// the finding describes. Suppressed for BOTH passive and active content, and
+// only the finding is suppressed -- the references stay measured. Report-only
+// never reaches here: it leaves upgradeInsecureRequests false by construction.
+const mixedWithUir = (over: Partial<SecurityData["mixedContent"]>) =>
+  healthySecurity({
+    mixedContent: { ...healthySecurity().mixedContent, ...over },
+  });
+
+test("enforced UIR suppresses the finding for passive mixed content", () => {
+  const overrides = { security: mixedWithUir({ total: 1, activeCount: 0, upgradeInsecureRequests: true }) };
+  assert.equal(findingFor("security.mixed-content", overrides), undefined);
+  // But the measurement is untouched: the reference is still counted.
+  assert.equal(overrides.security.mixedContent.total, 1);
+});
+
+test("enforced UIR suppresses the finding for active mixed content too", () => {
+  const overrides = { security: mixedWithUir({ total: 2, activeCount: 2, upgradeInsecureRequests: true }) };
+  assert.equal(findingFor("security.mixed-content", overrides), undefined);
+});
+
+test("without enforced UIR the mixed-content finding still fires (regression guard)", () => {
+  const passive = findingFor("security.mixed-content", {
+    security: mixedWithUir({ total: 1, activeCount: 0, upgradeInsecureRequests: false }),
+  });
+  assert.equal(passive?.severity, "high");
+
+  const active = findingFor("security.mixed-content", {
+    security: mixedWithUir({ total: 2, activeCount: 2, upgradeInsecureRequests: false }),
+  });
+  assert.equal(active?.severity, "high");
+});
+
 // ---------------------------------------------------------------------------
 // B. Headers
 // ---------------------------------------------------------------------------
@@ -360,16 +507,49 @@ test("missing HSTS: medium", () => {
 });
 
 test("HSTS present but max-age=0 is reported as switched off, not as missing", () => {
+  // The parser marks max-age=0 as a validly parsed header (valid: true) -- a
+  // number was read -- so this fixture reflects that shape rather than an
+  // invented valid: false. The finding must fire anyway, because the number
+  // switches HSTS off: this is the case the rule reorder exists to catch.
   const finding = findingFor("security.headers.hsts", {
     security: healthySecurity({
       strictTransportSecurity: header(true, "max-age=0"),
       hsts: {
         ...healthySecurity().hsts,
-        valid: false,
+        valid: true,
         maxAgeSeconds: 0,
         disabledByZeroMaxAge: true,
         includesSubdomains: false,
       },
+    }),
+  });
+
+  assert.ok(finding);
+  assert.match(finding.evidence, /max-age=0/);
+});
+
+test("a max-age=0 header still fires even though it parsed as valid, because it switches HSTS off", () => {
+  // Guards the ORDER of the checks. A rule that tested `valid` before
+  // `disabledByZeroMaxAge` would pass this header and produce no finding.
+  const finding = findingFor("security.headers.hsts", {
+    security: healthySecurity({
+      strictTransportSecurity: header(true, "max-age=0"),
+      hsts: { ...healthySecurity().hsts, valid: true, maxAgeSeconds: 0, disabledByZeroMaxAge: true },
+    }),
+  });
+
+  assert.ok(finding, "a valid-but-switched-off header is still a finding");
+  assert.equal(finding.severity, "medium");
+  assert.match(finding.evidence, /switches it off/);
+});
+
+test("two HSTS headers whose first is max-age=0 fire, since only the first counts", () => {
+  // RFC 6797 §8.1: the parser takes the first header (max-age=0) and ignores
+  // "max-age=31536000". The site is not protected, and the finding says so.
+  const finding = findingFor("security.headers.hsts", {
+    security: healthySecurity({
+      strictTransportSecurity: header(true, "max-age=0, max-age=31536000"),
+      hsts: { ...healthySecurity().hsts, valid: true, maxAgeSeconds: 0, disabledByZeroMaxAge: true },
     }),
   });
 
@@ -403,6 +583,7 @@ test("report-only CSP is distinguished from having none", () => {
   const finding = findingFor("security.headers.csp", {
     security: healthySecurity({
       contentSecurityPolicy: header(false),
+      contentSecurityPolicyMeta: false,
       contentSecurityPolicyReportOnly: header(true, "default-src 'self'"),
     }),
   });
@@ -784,6 +965,7 @@ function allBroken(): Partial<AuditFacts> {
     security: healthySecurity({
       servedOverHttps: false,
       contentSecurityPolicy: header(false),
+      contentSecurityPolicyMeta: false,
       contentSecurityPolicyReportOnly: header(false),
       strictTransportSecurity: header(false),
       hsts: {
@@ -798,6 +980,7 @@ function allBroken(): Partial<AuditFacts> {
         applicable: true,
         total: 4,
         activeCount: 2,
+        upgradeInsecureRequests: false,
         items: [],
         truncated: false,
         notInspected: [],
@@ -1077,4 +1260,142 @@ test("unknown is never a verdict: trusted and coversHostname nulls stay silent",
 
   assert.ok(!fired.includes("security.ssl.untrusted"), "null trust is not untrusted");
   assert.ok(!fired.includes("security.ssl.hostname"), "null coverage is not a mismatch");
+});
+
+// ---------------------------------------------------------------------------
+// Cookies the browser never keeps
+// ---------------------------------------------------------------------------
+
+/** The security facts for one response's worth of cookies. */
+const withCookies = (cookies: CookieInfo[]) => ({
+  security: healthySecurity({ cookies: { total: cookies.length, cookies, notInspected: [] } }),
+});
+
+test("a cookie the browser never stores is not graded for flags it does not need", () => {
+  // A logout clears a cookie with the same shape a server uses to set one.
+  // Secure and HttpOnly protect a stored cookie; there is nothing stored here.
+  const cleared = withCookies([cookie({ name: "old_session", secure: false, httpOnly: false, sameSite: null, expired: true })]);
+
+  assert.equal(findingFor("security.cookies.secure", cleared), undefined);
+  assert.equal(findingFor("security.cookies.httponly", cleared), undefined);
+});
+
+test("and the report says why it was not graded, rather than claiming no cookies were set", () => {
+  const cleared = withCookies([cookie({ name: "old_session", secure: false, httpOnly: false, expired: true })]);
+
+  assert.match(skipReason("security.cookies.secure", cleared) ?? "", /had already expired/);
+  assert.doesNotMatch(skipReason("security.cookies.secure", cleared) ?? "", /set no cookies/);
+  assert.match(skipReason("security.cookies.httponly", cleared) ?? "", /had already expired/);
+});
+
+test("a response that set no cookies at all still says exactly that", () => {
+  assert.match(skipReason("security.cookies.secure") ?? "", /set no cookies/);
+});
+
+test("a stored insecure cookie beside a cleared one is still reported, naming only the stored one", () => {
+  const mixed = withCookies([
+    cookie({ name: "old_session", secure: false, httpOnly: false, expired: true }),
+    cookie({ name: "sid", secure: false, httpOnly: false }),
+  ]);
+
+  const secure = findingFor("security.cookies.secure", mixed);
+  assert.ok(secure, "the genuine cookie is still a finding");
+  assert.match(secure.evidence, /sid/);
+  assert.doesNotMatch(secure.evidence, /old_session/, "the cleared one is not counted against the site");
+  assert.match(secure.evidence, /1 of 1 cookie/, "the denominator counts stored cookies only");
+});
+
+test("a cookie is not exempted merely for having an expiry attribute", () => {
+  // The distinction is whether the lifetime has already ended, not whether the
+  // server stated one. A cookie stored for an hour is a cookie to protect.
+  const stored = withCookies([cookie({ name: "sid", secure: false, httpOnly: false, expired: false })]);
+
+  assert.ok(findingFor("security.cookies.secure", stored));
+  assert.ok(findingFor("security.cookies.httponly", stored));
+});
+
+test("a CSP delivered only in a meta tag is a distinct finding, not 'no policy'", () => {
+  // Browsers enforce a meta policy, so the page is not one with no policy --
+  // the title must not say it is. It is a weaker delivery, so it still fires.
+  const finding = findingFor("security.headers.csp", {
+    security: healthySecurity({
+      contentSecurityPolicy: header(false),
+      contentSecurityPolicyMeta: true,
+      contentSecurityPolicyReportOnly: header(false),
+    }),
+  });
+
+  assert.ok(finding);
+  assert.equal(finding.severity, "medium");
+  assert.notEqual(finding.title, "No Content-Security-Policy");
+  assert.match(finding.evidence, /meta/i);
+  assert.match(finding.evidence, /response header/i);
+  assert.doesNotMatch(finding.evidence, /No Content-Security-Policy header was sent/);
+});
+
+test("a real CSP header still passes even when a meta tag is also present", () => {
+  // The header wins: a header-delivered policy is the fully-enforced case.
+  const finding = findingFor("security.headers.csp", {
+    security: healthySecurity({
+      contentSecurityPolicy: header(true, "default-src 'self'"),
+      contentSecurityPolicyMeta: true,
+    }),
+  });
+  assert.equal(finding, undefined);
+});
+
+test("the meta case ranks above report-only, and both above 'no policy'", () => {
+  // The three firing branches, in order, each producing their own evidence.
+  const meta = findingFor("security.headers.csp", {
+    security: healthySecurity({ contentSecurityPolicy: header(false), contentSecurityPolicyMeta: true, contentSecurityPolicyReportOnly: header(true, "default-src 'self'") }),
+  });
+  assert.match(meta?.evidence ?? "", /meta/i, "meta is reported before report-only");
+
+  const reportOnly = findingFor("security.headers.csp", {
+    security: healthySecurity({ contentSecurityPolicy: header(false), contentSecurityPolicyMeta: false, contentSecurityPolicyReportOnly: header(true, "default-src 'self'") }),
+  });
+  assert.match(reportOnly?.evidence ?? "", /Report-Only/);
+
+  const none = findingFor("security.headers.csp", {
+    security: healthySecurity({ contentSecurityPolicy: header(false), contentSecurityPolicyMeta: false, contentSecurityPolicyReportOnly: header(false) }),
+  });
+  assert.match(none?.evidence ?? "", /No Content-Security-Policy header was sent/);
+});
+
+test("each CSP firing case carries its own verdict-specific title", () => {
+  // One rule, three genuinely different facts. The heading a reader sees must
+  // name which one it is -- not the rule's generic fallback title, and never
+  // the same title for all three. The evidence is asserted elsewhere; here it
+  // is the title alone that matters.
+  const missing = findingFor("security.headers.csp", {
+    security: healthySecurity({
+      contentSecurityPolicy: header(false),
+      contentSecurityPolicyMeta: false,
+      contentSecurityPolicyReportOnly: header(false),
+    }),
+  });
+  assert.equal(missing?.title, "Content-Security-Policy header is missing");
+
+  const meta = findingFor("security.headers.csp", {
+    security: healthySecurity({
+      contentSecurityPolicy: header(false),
+      contentSecurityPolicyMeta: true,
+      contentSecurityPolicyReportOnly: header(false),
+    }),
+  });
+  assert.equal(meta?.title, "Content-Security-Policy is delivered via a meta tag");
+
+  const reportOnly = findingFor("security.headers.csp", {
+    security: healthySecurity({
+      contentSecurityPolicy: header(false),
+      contentSecurityPolicyMeta: false,
+      contentSecurityPolicyReportOnly: header(true, "default-src 'self'"),
+    }),
+  });
+  assert.equal(reportOnly?.title, "Content-Security-Policy is report-only");
+
+  // All three are distinct headings, so a report never shows one heading for
+  // two different states.
+  const titles = new Set([missing?.title, meta?.title, reportOnly?.title]);
+  assert.equal(titles.size, 3);
 });

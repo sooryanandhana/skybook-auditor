@@ -25,6 +25,7 @@
  * by Google Workspace later is this file's business and nobody else's.
  */
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { UNATTRIBUTED } from "../callerAddress.ts";
 
 /** Where the one account is read from. Neither is prefixed `NEXT_PUBLIC_`. */
 export const EMAIL_VARIABLE = "SKYBOOK_EMAIL";
@@ -130,16 +131,81 @@ export const MAX_FAILED_ATTEMPTS = 10;
 /** How long a caller's failures are remembered. */
 export const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 
+/**
+ * The caller key used when the request cannot be attributed to a real client.
+ *
+ * WITHOUT A TRUSTED PROXY THE APP CANNOT SEE A CLIENT ADDRESS, and the only
+ * candidates are headers the client sets itself -- which somebody guessing
+ * passwords simply changes on every request to look like a new caller. So an
+ * unattributed request is not given a fresh bucket per header value, and the
+ * per-caller HARD limit below does not apply to it: a single shared bucket that
+ * returned 429 would let one attacker lock out the one salesperson who uses
+ * this. The account-level slow-down carries the defence in that case instead.
+ */
+export { UNATTRIBUTED } from "../callerAddress.ts";
+
 /** When each caller last got it wrong. Cleared on success, and never persisted. */
 const failures = new Map<string, number[]>();
 
-/** Forgets every recorded failure. For tests, so one cannot leak into the next. */
+/* ---------------------------------------------------------------------------
+   Slowing a guessing campaign against the account itself
+
+   The per-caller limit above is only as trustworthy as the caller key, and
+   without a trusted proxy that key cannot be trusted at all. This second
+   throttle needs no key: it counts failed attempts against the CONFIGURED
+   ACCOUNT, whoever they came from, and answers each one more slowly than the
+   last once a few have gone by.
+
+   It NEVER refuses and NEVER locks the account. A hard account lock would hand
+   an attacker a denial of service -- flood the form, and the real user cannot
+   get in either. Slowing does not: the right password always works, it just
+   waits a moment during an active attack.
+   --------------------------------------------------------------------------- */
+
+/** Failed attempts answered at full speed before any slowing begins. */
+export const ACCOUNT_FREE_ATTEMPTS = 5;
+
+/** The first imposed delay, which then doubles with each further failure. */
+export const ACCOUNT_BASE_DELAY_MS = 500;
+
+/** The longest any one attempt is held. Reached after about twelve failures. */
+export const ACCOUNT_MAX_DELAY_MS = 30_000;
+
+/** Failed attempts against the account, whatever caller they came from. */
+let accountFailures: number[] = [];
+
+/** Forgets every recorded failure, per-caller and account-wide. For tests. */
 export function resetAttempts(): void {
   failures.clear();
+  accountFailures = [];
 }
 
 function recent(caller: string, now: number): number[] {
   return (failures.get(caller) ?? []).filter((at) => at > now - ATTEMPT_WINDOW_MS);
+}
+
+function recentAccountFailures(now: number): number[] {
+  return accountFailures.filter((at) => at > now - ATTEMPT_WINDOW_MS);
+}
+
+/**
+ * How long the answer to the next attempt should be held, given the failures
+ * already recorded against the account.
+ *
+ * The first `ACCOUNT_FREE_ATTEMPTS` are instant, so an honest person who
+ * mistypes once or twice notices nothing. After that each failure doubles the
+ * wait, from `ACCOUNT_BASE_DELAY_MS` up to `ACCOUNT_MAX_DELAY_MS`, which turns
+ * an unbounded guessing rate into a few attempts a minute.
+ */
+export function accountDelayMs(failuresInWindow: number): number {
+  // Free while fewer than `ACCOUNT_FREE_ATTEMPTS` failures are on record, so the
+  // sixth failed attempt is the first one slowed when the free count is five.
+  const beyondFree = failuresInWindow - ACCOUNT_FREE_ATTEMPTS;
+  if (beyondFree < 0) return 0;
+
+  // Doubling by exponent; the exponent is capped first so it cannot run away.
+  const steps = Math.min(beyondFree, 20);
+  return Math.min(ACCOUNT_BASE_DELAY_MS * 2 ** steps, ACCOUNT_MAX_DELAY_MS);
 }
 
 /* ---------------------------------------------------------------------------
@@ -159,9 +225,21 @@ export interface CredentialOptions {
  * this codebase. The failure reasons are for the server's own use; see the
  * message rule below for what a person is told.
  */
-export type SignInResult =
+export type SignInResult = (
   | { readonly ok: true; readonly email: string }
-  | { readonly ok: false; readonly reason: "rejected" | "rate-limited" | "not-configured"; readonly message: string };
+  | { readonly ok: false; readonly reason: "rejected" | "rate-limited" | "not-configured"; readonly message: string }
+) & {
+  /**
+   * How long the caller should be made to wait before the answer is returned.
+   *
+   * DECIDED HERE, APPLIED BY THE ROUTE. This function stays synchronous and
+   * testable -- a test asserts the number without waiting -- and the route
+   * awaits an injectable sleep. Zero on every fast path, including a right
+   * password and a per-caller 429; above zero only when the account is being
+   * guessed at and the free attempts are spent.
+   */
+  readonly delayMs: number;
+};
 
 /**
  * One sentence for a wrong address AND a wrong password, deliberately.
@@ -217,15 +295,34 @@ export function signIn(
   now: number = Date.now(),
 ): SignInResult {
   if (!credentialsAvailable(options)) {
-    return { ok: false, reason: "not-configured", message: NOT_CONFIGURED };
+    return { ok: false, reason: "not-configured", message: NOT_CONFIGURED, delayMs: 0 };
   }
 
   const recentFailures = recent(caller, now);
-  if (recentFailures.length >= MAX_FAILED_ATTEMPTS) {
+
+  /*
+   * THE HARD PER-CALLER LIMIT APPLIES ONLY TO A CALLER WE CAN TRUST.
+   *
+   * An attributed caller is one a trusted proxy identified, so locking it out
+   * for a window costs an attacker a real address. An unattributed caller is a
+   * single shared bucket, and returning 429 for it would lock out the one
+   * legitimate user along with everyone else -- so its guessing is slowed by
+   * the account throttle below rather than stopped here.
+   */
+  if (caller !== UNATTRIBUTED && recentFailures.length >= MAX_FAILED_ATTEMPTS) {
     // Not recorded: a refused attempt must not extend the caller's own lockout.
     failures.set(caller, recentFailures);
-    return { ok: false, reason: "rate-limited", message: RATE_LIMITED };
+    return { ok: false, reason: "rate-limited", message: RATE_LIMITED, delayMs: 0 };
   }
+
+  /*
+   * The account throttle is read BEFORE the password is hashed and applied to
+   * whatever this attempt turns out to be. Its delay depends only on failures
+   * already recorded, so it cannot leak whether this particular guess was
+   * right -- a correct password waits exactly as long as a wrong one would
+   * have during an active campaign, and then succeeds.
+   */
+  const delayMs = accountDelayMs(recentAccountFailures(now).length);
 
   const account = configured(options);
   const addressMatches = email.trim().toLowerCase() === account.email;
@@ -239,10 +336,12 @@ export function signIn(
   const passwordMatches = checkPassword(password, account.passwordHash);
 
   if (!addressMatches || !passwordMatches) {
-    failures.set(caller, [...recentFailures, now]);
-    return { ok: false, reason: "rejected", message: REJECTED };
+    if (caller !== UNATTRIBUTED) failures.set(caller, [...recentFailures, now]);
+    accountFailures = [...recentAccountFailures(now), now];
+    return { ok: false, reason: "rejected", message: REJECTED, delayMs };
   }
 
   failures.delete(caller);
-  return { ok: true, email: account.email };
+  accountFailures = [];
+  return { ok: true, email: account.email, delayMs };
 }

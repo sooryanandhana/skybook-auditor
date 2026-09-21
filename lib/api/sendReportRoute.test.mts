@@ -32,7 +32,8 @@ import { runRealAudit } from "../audit/pdf/realAudit.fixture.mts";
 import { SEND_FAILURE_MESSAGES, fakeProvider } from "../email/provider.ts";
 import { RESEND_API_KEY_VARIABLE, RESEND_ENDPOINT } from "../email/resend.ts";
 import { codeOnly } from "../email/provider.test.mts";
-import { MAX_SENDS, SEND_RATE_LIMITED, resetSendLimit, sendAllowance } from "../email/sendLimit.ts";
+import { GLOBAL_SENDS, MAX_SENDS, SEND_RATE_LIMITED, recordSend, resetSendLimit, sendAllowance } from "../email/sendLimit.ts";
+import { UNATTRIBUTED } from "../callerAddress.ts";
 import { contentFingerprint, type SendContent } from "../report/sendGate.ts";
 import { sendBody } from "../report/sendRequest.ts";
 import { withoutCredentials } from "../collector/url.ts";
@@ -729,9 +730,12 @@ test("a successful send spends exactly one", async () => {
   const { store, jobId } = storeWith("completed");
   const mail = fakeProvider();
 
+  // Trusted proxy, so the caller key is the forwarded address and this test can
+  // speak about "that caller's" allowance. The default posture is covered on
+  // its own below.
   const result = await sendReportRoute(
     request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }, true, "7.7.8.1"),
-    deps({ store, render: recordingRenderer().render, provider: mail.provider }),
+    deps({ store, render: recordingRenderer().render, provider: mail.provider, trustProxy: true }),
   );
 
   assert.equal(result.ok, true);
@@ -906,6 +910,7 @@ test("what the service refuses comes back as our failure, never in its own words
 });
 
 test("a send the service accepts spends exactly one allowance", async () => {
+  // Trusted proxy, so the address is the caller key; see the note above.
   resetSendLimit();
   const { store, jobId } = storeWith("completed");
   const resend = wiredResend();
@@ -917,7 +922,7 @@ test("a send the service accepts spends exactly one allowance", async () => {
         true,
         "7.7.9.1",
       ),
-      deps({ store, render: recordingRenderer().render }),
+      deps({ store, render: recordingRenderer().render, trustProxy: true }),
     );
 
     assert.equal(result.ok, true);
@@ -1069,4 +1074,45 @@ test("no client-visible confirmation can carry a credential-bearing address", ()
    */
   assert.equal(withoutCredentials("https://user:pass@example.com/"), "https://example.com/");
   assert.ok(!pageAuditedUrl().includes("@"), "and the address in play carries none");
+});
+
+/* ---------------------------------------------------------------------------
+   The header-rotation bypass, closed at the send endpoint
+   --------------------------------------------------------------------------- */
+
+test("by default a send is counted against the shared bucket, not a header's address", async () => {
+  // The default posture: the forwarded address is not trusted, so the send is
+  // recorded against the one shared caller regardless of what the header says.
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const mail = fakeProvider();
+
+  const result = await sendReportRoute(
+    request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }, true, "7.7.8.1"),
+    deps({ store, render: recordingRenderer().render, provider: mail.provider }),
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(remaining(UNATTRIBUTED), MAX_SENDS - 1, "spent against the shared bucket");
+  assert.equal(remaining("7.7.8.1"), MAX_SENDS, "and not against the header's claimed address");
+});
+
+test("rotating the forwarded header no longer buys unlimited sends", async () => {
+  // The bypass: a changing address used to look like a fresh caller each time.
+  // Now the global ceiling bounds the server whatever the header says.
+  resetSendLimit();
+  // Fill the server-wide ceiling from other callers first.
+  for (let i = 0; i < GLOBAL_SENDS; i += 1) recordSend(`203.0.113.${i}`, NOW);
+
+  const { store, jobId } = storeWith("completed");
+  const mail = fakeProvider();
+  const result = await sendReportRoute(
+    request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }, true, "9.9.9.9"),
+    deps({ store, render: recordingRenderer().render, provider: mail.provider }),
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 429);
+  assert.equal(result.error, SEND_RATE_LIMITED);
+  assert.equal(mail.sent.length, 0, "nothing left the building");
 });

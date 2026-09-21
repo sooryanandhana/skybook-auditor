@@ -20,12 +20,16 @@
  * WHAT IT CAN AND CANNOT DO
  *
  * It can prove that an explanation belongs to a finding that really fired, that
- * it names no address the audit did not measure, and that it carries no field
- * capable of overriding a severity or a count.
+ * it names no address the audit did not measure, that every figure it states
+ * was measured by this audit, and that it carries no field capable of
+ * overriding a severity or a count.
  *
  * It cannot fact-check English. A sentence can be misleading while every
- * structural check passes, and pretending otherwise would be worse than saying
- * so. See NUMBERS IN PROSE below for the one place that limitation is sharpest.
+ * structural check passes — a measured number can be used to mean something
+ * it does not measure — and pretending otherwise would be worse than saying
+ * so. What it does guarantee is that no audit fact ENTERS the report from an
+ * answer: the numbers, severities and counts a reader sees are the ones this
+ * application measured.
  */
 import { AI_CONTRACT_VERSION, type AIReportInput } from "./contract.ts";
 import type { AIExplanation, AIExplanationSet } from "./explanation.ts";
@@ -147,22 +151,73 @@ function forReason(value: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Every address the audit actually measured.
+ * Every address the audit actually measured, in the two forms a sentence can
+ * name one.
  *
  * THE TRUSTED SET IS THE INPUT'S OWN, EXACTLY. Not the hostname, not the
  * origin: a model returning a real-looking address on the right domain has
  * still named a page nobody looked at, and "same site" is not the same claim as
  * "we measured this".
  *
- * Only addresses the contract actually carries appear here, and only when the
- * measurement they belong to produced a value. A canonical address the audit
- * could not carry is not in this set, so quoting one is refused.
+ * Both forms are canonical — parsed, not matched as text — so a measured page
+ * is recognised however it is written, and an address that merely CONTAINS a
+ * measured one ("example.com.evil.test", "evil.test/?go=example.com") is not.
  */
-function measuredAddresses(input: AIReportInput): ReadonlySet<string> {
-  const allowed = new Set<string>();
+interface MeasuredAddresses {
+  /** `https://host/path?query`, for a quotation that gives its scheme. */
+  readonly withScheme: ReadonlySet<string>;
+  /** `host/path?query`, for one written without it. */
+  readonly withoutScheme: ReadonlySet<string>;
+}
+
+/**
+ * One address in the forms two of them can be compared by, or null when it is
+ * not a web address at all.
+ *
+ * PARSED, BECAUSE STRING COMPARISON CANNOT DO THIS. A trailing slash, an
+ * upper-case host and a default port all write the same page three ways, and
+ * `mailto:` and `javascript:` are not pages at all.
+ */
+function canonicalAddress(token: string): {
+  withScheme: string;
+  withoutScheme: string;
+  hadScheme: boolean;
+} | null {
+  const hadScheme = /^https?:\/\//i.test(token);
+  // A scheme-relative "//host/path" is a web address; anything else without a
+  // scheme is read as one so it can be compared, never as a different protocol.
+  const absolute = hadScheme ? token : token.startsWith("//") ? `https:${token}` : `https://${token}`;
+
+  let url: URL;
+  try {
+    url = new URL(absolute);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+
+  /*
+   * CREDENTIALS AND A FRAGMENT ARE PART OF WHAT WAS QUOTED, not noise to be
+   * tidied away. A measured page returned with a password in front of it, or
+   * with a fragment nobody measured after it, is a different thing being
+   * presented to a reader — so it must not compare equal to the measurement.
+   */
+  const credentials = url.username === "" && url.password === "" ? "" : `${url.username}:${url.password}@`;
+  const withoutScheme = `${credentials}${url.host}${url.pathname}${url.search}${url.hash}`;
+  return { withScheme: `${url.protocol}//${withoutScheme}`, withoutScheme, hadScheme };
+}
+
+function measuredAddresses(input: AIReportInput): MeasuredAddresses {
+  const withScheme = new Set<string>();
+  const withoutScheme = new Set<string>();
 
   const add = (url: string | null | undefined): void => {
-    if (typeof url === "string" && url !== "") allowed.add(url);
+    if (typeof url !== "string" || url === "") return;
+    const canonical = canonicalAddress(url);
+    if (canonical === null) return;
+    withScheme.add(canonical.withScheme);
+    withoutScheme.add(canonical.withoutScheme);
   };
 
   add(input.site.requestedUrl);
@@ -186,29 +241,276 @@ function measuredAddresses(input: AIReportInput): ReadonlySet<string> {
     for (const sample of finding.reach?.samples ?? []) add(sample.url);
   }
 
-  return allowed;
+  return { withScheme, withoutScheme };
 }
+
+/**
+ * Anything in a sentence shaped like a host, with or without a scheme.
+ *
+ * Deliberately wider than the addresses that are then CHECKED: what to do with
+ * each match is decided below, where the reason can be written down.
+ */
+const ADDRESS_SHAPED = /(?:https?:\/\/|\/\/)?(?:[^\s/@]+@)?(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d{1,5})?(?:\/[^\s<>"'`)\]}]*)?/gi;
+
+/**
+ * Endings that make a token a file or a technology rather than a destination.
+ *
+ * WHY THIS LIST EXISTS. "robots.txt", "sitemap.xml" and "Node.js" are ordinary
+ * things to write about a website, and every one of them is shaped exactly like
+ * a hostname. Treating them as addresses would reject honest sentences about
+ * the very files this audit reports on.
+ *
+ * IT CANNOT BE USED TO SMUGGLE A LINK, because it applies only to tokens
+ * written WITHOUT a scheme: "https://evil.js/login" is still an address and is
+ * still checked.
+ */
+const FILE_LIKE_ENDINGS = new Set([
+  "txt", "xml", "html", "htm", "js", "ts", "json", "css", "md", "png", "jpg",
+  "jpeg", "gif", "svg", "webp", "pdf", "csv", "yml", "yaml", "sh", "py", "rb",
+  "php", "ico", "map", "lock", "env",
+]);
 
 /**
  * The addresses a piece of writing quotes.
  *
- * ONLY SCHEME-PREFIXED TOKENS. A bare "example.com" in a sentence is a word as
- * often as it is an address, and refusing prose because it contains a full stop
- * between two words would be a check that costs more than it saves. What this
- * catches is the thing that matters: a model presenting a specific page as one
- * the audit looked at.
+ * A SCHEME IS NOT REQUIRED, and that was this check's largest hole: the exact
+ * destination refused with `https://` in front of it sailed through without.
+ * What is required is that the token is something a reader could go to —
+ * a scheme, "//", a "www." prefix, or a path — so an ordinary sentence
+ * containing a full stop between two words is not read as a link.
  *
- * Trailing punctuation is stripped, because an address at the end of a sentence
- * is followed by a full stop and that full stop is not part of it.
+ * Trailing punctuation is stripped, because an address at the end of a
+ * sentence is followed by a full stop and that full stop is not part of it.
  */
 function addressesIn(text: string): string[] {
-  const tokens = text.match(/https?:\/\/[^\s<>"'`)\]}]+/gi) ?? [];
-  return tokens.map((token) => token.replace(/[.,;:!?]+$/, ""));
+  const found: string[] = [];
+
+  for (const match of text.matchAll(ADDRESS_SHAPED)) {
+    const token = match[0].replace(/[.,;:!?]+$/, "");
+    if (token === "") continue;
+
+    if (!/^(?:https?:\/\/|\/\/)/i.test(token)) {
+      const host = token.split("/")[0];
+      const ending = host.slice(host.lastIndexOf(".") + 1).toLowerCase();
+      if (FILE_LIKE_ENDINGS.has(ending)) continue;
+
+      // Without a scheme, a token is read as an address only when it is
+      // unmistakably one: a "www." host, or a host carrying a path.
+      if (!/^www\./i.test(token) && !token.includes("/")) continue;
+    }
+
+    found.push(token);
+  }
+
+  return found;
 }
 
 /** The first address in the text that the audit never measured, if any. */
-function unmeasuredAddress(text: string, allowed: ReadonlySet<string>): string | null {
-  return addressesIn(text).find((url) => !allowed.has(url)) ?? null;
+function unmeasuredAddress(text: string, allowed: MeasuredAddresses): string | null {
+  for (const token of addressesIn(text)) {
+    const address = canonicalAddress(token);
+    // Not a web address after parsing (a mail link, a bare colon): the
+    // address guarantee is about pages, and this one names none.
+    if (address === null) continue;
+
+    const known = address.hadScheme
+      ? allowed.withScheme.has(address.withScheme)
+      : allowed.withoutScheme.has(address.withoutScheme);
+    if (!known) return token;
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Numbers
+// ---------------------------------------------------------------------------
+
+/**
+ * A run of digits together with the separators a number may carry.
+ *
+ * Matched as a whole so that "93.184.216.34" and "1.2.3" are seen for what they
+ * are — an address and a version, not numbers — rather than being chopped into
+ * pieces that would each look like a quantity.
+ */
+const NUMBER_RUN = /\d[\d,.]*/g;
+
+/**
+ * What a run of digits states, or null when it states no single number.
+ *
+ * Thousands separators are the same number written for a reader, so "1,200"
+ * and 1200 are one value. Anything with a second decimal point is not a
+ * number at all and is left to the address check.
+ */
+function numberValue(run: string): number | null {
+  const trimmed = run.replace(/[.,]+$/, "");
+  if (!/^\d+(?:\.\d+)?$/.test(trimmed) && !/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(trimmed)) {
+    return null;
+  }
+
+  const value = Number(trimmed.replaceAll(",", ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Every number the audit actually measured.
+ *
+ * READ FROM THE CONTRACT THE MODEL WAS GIVEN, and from nothing else. This walks
+ * the same object that was sent: its measured values, its counts, and the
+ * numbers inside the sentences our own rules wrote. So "the certificate expired
+ * 253 day(s) ago" leaves 253 available to be explained, and nothing that was
+ * never measured is.
+ *
+ * NOTHING IS COMPUTED HERE. No total is added up, no percentage is derived, no
+ * measurement is taken. A number is available to a model because this audit
+ * already produced it.
+ */
+function measuredNumbers(input: AIReportInput): ReadonlySet<number> {
+  const measured = new Set<number>();
+
+  const walk = (value: unknown): void => {
+    if (typeof value === "number") {
+      if (Number.isFinite(value)) measured.add(value);
+      return;
+    }
+
+    if (typeof value === "string") {
+      for (const match of value.matchAll(NUMBER_RUN)) {
+        const parsed = numberValue(match[0]);
+        if (parsed !== null) measured.add(parsed);
+      }
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+
+    if (value !== null && typeof value === "object") {
+      for (const item of Object.values(value)) walk(item);
+    }
+  };
+
+  walk(input);
+  return measured;
+}
+
+/**
+ * Whether a run of digits is part of a name rather than a quantity.
+ *
+ * "h1", "UTF-8", "HTTP/2" and "TLSv1.3" are things a page has, not numbers
+ * about it, and a check that refused them would refuse most honest writing
+ * about headings. A quantity stands on its own: "9.8 seconds", "73%",
+ * "400 pages".
+ */
+function isPartOfAName(text: string, start: number): boolean {
+  const before = text.slice(0, start);
+  return /[A-Za-z]$/.test(before) || /[A-Za-z][-/]$/.test(before);
+}
+
+/** The numbers a piece of writing states as quantities. */
+function claimedNumbers(text: string): Array<{ run: string; value: number }> {
+  const claims: Array<{ run: string; value: number }> = [];
+
+  for (const match of text.matchAll(NUMBER_RUN)) {
+    if (isPartOfAName(text, match.index ?? 0)) continue;
+    const value = numberValue(match[0]);
+    if (value !== null) claims.push({ run: match[0], value });
+  }
+
+  return claims;
+}
+
+/**
+ * The first figure the writing states that this audit never measured.
+ *
+ * WHAT THIS CAN AND CANNOT PROVE. It proves that every figure in the prose came
+ * from the measurements — a model cannot introduce "73% of pages" or "a score
+ * of 94" where no such measurement exists. It does NOT prove that a measured
+ * number is being used to mean what it measured, and it cannot see a figure
+ * written out in words. Both are stated plainly here rather than implied away.
+ */
+function unmeasuredNumber(text: string, measured: ReadonlySet<number>): string | null {
+  return claimedNumbers(text).find((claim) => !measured.has(claim.value))?.run ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// A summary that contradicts the findings
+// ---------------------------------------------------------------------------
+
+/**
+ * Ways of saying, in so many words, that the audit found nothing wrong.
+ *
+ * DELIBERATELY SHORT, AND DELIBERATELY BLUNT. This is not an attempt to
+ * understand English: it catches the flat all-clear a model actually writes
+ * when it has lost track of its input, and nothing subtler. A paraphrase
+ * ("your site is in great shape") is not caught, and the report does not rely
+ * on it being caught — the verdict a reader sees is measured, printed above
+ * the summary, and owes nothing to this list.
+ */
+const NOTHING_FOUND_CLAIMS = [
+  "no problems were found",
+  "no problems found",
+  "no problems at all",
+  "no issues were found",
+  "no issues found",
+  "no issues at all",
+  "found no problems",
+  "found no issues",
+  "we found nothing",
+  "found nothing wrong",
+  "nothing was found",
+  "nothing to fix",
+  "nothing to report",
+  "nothing needs fixing",
+  "no action is needed",
+  "no action needed",
+  "needs no work",
+  "all clear",
+  "clean bill of health",
+  "fully secure",
+];
+
+/**
+ * Words that show the same summary is also reporting problems.
+ *
+ * THE GUARD AGAINST REFUSING HONEST WRITING. "No problems were found with the
+ * certificate, but three other checks failed" opens with an all-clear phrase
+ * and is a perfectly true sentence. The phrases above are cut out of the text
+ * before this looks, so the words that remain are the writer's own account of
+ * what else the audit said.
+ *
+ * Erring towards acceptance is the intended direction: a summary this misses
+ * still sits underneath the measured verdict.
+ */
+const ACKNOWLEDGES_PROBLEMS = [
+  "but", "however", "although", "though", "except", "aside", "other than",
+  "issue", "problem", "finding", "fault", "weakness", "risk",
+  "critical", "high", "medium", "severity",
+  "fix", "failed", "failing", "missing", "attention", "affected", "improve",
+];
+
+/** How many graded problems this audit actually found. Passes are not problems. */
+function problemCount(input: AIReportInput): number {
+  return input.findings.filter((finding) => finding.severity !== "good").length;
+}
+
+/**
+ * Whether the summary claims outright that nothing was found.
+ *
+ * Read on a lower-cased copy, with the claim itself removed before looking for
+ * any acknowledgement, so the phrase cannot vouch for itself.
+ */
+function claimsNothingWasFound(summary: string): boolean {
+  const text = summary.toLowerCase();
+  const claimed = NOTHING_FOUND_CLAIMS.filter((claim) => text.includes(claim));
+  if (claimed.length === 0) return false;
+
+  let remainder = text;
+  for (const claim of claimed) remainder = remainder.split(claim).join(" ");
+
+  return !ACKNOWLEDGES_PROBLEMS.some((word) => remainder.includes(word));
 }
 
 // ---------------------------------------------------------------------------
@@ -218,27 +520,26 @@ function unmeasuredAddress(text: string, allowed: ReadonlySet<string>): string |
 /**
  * Why this entry cannot be believed, or null when it can.
  *
- * NUMBERS IN PROSE, AND WHY THEY ARE NOT CHECKED HERE
+ * THE BOUNDARY IT KEEPS. An explanation belongs to a finding that really
+ * fired; it names no address the audit did not measure; it states no figure
+ * the audit did not measure; and it carries no field capable of overriding a
+ * severity, a count or a denominator. Within that, the writing is the model's
+ * own and is not second-guessed.
  *
- * The obvious next check is that every figure a model quotes appears in the
- * input. It was considered and rejected, because it cannot be made reliable
- * from this contract and a check that is unreliable in this position is worse
- * than none: it would reject ordinary sentences containing a year, a count of
- * words, or a figure the rule's own remediation text mentions, and it would
- * still miss a wrong number written out as a word.
- *
- * What stands in its place is structural and absolute: `AIExplanationSet` has
- * no field for a severity, a count, a denominator or a measurement, and the key
- * check below refuses an entry that invents one. A model can therefore write a
- * misleading sentence, and this is stated plainly rather than papered over --
- * but it cannot change a single number the report displays, because every one
- * of those is read from the deterministic result and never from an answer.
+ * WHAT IS STILL NOT PROVED, SAID PLAINLY. A sentence can use a measured number
+ * to mean something it does not measure, or write a figure out in words, or
+ * draw a wrong conclusion from facts that are all present. None of that can be
+ * caught by comparing values, so none of it is claimed to be. What cannot
+ * happen is a figure, an address or a severity ARRIVING from the answer: every
+ * number the report displays is read from the deterministic result, and every
+ * number the prose states was in the measurements the model was shown.
  */
 function rejectionReason(
   entry: unknown,
   input: AIReportInput,
   gradedRules: ReadonlySet<string>,
-  allowedAddresses: ReadonlySet<string>,
+  allowedAddresses: MeasuredAddresses,
+  allowedNumbers: ReadonlySet<number>,
 ): string | null {
   if (!isPlainObject(entry)) return "an explanation must be an object";
 
@@ -278,6 +579,9 @@ function rejectionReason(
   for (const field of PROSE_FIELDS) {
     const stray = unmeasuredAddress(String(entry[field]), allowedAddresses);
     if (stray !== null) return `"${field}" names an address the audit did not measure`;
+
+    const invented = unmeasuredNumber(String(entry[field]), allowedNumbers);
+    if (invented !== null) return `"${field}" states a figure the audit did not measure (${forReason(invented)})`;
   }
 
   return null;
@@ -353,10 +657,39 @@ function check(input: AIReportInput, candidate: unknown): ExplanationCheck {
 
   const gradedRules = new Set(input.findings.map((finding) => finding.ruleId));
   const allowedAddresses = measuredAddresses(input);
+  /*
+   * Both sets are built once, from the contract, and read many times. They
+   * are the measurements themselves — nothing here derives a new one.
+   */
+  const allowedNumbers = measuredNumbers(input);
 
   const summaryStray = unmeasuredAddress(executiveSummary, allowedAddresses);
   if (summaryStray !== null) {
     return { ok: false, reason: "the summary names an address the audit did not measure" };
+  }
+
+  /*
+   * THE SUMMARY IS REFUSED WHOLE, like a stray address in it. It stands for
+   * the audit rather than for one finding, so there is no smaller thing to
+   * drop, and a report reads better with no opening paragraph than with one
+   * quoting a figure nobody measured.
+   */
+  const summaryFigure = unmeasuredNumber(executiveSummary, allowedNumbers);
+  if (summaryFigure !== null) {
+    return { ok: false, reason: "the summary states a figure the audit did not measure" };
+  }
+
+  /*
+   * A SUMMARY MAY NOT SAY THE AUDIT FOUND NOTHING WHEN IT FOUND SOMETHING.
+   *
+   * Refused whole, like the two checks above it: the opening paragraph
+   * stands for the audit, and one that contradicts the findings printed
+   * beneath it is worse than no paragraph at all. Narrow on purpose --
+   * only a flat all-clear is caught -- because the reader's verdict comes
+   * from the measured findings either way.
+   */
+  if (problemCount(input) > 0 && claimsNothingWasFound(executiveSummary)) {
+    return { ok: false, reason: "the summary says the audit found nothing, and it found problems" };
   }
 
   /*
@@ -389,7 +722,7 @@ function check(input: AIReportInput, candidate: unknown): ExplanationCheck {
       continue;
     }
 
-    const reason = rejectionReason(entry, input, gradedRules, allowedAddresses);
+    const reason = rejectionReason(entry, input, gradedRules, allowedAddresses, allowedNumbers);
     if (reason !== null) {
       rejected.push({ ruleId: claimedId, reason });
       continue;

@@ -1,8 +1,9 @@
 // The .ts extension is required so Node can run the unit tests directly;
 // Next.js resolves it the same way.
 import { normalizeUrl } from "./url.ts";
-import { checkHostnameIsPublic } from "./safety.ts";
+import { checkHostnameIsPublic, releaseBody } from "./safety.ts";
 import { createDeadline, type Deadline } from "./deadline.ts";
+import { certificateProblemForCode } from "./sslChecks.ts";
 import type { CertificateProblem, UptimeCheck } from "@/lib/types";
 
 export type { CertificateProblem };
@@ -113,8 +114,45 @@ export type FetchPageResult =
       ok: false;
       reason: string;
       uptime: UptimeCheck | null;
+      /**
+       * The addresses passed through before the failure, starting with the one
+       * requested — present only when an HTTP response was actually received and
+       * processed (a redirect that then 404'd, answered with non-HTML, sent an
+       * incomplete redirect, or looped past the limit). So a report can still say
+       * where the redirects led.
+       *
+       * ABSENT when nothing responded — a rejected URL, a DNS or connection
+       * error, a timeout before any answer, or a hostname the safety check
+       * refused. There is no walked chain to report in those cases, and a
+       * refused hop is never disclosed here. It travels with `uptime`: where one
+       * is present the other is, and where `uptime` is null this is absent.
+       */
+      redirectChain?: string[];
       certificateProblem?: CertificateProblem;
+      /**
+       * The address whose certificate failed, when one did.
+       *
+       * NOT ALWAYS THE ADDRESS ASKED FOR. A page may redirect to another host
+       * before the connection fails, and the certificate that failed belongs
+       * to the host that presented it. Anything that goes on to read that
+       * certificate has to read it there, so the address travels with the
+       * problem rather than being assumed.
+       */
+      certificateUrl?: string;
     };
+
+/**
+ * Why a certificate stopped the connection, one sentence per kind of problem.
+ *
+ * Keyed by the problem rather than the error code, so the sentence a user
+ * reads can never name a different problem from the one the audit records.
+ */
+const CERTIFICATE_FAILURE_REASONS: Record<CertificateProblem, string> = {
+  expired: "The website's security certificate has expired.",
+  "self-signed": "The website's security certificate is self-signed, so browsers will not trust it.",
+  "wrong-hostname": "The website's security certificate was issued for a different address.",
+  untrusted: "The website's security certificate could not be verified.",
+};
 
 /**
  * Works out what actually went wrong from Node's error code.
@@ -136,29 +174,18 @@ export function classifyConnectionError(error: unknown): {
       ? (error.cause as { code?: string }).code
       : undefined;
 
+  /*
+   * Certificate codes are classified by the certificate check's own function,
+   * not a list kept here. This file used to keep one, and it fell behind:
+   * a certificate whose issuer could not be found, or that was not valid yet,
+   * was reported as "Could not connect to that website."
+   */
+  const certificateProblem = code ? certificateProblemForCode(code) : null;
+  if (certificateProblem !== null) {
+    return { reason: CERTIFICATE_FAILURE_REASONS[certificateProblem], certificateProblem };
+  }
+
   switch (code) {
-    case "CERT_HAS_EXPIRED":
-      return {
-        reason: "The website's security certificate has expired.",
-        certificateProblem: "expired",
-      };
-    case "DEPTH_ZERO_SELF_SIGNED_CERT":
-    case "SELF_SIGNED_CERT_IN_CHAIN":
-      return {
-        reason: "The website's security certificate is self-signed, so browsers will not trust it.",
-        certificateProblem: "self-signed",
-      };
-    case "ERR_TLS_CERT_ALTNAME_INVALID":
-      return {
-        reason: "The website's security certificate was issued for a different address.",
-        certificateProblem: "wrong-hostname",
-      };
-    case "UNABLE_TO_VERIFY_LEAF_SIGNATURE":
-    case "UNABLE_TO_GET_ISSUER_CERT_LOCALLY":
-      return {
-        reason: "The website's security certificate could not be verified.",
-        certificateProblem: "untrusted",
-      };
     case "ENOTFOUND":
     case "EAI_AGAIN":
       return { reason: "That website address could not be found." };
@@ -268,6 +295,13 @@ async function attemptFetch(
   let currentUrl = startUrl;
   const redirectChain: string[] = [currentUrl.toString()];
   const startedAt = Date.now();
+  /*
+   * The uptime from the most recent response, kept so a failure that happens
+   * AFTER answers arrived can still report that the server was online. It stays
+   * null until a response is received, so a failure before any answer (a
+   * connection error, a refused hostname) correctly reports no measurement.
+   */
+  let lastUptime: UptimeCheck | null = null;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     if (deadline.expired()) {
@@ -299,6 +333,12 @@ async function attemptFetch(
         ok: false,
         reason: classified.reason,
         certificateProblem: classified.certificateProblem,
+        // The hop that failed, kept only when a certificate is what failed on
+        // it. Spread rather than set to undefined, so a result that has no
+        // certificate problem carries no field about one.
+        ...(classified.certificateProblem === undefined
+          ? {}
+          : { certificateUrl: currentUrl.toString() }),
         // Nothing responded, so there is no measurement to report.
         uptime: null,
       };
@@ -318,12 +358,19 @@ async function attemptFetch(
       statusCode: response.status,
       serverResponseTimeMs,
     };
+    // A response arrived, so from here on a failure can still report uptime.
+    lastUptime = uptime;
 
     // A 3xx status with a Location header means "the page moved here".
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
+      // The redirect's own body is never read, whichever branch follows —
+      // incomplete, unreadable, non-web, or a hop we go on to follow. Release it
+      // here so its connection is not left open. Only the Location header is
+      // needed from this response, and it has already been read.
+      await releaseBody(response);
       if (!location) {
-        return { ok: false, reason: "The website sent an incomplete redirect.", uptime };
+        return { ok: false, reason: "The website sent an incomplete redirect.", uptime, redirectChain };
       }
 
       // A redirect can be relative ("/home"), so resolve it against the
@@ -336,6 +383,7 @@ async function attemptFetch(
           ok: false,
           reason: "The website redirected to an address we couldn't read.",
           uptime,
+          redirectChain,
         };
       }
 
@@ -344,6 +392,7 @@ async function attemptFetch(
           ok: false,
           reason: "The website redirected somewhere that isn't a web page.",
           uptime,
+          redirectChain,
         };
       }
 
@@ -353,7 +402,9 @@ async function attemptFetch(
     }
 
     if (!response.ok) {
-      return { ok: false, reason: describeErrorStatus(response.status), uptime };
+      // An error status is not read as a page, so its body is released.
+      await releaseBody(response);
+      return { ok: false, reason: describeErrorStatus(response.status), uptime, redirectChain };
     }
 
     /*
@@ -383,17 +434,21 @@ async function attemptFetch(
      */
     const declaredType = response.headers.get("content-type");
     if (declaredType === null || declaredType.trim() === "") {
-      return { ok: false, reason: UNDECLARED_CONTENT_TYPE, uptime };
+      // The server declared no type, so the body is not read — release it.
+      await releaseBody(response);
+      return { ok: false, reason: UNDECLARED_CONTENT_TYPE, uptime, redirectChain };
     }
 
     const contentType = declaredType;
     if (!contentType.toLowerCase().includes("html")) {
-      return { ok: false, reason: NOT_A_WEB_PAGE, uptime };
+      // Not HTML, so it is not read as a page — release the body.
+      await releaseBody(response);
+      return { ok: false, reason: NOT_A_WEB_PAGE, uptime, redirectChain };
     }
 
     const body = await readCapped(response, maxBytes);
     if (body === null) {
-      return { ok: false, reason: "That page could not be read in full.", uptime };
+      return { ok: false, reason: "That page could not be read in full.", uptime, redirectChain };
     }
 
     const headers: Record<string, string> = {};
@@ -426,7 +481,19 @@ async function attemptFetch(
     };
   }
 
-  return { ok: false, reason: "That website redirected too many times.", uptime: null };
+  /*
+   * The redirect limit was reached, so every hop answered — the server is
+   * online, and `lastUptime` holds the final response's measurement (a 3xx). It
+   * is null only if the loop never ran, which cannot happen here: MAX_REDIRECTS
+   * is positive, so at least one hop was attempted. The chain is reported too,
+   * so a report can show where the redirects went.
+   */
+  return {
+    ok: false,
+    reason: "That website redirected too many times.",
+    uptime: lastUptime,
+    redirectChain,
+  };
 }
 
 /**

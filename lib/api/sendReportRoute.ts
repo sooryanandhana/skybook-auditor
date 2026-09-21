@@ -41,6 +41,7 @@ import {
   type OutgoingEmail,
 } from "../email/provider.ts";
 import { SEND_RATE_LIMITED, recordSend, sendAllowance } from "../email/sendLimit.ts";
+import { trustedCaller, trustsProxy } from "../callerAddress.ts";
 import { resendConfigured, resendProvider } from "../email/resend.ts";
 
 /** Where the verified sending address is read from. Never anything a caller typed. */
@@ -72,6 +73,8 @@ export type SendReportResult =
 
 export interface SendReportDeps extends SessionOptions {
   readonly store?: AuditJobStore;
+  /** Whether a trusted proxy set the forwarded address. Off by default. */
+  readonly trustProxy?: boolean;
   /** Swapped by tests so no test launches a browser it does not need. */
   readonly render?: typeof renderPdf;
   /**
@@ -131,14 +134,7 @@ async function submitted(request: Request): Promise<SendRequest> {
   };
 }
 
-/** Who is asking, for the send allowance only. */
-function callerAddress(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for");
-  const first = forwarded?.split(",")[0]?.trim();
-  if (first) return first;
 
-  return request.headers.get("x-real-ip")?.trim() || "unknown";
-}
 
 /**
  * POST /api/report/send — one finished report, to one client.
@@ -208,7 +204,7 @@ export async function sendReportRoute(
    * minutes and told them they had sent too much. The allowance is spent at
    * the end, once a provider has actually taken a message.
    */
-  const caller = callerAddress(request);
+  const caller = trustedCaller(request, trustsProxy(deps.trustProxy));
   if (!sendAllowance(caller, now).allowed) {
     return { ok: false, status: 429, error: SEND_RATE_LIMITED };
   }

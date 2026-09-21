@@ -15,6 +15,8 @@
  */
 
 /** How many audits one caller may run per minute. */
+import { trustedCaller, trustsProxy } from "./callerAddress.ts";
+
 export const DEFAULT_LIMIT = 10;
 
 /**
@@ -249,14 +251,16 @@ function pruneIdleCallers(windowStart: number): void {
  * If this is ever placed behind a real proxy, only that proxy's value should
  * be trusted, and this is the function to change.
  */
-export function callerKey(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) {
-    // The first entry is the original client; the rest are proxies.
-    const first = forwarded.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return request.headers.get("x-real-ip")?.trim() || "unknown";
+/**
+ * Who is asking, for the audit allowance.
+ *
+ * DEFAULT-UNTRUSTED, THROUGH THE SHARED READER. A forwarded header is believed
+ * only behind a configured proxy; otherwise every request is one bucket, so
+ * rotating the header cannot escape the per-caller limit. The global ceiling
+ * below is keyed on nobody and holds regardless.
+ */
+export function callerKey(request: Request, trustProxy: boolean = trustsProxy()): string {
+  return trustedCaller(request, trustProxy);
 }
 
 /** Test helper: forget all recorded requests and any warning already given. */

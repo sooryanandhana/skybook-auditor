@@ -12,7 +12,7 @@
  * An exception's own message never reaches a caller: it can carry a file path,
  * an internal address, or a URL with a key in it.
  */
-import type { AuditResultResponse, AuditStatusResponse, SiteAuditResult } from "../types";
+import type { AuditResult, AuditResultResponse, AuditStatusResponse } from "../types";
 import type { Job } from "./jobStore.ts";
 
 /** Sent when a job id names nothing we hold. */
@@ -46,7 +46,7 @@ export interface Answer<TBody> {
  */
 export function statusAnswer<TAttached, TExplanation>(
   jobId: string,
-  job: Job<SiteAuditResult, TAttached, TExplanation> | null,
+  job: Job<AuditResult, TAttached, TExplanation> | null,
 ): Answer<AuditStatusResponse> {
   if (jobId === "") return { status: 400, body: { ok: false, error: NO_JOB_ID } };
   if (job === null) return { status: 404, body: { ok: false, error: JOB_NOT_FOUND } };
@@ -85,10 +85,14 @@ export function statusAnswer<TAttached, TExplanation>(
  * A PARTIAL crawl is different and IS returned: its findings are real. What
  * must not happen is calling it a whole-site audit, and `crawl.complete` and
  * `crawl.stoppedBecause` inside the result are what stop that.
+ *
+ * An audit whose entry page could not be fetched securely is returned the same
+ * way, and says what it is in its own `kind`. Withholding it would throw away
+ * a certificate that was read and graded.
  */
 export function resultAnswer<TAttached, TExplanation>(
   jobId: string,
-  job: Job<SiteAuditResult, TAttached, TExplanation> | null,
+  job: Job<AuditResult, TAttached, TExplanation> | null,
 ): Answer<AuditResultResponse> {
   if (jobId === "") return { status: 400, body: { ok: false, error: NO_JOB_ID } };
   if (job === null) return { status: 404, body: { ok: false, error: JOB_NOT_FOUND } };

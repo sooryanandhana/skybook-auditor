@@ -48,7 +48,13 @@ export function defineRule<T, F = AuditFacts>(rule: RuleDefinition<T, F>): Compi
           kind: "finding",
           finding: {
             id: rule.id,
-            title: rule.title,
+            // The rule's constant title, unless this particular verdict named a
+            // more specific one. A verdict title only ever renames the heading;
+            // it cannot touch severity, category or id, which stay the rule's.
+            // The rule's constant title, unless this particular verdict named a
+            // more specific one. A verdict title only ever renames the heading;
+            // it cannot touch severity, category or id, which stay the rule's.
+            title: verdict.title ?? rule.title,
             category: rule.category,
             // The rule's own constant, copied. Never computed here.
             severity: rule.severity,

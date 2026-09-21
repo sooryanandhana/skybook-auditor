@@ -442,11 +442,46 @@ test("the runner copies the rule's declared severity and never computes one", ()
 });
 
 test("evaluate has no way to express a severity at all", () => {
-  // The Verdict type carries `fires` and `evidence` — nothing else. If a rule
-  // could return a severity, this object would type-check as a Verdict.
+  // A firing Verdict carries `fires`, `evidence` and — only when one is passed
+  // — a `title`. Never a severity: if a rule could return one, that key would
+  // appear here. A plain fire omits the title entirely.
   const verdict = fires("evidence only");
   assert.deepEqual(Object.keys(verdict).sort(), ["evidence", "fires"]);
+
+  // Even a titled verdict names the finding; it still cannot grade it.
+  const titled = fires("evidence", "A specific heading");
+  assert.deepEqual(Object.keys(titled).sort(), ["evidence", "fires", "title"]);
+  assert.equal((titled as Record<string, unknown>).severity, undefined);
+
   assert.deepEqual(Object.keys(passes), ["fires"]);
+});
+
+test("a verdict title renames the finding; without one the rule's title stands", () => {
+  // The generic capability the CSP rule relies on, tested on a throwaway rule
+  // so it is not a CSP-specific quirk. A verdict's title overrides the heading
+  // and nothing else — id, category and severity stay the rule's own.
+  const renamed = defineRule({
+    id: "renames-itself",
+    scope: "page",
+    remediation: "Fix the underlying issue.",
+    title: "Rule's own fallback title",
+    category: "security",
+    severity: "high",
+    select: (data) => measured(data.seo),
+    evaluate: () => fires("evidence here", "A per-verdict title"),
+  });
+
+  const { findings } = runRules(facts(), [renamed]);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].title, "A per-verdict title", "the verdict's title wins");
+  assert.equal(findings[0].id, "renames-itself", "id is untouched");
+  assert.equal(findings[0].category, "security", "category is untouched");
+  assert.equal(findings[0].severity, "high", "severity is untouched");
+  assert.match(findings[0].evidence, /evidence here/);
+
+  // A rule that fires without a title keeps its own constant title.
+  const { findings: plain } = runRules(facts(), [noMetaDescription]);
+  assert.equal(plain[0].title, "Missing meta description");
 });
 
 test("a passing rule is always graded good, never anything else", () => {

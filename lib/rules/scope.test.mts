@@ -135,3 +135,38 @@ function ruleSource(id: string): string {
   const end = source.indexOf("});", start);
   return source.slice(start, end === -1 ? undefined : end);
 }
+
+test("no site rule reads a page measurement, even when one is there to read", () => {
+  /*
+   * The property that lets these rules be graded for a site whose entry page
+   * could not be fetched at all: they read the certificate, the domain records
+   * and robots.txt, and nothing else. Their fact type says so and the compiler
+   * holds them to it — this is the same claim made at runtime, so a rule that
+   * reached for a page through a cast or an `any` would be caught here too.
+   *
+   * Every page-level key is present and answers by throwing, so a rule that
+   * touches one fails loudly instead of quietly reading undefined.
+   */
+  const facts = {
+    ssl: { status: "unreachable", hostname: "example.com", certificate: null, trusted: null, problem: null, failure: "timeout", message: "No certificate was read." },
+    dns: { hostname: "example.com", status: "error", a: { status: "error", records: [], error: "x" }, aaaa: { status: "error", records: [], error: "x" }, mx: { status: "error", records: [], error: "x" }, ns: { status: "error", records: [], error: "x" }, spf: { status: "error", record: null, error: "x" }, dmarc: { status: "error", record: null, error: "x" }, message: "Nothing was looked up." },
+    technical: null,
+  };
+
+  const pageKeys = ["website", "fetch", "uptime", "responseTime", "seo", "performance", "security", "hosting", "timedOut"];
+  const guarded = new Proxy(facts as Record<string, unknown>, {
+    get(target, key) {
+      if (typeof key === "string" && pageKeys.includes(key)) {
+        throw new Error(`a site rule read the page measurement "${key}"`);
+      }
+      return target[key as string];
+    },
+  });
+
+  for (const rule of SITE_RULES) {
+    assert.doesNotThrow(
+      () => rule.run(guarded as unknown as Parameters<typeof rule.run>[0]),
+      `${rule.id} must read only site measurements`,
+    );
+  }
+});

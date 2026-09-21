@@ -36,6 +36,7 @@ import {
   crawlLimitFacts,
   crawlStatusText,
   discoverySourceFacts,
+  findingsHeadline,
   dmarcFacts,
   dnsFacts,
   fieldOverallText,
@@ -67,7 +68,10 @@ import {
   SITE_FINDINGS_INTRO,
   affectedView,
   auditStatusText,
+  certificateFailureView,
   crawlView,
+  isCertificateFailureAudit,
+  SPEED_NOT_MEASURED_WITHOUT_PAGE,
   partitionByScope,
   scopeLabel,
   stopReasonText,
@@ -86,13 +90,13 @@ import {
   SKIPPED_HEADING,
   SKIPPED_INTRO,
   findingsState,
-  findingsSummary,
   showsSkippedPanel,
   type FindingsState,
 } from "../report/findingsState.ts";
 import type {
   AuditData,
   Category,
+  CertificateFailureAudit,
   Finding,
   PerformanceRating,
   Severity,
@@ -243,7 +247,13 @@ export interface PdfLabels {
 export interface PdfSummary {
   readonly severityCounts: readonly PdfSeverityCount[];
   readonly state: FindingsState;
-  /** The clean-state sentence, or empty when the findings speak for themselves. */
+  /**
+   * The audit's own sentence about what it found.
+   *
+   * MEASURED, AND ABOVE THE WRITTEN SUMMARY on the page. A model's
+   * paragraph sits below this one, so a reader never has to take that
+   * paragraph's word for whether anything is wrong.
+   */
   readonly stateSentence: string;
   readonly ai: PdfAiSummary | null;
 }
@@ -595,6 +605,136 @@ function securitySection(security: AuditData["security"]): PdfFactSection {
 // The projection
 // ---------------------------------------------------------------------------
 
+/**
+ * The document for an audit whose entry page could not be fetched securely.
+ *
+ * EVERY SECTION THAT WOULD DESCRIBE A PAGE IS ABSENT, and the renderer draws
+ * nothing for an absent one. There is no content section, no response-header
+ * section and no page findings, because no page was read; there is no AI
+ * summary, because nothing was asked. The certificate and the domain records
+ * are here because they were measured.
+ *
+ * THE COVERAGE SECTION IS WHERE THE LIMIT IS STATED, in the report layer's
+ * own words, and the cover carries the partial marker as it does for a crawl
+ * that stopped early. The crawl's counts are deliberately not shown: a queue
+ * that drained after its only address failed reports itself complete, and
+ * those numbers beside a finished-looking status would read as a whole-site
+ * audit of a site with no pages.
+ */
+function certificateFailureDocument(
+  audit: CertificateFailureAudit,
+  client: PdfClient,
+): PdfDocument {
+  const findings = audit.site.findings;
+  const skippedChecks = audit.site.skippedChecks;
+  const { site, page } = partitionByScope(findings);
+  const state = findingsState(findings.length, skippedChecks.length);
+  const coverage = certificateFailureView(audit);
+
+  // No commentary was asked for, so no card carries any.
+  const commentary = new Map<string, PdfCommentary>();
+
+  const requested = withoutCredentials(audit.website.requestedUrl);
+  const audited = withoutCredentials(audit.failedUrl);
+
+  return {
+    labels: documentLabels(),
+
+    cover: {
+      client:
+        client.companyName === null && client.contactName === null && client.preparedBy === null
+          ? EMPTY_CLIENT
+          : client,
+      auditedUrl: audited,
+      // Shown only when the address that failed is not the one asked for,
+      // which means the entry page redirected before the failure.
+      requestedUrl: requested === audited ? null : requested,
+      checkedAt: readableTimestamp(audit.website.checkedAt),
+      partial: true,
+      statusLine: auditStatusText(false),
+    },
+
+    coverage: {
+      partial: coverage.partial,
+      headline: coverage.headline,
+      stopReason: coverage.reason,
+      facts: coverage.facts.map((fact) => ({ label: fact.label, value: fact.value })),
+    },
+
+    summary: {
+      severityCounts: severityCounts(findings).map((entry) => ({
+        severity: entry.severity,
+        label: entry.label,
+        count: entry.count,
+      })),
+      state,
+      stateSentence: findingsHeadline(findings, state),
+      ai: null,
+    },
+
+    siteFindings: toSection(site, "site", SITE_FINDINGS_HEADING, SITE_FINDINGS_INTRO, commentary),
+    // Empty, and the renderer draws nothing for it. No page was read, so
+    // there is no page-level finding and none may be implied.
+    pageFindings: toSection(page, "page", PAGE_FINDINGS_HEADING, PAGE_FINDINGS_INTRO, commentary),
+
+    skipped: showsSkippedPanel(state)
+      ? {
+          heading: SKIPPED_HEADING,
+          intro: SKIPPED_INTRO,
+          count: skippedCheckCount(skippedChecks),
+          groups: groupSkippedByReason(skippedChecks).map((group) => ({
+            checks: [...group.checks],
+            reason: group.reason,
+          })),
+        }
+      : null,
+
+    speed: {
+      measured: false,
+      // Nobody asked Google about this address, and the sentence says why.
+      status: "not-requested",
+      message: SPEED_NOT_MEASURED_WITHOUT_PAGE,
+    },
+
+    measured: [
+      {
+        heading: "Certificate",
+        facts: [
+          ...certificateProblemFacts(audit.certificateProblem),
+          ...certificateFacts(audit.ssl),
+        ],
+      },
+      {
+        heading: "Domain and email records",
+        facts: [...dnsFacts(audit.dns), ...spfFacts(audit.dns), ...dmarcFacts(audit.dns)],
+      },
+    ],
+
+    // Nothing here: every row of it describes a crawl of pages.
+    coverageDetail: [],
+  };
+}
+
+/**
+ * ONE COPY OF EVERY SHARED LABEL, read from the report layer here so the
+ * renderer never has to. See `PdfLabels`. Both projections use these: the
+ * labels name parts of the document and say nothing about any website, so
+ * they are the same six strings whatever the audit found.
+ */
+function documentLabels(): PdfLabels {
+  return {
+    remediation: REMEDIATION_LABEL,
+    aiSummaryHeading: AI_SUMMARY_HEADING,
+    aiProvenance: AI_PROVENANCE,
+    aiExplanation: AI_EXPLANATION_LABEL,
+    aiImpact: AI_IMPACT_LABEL,
+    aiRecommendation: AI_RECOMMENDATION_LABEL,
+    speedField: SPEED_FIELD_HEADING,
+    speedLab: SPEED_LAB_HEADING,
+    speedNotInspected: SPEED_NOT_INSPECTED_HEADING,
+  };
+}
+
 export interface PdfDocumentOptions {
   readonly companyName?: string;
   readonly contactName?: string;
@@ -632,6 +772,22 @@ export function buildPdfDocument(
    */
   if (job.result === null) return { ok: false, reason: "no-result" };
 
+  const client: PdfClient = {
+    companyName: clientField(options.companyName),
+    contactName: clientField(options.contactName),
+    preparedBy: clientField(options.preparedBy),
+  };
+
+  /*
+   * AN AUDIT THAT COULD NOT READ A PAGE IS TYPESET FROM WHAT IT DID MEASURE.
+   * Its own projection, below, because there is no entry page to read the
+   * content, security and speed sections from -- and inventing empty ones to
+   * fill the shape is what this file exists to prevent.
+   */
+  if (isCertificateFailureAudit(job.result)) {
+    return { ok: true, document: certificateFailureDocument(job.result, client) };
+  }
+
   const whole: SiteAuditResult = withSpeed(job.result, job.attached);
   const data = whole.data;
   const crawl = whole.crawl;
@@ -655,27 +811,7 @@ export function buildPdfDocument(
         }
       : null;
 
-  const client: PdfClient = {
-    companyName: clientField(options.companyName),
-    contactName: clientField(options.contactName),
-    preparedBy: clientField(options.preparedBy),
-  };
-
-  /*
-   * ONE COPY OF EVERY SHARED LABEL, read from the report layer here so the
-   * renderer never has to. See `PdfLabels`.
-   */
-  const labels: PdfLabels = {
-    remediation: REMEDIATION_LABEL,
-    aiSummaryHeading: AI_SUMMARY_HEADING,
-    aiProvenance: AI_PROVENANCE,
-    aiExplanation: AI_EXPLANATION_LABEL,
-    aiImpact: AI_IMPACT_LABEL,
-    aiRecommendation: AI_RECOMMENDATION_LABEL,
-    speedField: SPEED_FIELD_HEADING,
-    speedLab: SPEED_LAB_HEADING,
-    speedNotInspected: SPEED_NOT_INSPECTED_HEADING,
-  };
+  const labels = documentLabels();
 
   return {
     ok: true,
@@ -717,7 +853,7 @@ export function buildPdfDocument(
           count: entry.count,
         })),
         state,
-        stateSentence: findingsSummary(state),
+        stateSentence: findingsHeadline(findings, state),
         ai: aiSummary,
       },
 

@@ -16,7 +16,9 @@ import fs from "node:fs";
 import {
   affectedView,
   auditStatusText,
+  certificateFailureView,
   crawlView,
+  isCertificateFailureAudit,
   findingScope,
   hasAffectedList,
   PAGE_FINDINGS_HEADING,
@@ -517,4 +519,64 @@ test("the two never read as each other", () => {
   assert.notEqual(auditStatusText(true), auditStatusText(false));
   assert.ok(!auditStatusText(false).includes("complete"));
   assert.ok(!auditStatusText(true).includes("Partial"));
+});
+
+// ---------------------------------------------------------------------------
+// An audit whose entry page could not be fetched securely
+// ---------------------------------------------------------------------------
+
+/** The smallest such audit: what it measured, and what stopped it. */
+const certificateFailure = {
+  kind: "certificate-failure" as const,
+  website: { requestedUrl: "https://example.com/", checkedAt: "2026-09-16T10:00:00.000Z" },
+  failedUrl: "https://example.com/",
+  reason: "The website's security certificate has expired.",
+  certificateProblem: "expired" as const,
+  ssl: {} as never,
+  dns: {} as never,
+  technical: null,
+  site: { findings: [], skippedChecks: [], evaluatedPages: 0 },
+  crawl: {} as never,
+};
+
+test("an audit that could not read a page is told apart by a value, not a missing field", () => {
+  assert.equal(isCertificateFailureAudit(certificateFailure), true);
+  assert.equal(
+    isCertificateFailureAudit({ data: {}, site: {}, pages: [], crawl: {} } as never),
+    false,
+  );
+});
+
+test("its coverage says what happened, never the crawl's counts", () => {
+  /*
+   * The crawl drained its queue after its only address failed, so it reports
+   * itself complete — and `crawlView` would turn that into "0 pages read.
+   * Every page we found was visited." This says what actually happened.
+   */
+  const view = certificateFailureView(certificateFailure);
+
+  assert.equal(view.partial, true);
+  assert.match(view.headline, /entry page could not be fetched securely/);
+  assert.doesNotMatch(view.headline, /Every page we found was visited/);
+  assert.equal(view.reason, "The website's security certificate has expired.");
+});
+
+test("its coverage names the address, the problem, and both sides of the scope", () => {
+  const facts = new Map(certificateFailureView(certificateFailure).facts.map((f) => [f.label, f.value]));
+
+  assert.equal(facts.get("Address"), "https://example.com/");
+  assert.equal(facts.get("Certificate problem"), "The certificate has expired");
+  assert.match(facts.get("Checked") ?? "", /certificate and the domain/i);
+  assert.match(facts.get("Not checked") ?? "", /reads a page/);
+});
+
+test("credentials in the address never reach the report", () => {
+  const view = certificateFailureView({
+    ...certificateFailure,
+    failedUrl: "https://user:secret@example.com/admin",
+  });
+
+  const address = view.facts.find((fact) => fact.label === "Address")?.value ?? "";
+  assert.doesNotMatch(address, /secret/);
+  assert.equal(address, "https://example.com/admin");
 });

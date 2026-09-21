@@ -12,7 +12,8 @@ import {
   runSiteAudit,
   type SiteAuditOptions,
 } from "../audit/siteAudit.ts";
-import type { SiteAuditResult, SpeedResult } from "../types";
+import { isCertificateFailureAudit } from "../report/siteFindingsView.ts";
+import type { AuditResult, SpeedResult } from "../types";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
 
 /**
@@ -37,7 +38,7 @@ const GLOBAL_KEY = "__skybookAuditJobs";
  * from the audit and that measurement together. A TYPE-ONLY import, so the
  * provider it came from is erased at build time and nothing here loads an SDK.
  */
-export type AuditJobStore = JobStore<SiteAuditResult, SpeedResult, ExplainResult>;
+export type AuditJobStore = JobStore<AuditResult, SpeedResult, ExplainResult>;
 
 type GlobalWithJobs = typeof globalThis & {
   [GLOBAL_KEY]?: AuditJobStore;
@@ -45,7 +46,7 @@ type GlobalWithJobs = typeof globalThis & {
 
 export function auditJobs(): AuditJobStore {
   const holder = globalThis as GlobalWithJobs;
-  holder[GLOBAL_KEY] ??= createJobStore<SiteAuditResult, SpeedResult, ExplainResult>();
+  holder[GLOBAL_KEY] ??= createJobStore<AuditResult, SpeedResult, ExplainResult>();
   return holder[GLOBAL_KEY];
 }
 
@@ -198,8 +199,14 @@ export function startAudit(
        * The findings it produced are real and are still returned — but the
        * status says "partial", because saying "completed" would tell someone
        * we had looked at a whole website when we had looked at part of one.
+       *
+       * AN AUDIT THAT COULD NOT READ A PAGE IS PARTIAL WHATEVER THE CRAWL
+       * SAYS. Its queue drained — there was one address and it failed — so
+       * the crawl reports itself complete, and "completed" would be read as
+       * a whole-site audit of a site nothing was read from.
        */
-      store.finish(job.id, result.crawl.complete ? "completed" : "partial", result);
+      const partial = isCertificateFailureAudit(result) || !result.crawl.complete;
+      store.finish(job.id, partial ? "partial" : "completed", result);
     } catch (error) {
       /*
        * The entry page being unreadable is the one failure we can describe in

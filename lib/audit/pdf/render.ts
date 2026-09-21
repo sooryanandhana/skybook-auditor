@@ -226,6 +226,60 @@ export async function renderPdf(
 }
 
 /**
+ * A prepared, self-contained HTML document, as PDF bytes.
+ *
+ * FOR DOCUMENTS THAT DECLARE THEIR OWN PAGES. The verified client report sets
+ * its page size, margins, running head and page numbers with CSS `@page`
+ * rules, so it asks for `preferCSSPageSize` and no Chromium templates. Every
+ * isolation rule above still holds, because this is the same path: the same
+ * launcher, the same `configurePage` (no JavaScript, no network), the same
+ * whole-call budget and the same guaranteed close.
+ *
+ * It lives here rather than beside its caller so that this folder stays the
+ * only place in `lib` that can drive a browser.
+ */
+export async function renderHtmlDocument(
+  html: string,
+  metadata: { title: string; author: string; subject: string },
+  options: RenderOptions = {},
+): Promise<Buffer> {
+  const budgetMs = options.timeoutMs ?? PDF_RENDER_BUDGET_MS;
+  const launcher = options.launch ?? (() => puppeteer.launch({ headless: true }));
+  const held: { browser: Promise<Browser> | null } = { browser: null };
+
+  try {
+    return await withBudget(budgetMs, async () => {
+      let browser: Browser;
+      try {
+        held.browser = launcher();
+        browser = await held.browser;
+      } catch {
+        throw new PdfRenderError("browser-unavailable");
+      }
+
+      const page = await browser.newPage();
+      await configurePage(page);
+      await page.setContent(html, { waitUntil: "load" });
+
+      const pdf = Buffer.from(
+        await page.pdf({
+          preferCSSPageSize: true,
+          printBackground: true,
+          displayHeaderFooter: false,
+          tagged: true,
+        }),
+      );
+      return withMetadata(pdf, metadata);
+    });
+  } catch (error) {
+    if (error instanceof PdfRenderError) throw error;
+    throw new PdfRenderError("internal-error");
+  } finally {
+    if (held.browser !== null) await held.browser.then((b) => b.close()).catch(() => {});
+  }
+}
+
+/**
  * A hard bound on the whole call.
  *
  * Puppeteer's own timeouts are per operation, so a launch that hangs and a

@@ -139,7 +139,13 @@ export interface SkippedCheck {
   reason: string;
 }
 
-/** Why a certificate stopped an HTTPS connection succeeding. */
+/**
+ * Why a certificate stopped an HTTPS connection succeeding.
+ *
+ * Decided from the platform's error code in one place only,
+ * `certificateProblemForCode` in collector/sslChecks.ts, which says what each
+ * value covers.
+ */
 export type CertificateProblem = "expired" | "self-signed" | "wrong-hostname" | "untrusted";
 
 // ---------------------------------------------------------------------------
@@ -536,6 +542,24 @@ export interface MixedContentData {
   /** How many of those a browser is expected to block outright. */
   activeCount: number;
   /**
+   * Whether an ENFORCED Content-Security-Policy carries the
+   * `upgrade-insecure-requests` directive — delivered either as a response
+   * header or as an enforcing `<meta http-equiv>` element.
+   *
+   * When true, a conforming browser rewrites each `http://` subresource to
+   * `https://` BEFORE the request is made (W3C Upgrade Insecure Requests), so
+   * the insecure loads counted here do not actually happen. The references are
+   * still measured and listed truthfully in `items`/`total` — this only records
+   * that the browser upgrades them, which the mixed-content rule uses to decide
+   * the reference is not a live exposure.
+   *
+   * DELIBERATELY EXCLUDES report-only policies: a
+   * Content-Security-Policy-Report-Only directive is observed but not enforced,
+   * so it upgrades nothing. And this is the ONLY CSP directive read for this
+   * purpose — CSP strength is not graded here (that is E13's decision).
+   */
+  upgradeInsecureRequests: boolean;
+  /**
    * The insecure resources found, capped at MIXED_CONTENT_LIMIT.
    * `total` is the true count even when this list is shorter.
    */
@@ -574,6 +598,16 @@ export interface CookieInfo {
   httpOnly: boolean;
   /** The SameSite setting, lowercased, or null when the server did not set one. */
   sameSite: string | null;
+  /**
+   * Whether the header says this cookie was already expired when it arrived.
+   *
+   * A response that clears a cookie looks exactly like one that sets it, apart
+   * from its stated lifetime. A browser stores nothing for such a header, so
+   * the flags that protect a stored cookie have nothing to protect -- see
+   * `isAlreadyExpired` in collector/securityChecks.ts for what the header has
+   * to say for this to be true.
+   */
+  expired: boolean;
 }
 
 export interface CookieData {
@@ -604,6 +638,18 @@ export interface SecurityData {
    * with a client, and folding them together loses that.
    */
   contentSecurityPolicyReportOnly: SecurityHeader;
+  /**
+   * Whether the page's HTML delivers a Content-Security-Policy in a
+   * `<meta http-equiv="Content-Security-Policy">` element.
+   *
+   * A SEPARATE FACT FROM THE HEADER, because a browser enforces a meta policy
+   * but ignores three of its directives -- frame-ancestors, sandbox, and the
+   * reporting ones -- which a header would honour. So "policy in a header" and
+   * "policy only in a meta tag" are different states and are recorded apart, in
+   * the same spirit report-only is kept apart from a header. Only measured,
+   * never graded for what the policy permits: that is E13's decision, unchanged.
+   */
+  contentSecurityPolicyMeta: boolean;
   xFrameOptions: SecurityHeader;
   xContentTypeOptions: SecurityHeader;
   referrerPolicy: SecurityHeader;
@@ -1303,6 +1349,81 @@ export interface SiteAuditResult {
   crawl: SiteCrawlSummary;
 }
 
+/**
+ * An audit whose entry page could not be fetched, because the certificate
+ * offered for it failed.
+ *
+ * A DIFFERENT SHAPE, NOT A SMALLER SiteAuditResult. Every field of AuditData
+ * describes a page that was read -- its headings, its images, its response
+ * headers, its cookies -- and no page was read here. There is no value for any
+ * of them that is not a claim about something nobody looked at: "no headings"
+ * and "we could not look" are different facts, and only one of them is true.
+ * So the page sections are absent rather than filled in, and a reader of this
+ * type cannot reach one by accident.
+ *
+ * WHAT IS HERE WAS MEASURED. The certificate was read by the certificate
+ * check, which connects on purpose without trusting what it is given -- that
+ * is what lets it say "expired three weeks ago" rather than "connection
+ * failed". The domain's records were looked up. Both describe the site rather
+ * than any page, so neither needed the page that could not be read.
+ */
+export interface CertificateFailureAudit {
+  /**
+   * Which kind of result this is, and the field to test before reading any
+   * other. A whole-site audit does not carry it.
+   */
+  kind: "certificate-failure";
+  website: WebsiteInfo;
+  /**
+   * The address whose certificate failed: the one requested, or the address it
+   * redirected to. The certificate belongs to that address's host, and that is
+   * the host the certificate check below read.
+   */
+  failedUrl: string;
+  /** Why the page could not be read, in the page fetch's own words. */
+  reason: string;
+  /**
+   * Which certificate problem stopped it, as a value rather than a sentence.
+   *
+   * Classified by `certificateProblemForCode` in collector/sslChecks.ts, the
+   * same function the certificate check uses, so the failure that stopped the
+   * audit and the certificate that was then read speak one vocabulary.
+   */
+  certificateProblem: CertificateProblem;
+  /** The certificate itself, read from the address that failed. */
+  ssl: SslData;
+  /** The domain's records, which do not depend on reading a page. */
+  dns: DnsData;
+  /**
+   * robots.txt and the sitemap, as far as they could be read.
+   *
+   * Both are fetched over the same HTTPS the page fetch could not complete, so
+   * "unavailable" is the usual answer here -- reported as that, never as
+   * "absent", which would say the site does not have them.
+   */
+  technical: TechnicalData | null;
+  /**
+   * The findings the site rules produced, and every check that did not run.
+   *
+   * `evaluatedPages` is 0, which is the truth: no page was read, so no
+   * page-scoped rule was evaluated on anything. Each of those rules is listed
+   * in `skippedChecks` with its reason, rather than left out where its
+   * silence would read as a check that passed.
+   */
+  site: SiteFindingsSummary;
+  /** The crawl's own account of what it attempted. `evaluated` is 0. */
+  crawl: SiteCrawlSummary;
+}
+
+/**
+ * What an audit job can finish with.
+ *
+ * Every consumer -- the result endpoint, the results page, the PDF
+ * projection, the commentary -- has to decide what it does with an audit that
+ * could not read a page, and this union is what makes the compiler ask them.
+ */
+export type AuditResult = SiteAuditResult | CertificateFailureAudit;
+
 export type AuditResponse =
   | { ok: true; data: AuditData }
   | {
@@ -1317,6 +1438,12 @@ export type AuditResponse =
        * is the same value that reaches `fetch.certificateProblem` when the
        * page can still be read over plain HTTP — kept here for the case where
        * it cannot, so the finding is not lost with the failure.
+       *
+       * RETIRED WITH THE ENDPOINT THIS TYPE DESCRIBES. Nothing returns an
+       * `AuditResponse` any more: the audit runs as a job, and its result
+       * arrives through `AuditResultResponse`. The case above is now
+       * answered there, by `CertificateFailureAudit.certificateProblem` on a
+       * partial audit, so the finding is not lost with the failure.
        */
       certificateProblem?: CertificateProblem;
     };
@@ -1343,7 +1470,15 @@ export type AuditResultResponse =
       ok: true;
       jobId: string;
       status: "completed" | "partial";
-      result: SiteAuditResult;
+      /**
+       * The audit, of whichever kind finished.
+       *
+       * An audit whose entry page could not be fetched securely arrives here
+       * as a `CertificateFailureAudit`, with `status: "partial"`. It is a
+       * real result with real findings; what it is not is a whole-site audit,
+       * and its own `kind` is what says so.
+       */
+      result: AuditResult;
     }
   | {
       ok: false;

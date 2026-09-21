@@ -256,7 +256,7 @@ export function classifyConnectionFailure(error: NodeJS.ErrnoException): {
  * Names the reason chain validation failed.
  *
  * The same values the page fetch uses, so a certificate problem means the
- * same thing wherever it is reported.
+ * same thing wherever it is reported: both ask `certificateProblemForCode`.
  */
 export function classifyAuthorizationError(error: unknown): CertificateProblem | null {
   const code =
@@ -266,23 +266,71 @@ export function classifyAuthorizationError(error: unknown): CertificateProblem |
         ? String((error as { code: unknown }).code)
         : "";
 
+  if (!code) return null;
+
+  // Validation failed for a reason we do not have a name for. "untrusted" is
+  // the honest umbrella: the chain was not accepted. Safe HERE because the
+  // platform only sets this value when validation failed — an unknown code
+  // from a page fetch may not be about a certificate at all, and gets none.
+  return certificateProblemForCode(code) ?? "untrusted";
+}
+
+/**
+ * The certificate problem a verification code names, or null when the code is
+ * not a certificate verification code.
+ *
+ * THE ONE PLACE A CERTIFICATE ERROR CODE IS CLASSIFIED. This check reads the
+ * code from a connection it completed; the page fetch reads the same codes
+ * from a connection that was refused. Two lists drifted: a certificate whose
+ * issuer could not be found was "untrusted" here and "Could not connect to
+ * that website" there.
+ *
+ *   expired         a certificate's validity period has ended
+ *   self-signed     the site's own certificate signed itself
+ *   wrong-hostname  the certificate was issued for a different address
+ *   untrusted       it could not be verified for any other reason — an
+ *                   authority that is not trusted, an issuer that could not
+ *                   be found, a certificate not valid yet, a bad signature
+ *
+ * SELF_SIGNED_CERT_IN_CHAIN IS NOT "self-signed". OpenSSL reports it when the
+ * chain ends at a self-signed authority that is not trusted; the site's own
+ * certificate was issued under that authority and did not sign itself. The
+ * code does not say which authority, or why it is not trusted, so it is
+ * described as what is known: a certificate that could not be verified.
+ *
+ * The names are OpenSSL's, as Node reports them. Revocation-list codes are
+ * left out because neither connection is given a revocation list, so they
+ * cannot occur.
+ */
+export function certificateProblemForCode(code: string): CertificateProblem | null {
   switch (code) {
     case "CERT_HAS_EXPIRED":
       return "expired";
     case "DEPTH_ZERO_SELF_SIGNED_CERT":
-    case "SELF_SIGNED_CERT_IN_CHAIN":
       return "self-signed";
     case "ERR_TLS_CERT_ALTNAME_INVALID":
     case "HOSTNAME_MISMATCH":
       return "wrong-hostname";
+    case "SELF_SIGNED_CERT_IN_CHAIN":
     case "UNABLE_TO_VERIFY_LEAF_SIGNATURE":
     case "UNABLE_TO_GET_ISSUER_CERT_LOCALLY":
     case "UNABLE_TO_GET_ISSUER_CERT":
+    case "CERT_NOT_YET_VALID":
+    case "ERROR_IN_CERT_NOT_BEFORE_FIELD":
+    case "ERROR_IN_CERT_NOT_AFTER_FIELD":
+    case "CERT_SIGNATURE_FAILURE":
+    case "UNABLE_TO_DECRYPT_CERT_SIGNATURE":
+    case "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY":
+    case "CERT_CHAIN_TOO_LONG":
+    case "CERT_REVOKED":
+    case "INVALID_CA":
+    case "PATH_LENGTH_EXCEEDED":
+    case "INVALID_PURPOSE":
+    case "CERT_UNTRUSTED":
+    case "CERT_REJECTED":
       return "untrusted";
     default:
-      // Validation failed for a reason we do not have a name for. "untrusted"
-      // is the honest umbrella: the chain was not accepted.
-      return code ? "untrusted" : null;
+      return null;
   }
 }
 

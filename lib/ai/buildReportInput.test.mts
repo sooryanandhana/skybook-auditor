@@ -96,6 +96,7 @@ function security(overrides: Partial<SecurityData> = {}): SecurityData {
     servedOverHttps: true,
     strictTransportSecurity: header("max-age=31536000"),
     contentSecurityPolicy: header("default-src 'self'"),
+    contentSecurityPolicyMeta: false,
     contentSecurityPolicyReportOnly: header(null),
     xFrameOptions: header("DENY"),
     xContentTypeOptions: header("nosniff"),
@@ -113,6 +114,7 @@ function security(overrides: Partial<SecurityData> = {}): SecurityData {
       applicable: true,
       total: 0,
       activeCount: 0,
+      upgradeInsecureRequests: false,
       items: [],
       truncated: false,
       notInspected: ["Resources named inside separate stylesheets."],
@@ -1179,9 +1181,9 @@ test("cookie names cannot enter the contract, and values were never captured", (
           cookies: {
             total: 3,
             cookies: [
-              { name: "PHPSESSID", secure: false, httpOnly: true, sameSite: null },
-              { name: "wp_logged_in_9f2", secure: true, httpOnly: true, sameSite: "lax" },
-              { name: "_ga", secure: true, httpOnly: false, sameSite: null },
+              { name: "PHPSESSID", secure: false, httpOnly: true, sameSite: null, expired: false },
+              { name: "wp_logged_in_9f2", secure: true, httpOnly: true, sameSite: "lax", expired: false },
+              { name: "_ga", secure: true, httpOnly: false, sameSite: null, expired: false },
             ],
             notInspected: ["Cookies created later by JavaScript."],
           },
@@ -1812,6 +1814,7 @@ test("measurements.security and everything under it have exactly these keys", ()
   ]);
   assert.deepEqual(keysOf(measured.headers), [
     "contentSecurityPolicy",
+    "contentSecurityPolicyMeta",
     "contentSecurityPolicyReportOnly",
     "permissionsPolicy",
     "referrerPolicy",
@@ -2046,7 +2049,7 @@ const ALLOWED_KEYS = new Set([
   "imagesMissingAlt", "canonicalUrl", "langAttribute", "hasViewportMeta",
   // security measurements
   "security", "headers", "strictTransportSecurity", "contentSecurityPolicy",
-  "contentSecurityPolicyReportOnly", "xFrameOptions", "xContentTypeOptions",
+  "contentSecurityPolicyMeta", "contentSecurityPolicyReportOnly", "xFrameOptions", "xContentTypeOptions",
   "referrerPolicy", "permissionsPolicy", "hsts", "applicable", "valid",
   "maxAgeSeconds", "disabledByZeroMaxAge", "includesSubdomains", "preload",
   "mixedContent", "total", "activeCount", "notInspected", "cookies",

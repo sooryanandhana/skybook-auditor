@@ -25,9 +25,9 @@
 import type { TechnicalData } from "../types";
 import { defineRule } from "./runner.ts";
 import { fromRobotsRules } from "./selectors.ts";
-import { fires, passes } from "./types.ts";
+import { fires, passes, type SiteFacts } from "./types.ts";
 
-export const robotsBlocksAllRule = defineRule<TechnicalData>({
+export const robotsBlocksAllRule = defineRule<TechnicalData, SiteFacts>({
   id: "technical.robots.blocks-all",
   scope: "site",
   title: "robots.txt blocks all search engines",

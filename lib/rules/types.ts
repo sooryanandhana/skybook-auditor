@@ -90,16 +90,32 @@ export type Verdict =
   | { readonly fires: false }
   /**
    * The rule fired. It supplies the EVIDENCE — the measured fact behind the
-   * finding — and nothing else. Severity is not its to decide.
+   * finding — and, where one firing rule describes genuinely different states,
+   * an optional TITLE for this particular one. Severity is still not its to
+   * decide: a title names what was found, it does not grade it.
+   *
+   * When `title` is omitted the finding takes the rule's own constant title, so
+   * the common case (one rule, one thing it looks for) needs nothing extra. It
+   * exists for a rule like CSP, whose one "not enforced by a header" verdict
+   * covers three distinct facts — missing, meta-only, report-only — each of
+   * which deserves its own honest heading.
    */
-  | { readonly fires: true; readonly evidence: string };
+  | { readonly fires: true; readonly evidence: string; readonly title?: string };
 
 /** The rule did not fire. */
 export const passes: Verdict = { fires: false };
 
-/** The rule fired, with the measurement that caused it. */
-export function fires(evidence: string): Verdict {
-  return { fires: true, evidence };
+/**
+ * The rule fired, with the measurement that caused it.
+ *
+ * `title` is optional: pass one only when this verdict names a different state
+ * from the rule's other firing verdicts. Omit it to use the rule's constant
+ * title, which is what almost every rule does.
+ */
+export function fires(evidence: string, title?: string): Verdict {
+  return title === undefined
+    ? { fires: true, evidence }
+    : { fires: true, evidence, title };
 }
 
 /**
@@ -210,6 +226,22 @@ export type AuditFacts = Omit<
  * other sections, because they are not in its input at all.
  */
 export type PerformanceFacts = Pick<AuditFacts, "performance">;
+
+/**
+ * The facts a SITE rule may read.
+ *
+ * Narrower than AuditFacts for the same reason PerformanceFacts is. A site
+ * rule describes the whole website -- its certificate, its domain records, its
+ * robots.txt -- and none of those needs a page. Declaring that is what lets
+ * these rules run on an audit whose entry page could not be fetched at all:
+ * the certificate was still read, so the certificate rules still have
+ * something true to say, and there is no page-shaped hole to fill with
+ * invented values to satisfy a signature.
+ *
+ * The compiler enforces it. A site rule CANNOT read `seo`, `security` or
+ * `uptime`, because they are not in its input.
+ */
+export type SiteFacts = Pick<AuditFacts, "ssl" | "dns" | "technical">;
 
 /** What happened to one rule on one audit. */
 export type RuleOutcome =

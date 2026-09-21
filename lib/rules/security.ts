@@ -48,7 +48,7 @@ import {
   fromSsl,
   whenApplicable,
 } from "./selectors.ts";
-import { fires, measured, passes, type Presence } from "./types.ts";
+import { fires, measured, passes, type Presence, type SiteFacts } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // A. Transport security
@@ -83,7 +83,7 @@ export const httpsRule = defineRule<SecurityData>({
  *
  * Policy: fixed by the table at the top of this file.
  */
-export const certificateExpiredRule = defineRule<SslCertificate>({
+export const certificateExpiredRule = defineRule<SslCertificate, SiteFacts>({
   id: "security.ssl.expired",
   scope: "site",
   title: "TLS certificate has expired",
@@ -111,10 +111,13 @@ export const certificateExpiredRule = defineRule<SslCertificate>({
  *
  * Policy: fixed by the table at the top of this file.
  */
-export const certificateHostnameRule = defineRule<{
-  certificate: SslCertificate;
-  hostname: string;
-}>({
+export const certificateHostnameRule = defineRule<
+  {
+    certificate: SslCertificate;
+    hostname: string;
+  },
+  SiteFacts
+>({
   id: "security.ssl.hostname",
   scope: "site",
   title: "TLS certificate does not cover this address",
@@ -148,9 +151,17 @@ export const certificateHostnameRule = defineRule<{
  * The platform's own chain validation failed — self-signed, or issued by an
  * authority browsers do not trust. Same visitor-facing warning again.
  *
+ * ONE CAUSE, ONE FINDING. The platform gives one reason for rejecting a
+ * certificate. When that reason is expiry or a different address, and the
+ * certificate's own facts show exactly that, the expiry or hostname rule above
+ * has already reported it — firing here too counted one renewal as two
+ * Critical problems. Every other rejection is reported here, including an
+ * expiry the site's own certificate does not show: an expired intermediate is
+ * rejected as "expired", and no other rule would report it at all.
+ *
  * Policy: fixed by the table at the top of this file.
  */
-export const certificateUntrustedRule = defineRule<SslData>({
+export const certificateUntrustedRule = defineRule<SslData, SiteFacts>({
   id: "security.ssl.untrusted",
   scope: "site",
   title: "TLS certificate is not trusted",
@@ -163,11 +174,33 @@ export const certificateUntrustedRule = defineRule<SslData>({
     // `trusted` is boolean | null, and null means we never got far enough to
     // know. Only an explicit false is a verdict.
     if (ssl.trusted !== false) return passes;
+    if (reportedByItsOwnRule(ssl)) return passes;
     return fires(
       `The certificate did not pass validation${ssl.problem ? ` (${ssl.problem})` : ""}.`,
     );
   },
 });
+
+/**
+ * Whether the reason validation failed is already a finding of its own.
+ *
+ * Reads the same facts, the same way, as the expiry and hostname rules: a
+ * readable expiry date in the past, and coverage that is explicitly false.
+ * Unknown facts report nothing there, so the rejection is reported here.
+ */
+function reportedByItsOwnRule(ssl: SslData): boolean {
+  const certificate = ssl.certificate;
+  if (certificate === null) return false;
+
+  switch (ssl.problem) {
+    case "expired":
+      return certificate.daysUntilExpiry !== null && certificate.daysUntilExpiry < 0;
+    case "wrong-hostname":
+      return certificate.coversHostname === false;
+    default:
+      return false;
+  }
+}
 
 /**
  * Insecure resources on an HTTPS page. Browsers block the active ones outright
@@ -193,6 +226,19 @@ export const mixedContentRule = defineRule<SecurityData["mixedContent"]>({
     ),
   evaluate: (mixed) => {
     if (mixed.total === 0) return passes;
+    /*
+     * AN ENFORCED upgrade-insecure-requests UPGRADES THESE BEFORE THEY LOAD.
+     *
+     * Checked before the count, and for BOTH active and passive references. The
+     * directive (in the response header or an enforcing <meta>, never
+     * report-only) makes a conforming browser rewrite every http:// subresource
+     * to https:// before the request is made, so nothing is actually loaded over
+     * plain HTTP and this is not the live exposure the finding describes. The
+     * references are still measured and listed -- the collector recorded them
+     * truthfully -- but there is no finding to raise. Report-only never reaches
+     * here: `upgradeInsecureRequests` is false for it by construction.
+     */
+    if (mixed.upgradeInsecureRequests) return passes;
     const blocked =
       mixed.activeCount > 0
         ? ` ${mixed.activeCount} of them are scripts or stylesheets a browser will block.`
@@ -251,13 +297,18 @@ export const hstsRule = defineRule<SecurityData>({
       "HSTS is ignored by browsers on a plain HTTP page, so it was not graded here.",
     ),
   evaluate: (security) => {
-    if (security.hsts.valid) return passes;
-
-    // A header that exists but does nothing is worth saying out loud — it
-    // usually means someone believes the site is protected.
+    // CHECKED BEFORE `valid`, AND THAT ORDER IS THE FIX. The parser marks
+    // max-age=0 as a validly parsed header (`valid: true`) because a number
+    // was read — but the number switches HSTS off, so a browser clears its
+    // entry and the site has no protection. Testing `valid` first passed such
+    // a header and left this branch, with the right evidence already in it,
+    // unreachable. A header that exists but does nothing is worth saying out
+    // loud: it usually means someone believes the site is protected.
     if (security.hsts.disabledByZeroMaxAge) {
       return fires("Strict-Transport-Security is present but sets max-age=0, which switches it off.");
     }
+    if (security.hsts.valid) return passes;
+
     if (security.strictTransportSecurity.present) {
       return fires(
         "Strict-Transport-Security is present but carries no usable max-age, so browsers ignore it entirely.",
@@ -276,7 +327,12 @@ export const hstsRule = defineRule<SecurityData>({
 export const cspRule = defineRule<SecurityData>({
   id: "security.headers.csp",
   scope: "page",
-  title: "No Content-Security-Policy",
+  // The rule's fallback heading, accurate for all three cases it fires on: no
+  // policy at all, a policy only in a meta tag, and a report-only policy. None
+  // is enforced by a response header. Each firing verdict below then supplies a
+  // more specific title naming which of the three it is; this constant is what
+  // the skipped-check display and any un-titled verdict would fall back to.
+  title: "Content-Security-Policy is not enforced by a response header",
   category: "security",
   severity: "medium",
   remediation:
@@ -285,14 +341,32 @@ export const cspRule = defineRule<SecurityData>({
   evaluate: (security) => {
     if (security.contentSecurityPolicy.present) return passes;
 
+    // A policy delivered only in a <meta> element IS enforced by browsers, so
+    // this page is not one with no policy -- saying so would be false. It is a
+    // weaker delivery, though: a meta policy cannot use frame-ancestors,
+    // sandbox or the reporting directives, which a header can. Reported as its
+    // own honest state, the way report-only is, and never confused with "none".
+    // (What the policy PERMITS is still not graded -- that is E13's decision.)
+    if (security.contentSecurityPolicyMeta) {
+      return fires(
+        "Content-Security-Policy is present but delivered only in a <meta> tag, so browsers ignore its " +
+          "frame-ancestors, sandbox and reporting directives. Send it as an HTTP response header instead.",
+        "Content-Security-Policy is delivered via a meta tag",
+      );
+    }
+
     // Report-only is a real step towards a policy, and saying so is fairer
     // than reporting it identically to a site that has done nothing.
     if (security.contentSecurityPolicyReportOnly.present) {
       return fires(
         "Only Content-Security-Policy-Report-Only was sent. It reports violations but blocks nothing.",
+        "Content-Security-Policy is report-only",
       );
     }
-    return fires("No Content-Security-Policy header was sent.");
+    return fires(
+      "No Content-Security-Policy header was sent.",
+      "Content-Security-Policy header is missing",
+    );
   },
 });
 
@@ -301,13 +375,39 @@ export const cspRule = defineRule<SecurityData>({
 // ---------------------------------------------------------------------------
 
 /**
+ * The cookies these rules may grade: the ones a browser actually keeps.
+ *
  * Only the cookies observed on this one response can be graded. The collector
  * records in `notInspected` that cookies set later by JavaScript, or on other
  * pages, were not seen — so an empty list is not a clean bill of health, and
  * these rules skip rather than pass when there is nothing to look at.
+ *
+ * A HEADER THAT STORES NOTHING IS NOT A COOKIE TO PROTECT. A response clearing
+ * a cookie states a lifetime that has already ended, and a browser keeps
+ * nothing for it. Secure and HttpOnly defend a cookie that exists: a stored
+ * one can be sent over plain HTTP or read by an injected script, and one that
+ * was never stored can do neither. Grading those headers reported a logout as
+ * two security problems.
+ *
+ * NOTHING IS DECIDED HERE. `expired` was measured by the collector from the
+ * header's own Max-Age and Expires; this only declines to grade what it says
+ * is not kept.
  */
 function cookiesToGrade(security: SecurityData): CookieInfo[] {
-  return security.cookies.cookies;
+  return security.cookies.cookies.filter((cookie) => !cookie.expired);
+}
+
+/**
+ * Why there was nothing to grade, in the words that fit what was seen.
+ *
+ * A response that set no cookies at all and one whose cookies were all already
+ * expired are different facts, and a report that said "this response set no
+ * cookies" about a logout would be describing something that did not happen.
+ */
+function nothingToGrade(security: SecurityData): string {
+  return security.cookies.total === 0
+    ? "This response set no cookies. Cookies set later by JavaScript or on other pages were not seen."
+    : "Every cookie in this response had already expired, so the browser stores none of them and there is nothing to protect.";
 }
 
 export const cookieSecureRule = defineRule<CookieInfo[]>({
@@ -328,11 +428,7 @@ export const cookieSecureRule = defineRule<CookieInfo[]>({
     }
     const cookies = cookiesToGrade(data.security);
     if (cookies.length === 0) {
-      return {
-        measured: false,
-        reason:
-          "This response set no cookies. Cookies set later by JavaScript or on other pages were not seen.",
-      };
+      return { measured: false, reason: nothingToGrade(data.security) };
     }
     return measured(cookies);
   },
@@ -369,11 +465,7 @@ export const cookieHttpOnlyRule = defineRule<CookieInfo[]>({
   select: (data) => {
     const cookies = cookiesToGrade(data.security);
     if (cookies.length === 0) {
-      return {
-        measured: false,
-        reason:
-          "This response set no cookies. Cookies set later by JavaScript or on other pages were not seen.",
-      };
+      return { measured: false, reason: nothingToGrade(data.security) };
     }
     return measured(cookies);
   },
@@ -402,7 +494,7 @@ export const cookieHttpOnlyRule = defineRule<CookieInfo[]>({
  * The selector is what makes this safe. A DNS lookup that FAILED never reaches
  * evaluate, so "we could not check" can never be reported as "no record".
  */
-export const spfRule = defineRule<Presence<string>>({
+export const spfRule = defineRule<Presence<string>, SiteFacts>({
   id: "security.dns.spf",
   scope: "site",
   title: "No SPF record published",
@@ -439,7 +531,7 @@ export const spfRule = defineRule<Presence<string>>({
  *
  * Policy: fixed by the table at the top of this file.
  */
-export const dmarcRule = defineRule<Presence<string>>({
+export const dmarcRule = defineRule<Presence<string>, SiteFacts>({
   id: "security.dns.dmarc",
   scope: "site",
   title: "No DMARC record published",

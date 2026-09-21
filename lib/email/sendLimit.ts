@@ -23,6 +23,19 @@
 /** How many messages one caller may send inside the window. */
 export const MAX_SENDS = 5;
 
+/**
+ * The most reports the whole server will send in the window, across every
+ * caller.
+ *
+ * KEYED ON NOBODY, so a rotated forwarded header cannot slip past it the way it
+ * slips past a per-caller count. It sits above `MAX_SENDS` -- one caller may
+ * send five, the server as a whole fifteen -- so it bounds an abuser without
+ * getting in the way of ordinary use. Sending is the one thing this tool does
+ * that leaves the building and costs money, so it carries a ceiling as well as
+ * a per-caller limit.
+ */
+export const GLOBAL_SENDS = 15;
+
 /** How long those are remembered. */
 export const SEND_WINDOW_MS = 10 * 60 * 1000;
 
@@ -32,9 +45,13 @@ export const SEND_RATE_LIMITED =
 /** When each caller last sent. Never persisted, and never keyed on a recipient. */
 const sends = new Map<string, number[]>();
 
+/** Every send, across all callers, for the un-keyed global ceiling. */
+let globalSends: number[] = [];
+
 /** Forgets everything recorded. For tests, so one cannot leak into the next. */
 export function resetSendLimit(): void {
   sends.clear();
+  globalSends = [];
 }
 
 export interface SendAllowance {
@@ -77,6 +94,19 @@ export function sendAllowance(caller: string, now: number = Date.now()): SendAll
     };
   }
 
+  // The server-wide ceiling. A caller with allowance left is still refused once
+  // the whole server has sent its fill -- which is what a rotated header runs
+  // into as soon as it can no longer look like a fresh caller.
+  const globalWithin = recentGlobal(now);
+  if (globalWithin.length >= GLOBAL_SENDS) {
+    const oldest = globalWithin[0];
+    return {
+      allowed: false,
+      remaining: 0,
+      retryAfterSeconds: Math.max(1, Math.ceil((oldest + SEND_WINDOW_MS - now) / 1000)),
+    };
+  }
+
   return { allowed: true, remaining: MAX_SENDS - within.length, retryAfterSeconds: 0 };
 }
 
@@ -93,9 +123,14 @@ export function sendAllowance(caller: string, now: number = Date.now()): SendAll
  */
 export function recordSend(caller: string, now: number = Date.now()): void {
   sends.set(caller, [...recent(caller, now), now]);
+  globalSends = [...recentGlobal(now), now];
 }
 
 /** The caller's sends still inside the window. Pure: it writes nothing. */
 function recent(caller: string, now: number): number[] {
   return (sends.get(caller) ?? []).filter((at) => at > now - SEND_WINDOW_MS);
+}
+
+function recentGlobal(now: number): number[] {
+  return globalSends.filter((at) => at > now - SEND_WINDOW_MS);
 }

@@ -40,13 +40,17 @@ import type { FetchedPage } from "../collector/fetchPage.ts";
 import { SITE_CHECKS_BUDGET_MS } from "../budgets.ts";
 import { runRules } from "../rules/runner.ts";
 import { PAGE_RULES, SITE_RULES } from "../rules/all.ts";
+import type { SiteFacts } from "../rules/types.ts";
 import { aggregateFindings, type PageRuleResult } from "../report/aggregate.ts";
 import type {
   AuditData,
+  AuditResult,
+  CertificateFailureAudit,
+  CertificateProblem,
   Finding,
   ResponseTimeMeasurement,
   PageAudit,
-  SiteAuditResult,
+  SkippedCheck,
   TechnicalData,
 } from "../types";
 
@@ -117,6 +121,18 @@ async function measureSite(
 
 export interface SiteAuditOptions {
   requestedUrl: string;
+  /**
+   * Whether the scheme in `requestedUrl` was one WE assumed, because the person
+   * typed a bare host and normalisation added `https://`.
+   *
+   * It gates the one HTTP fallback this audit allows: an assumed `https://`
+   * that could not connect at all may be an HTTP-only site, so the audit retries
+   * over HTTP. An `https://` the person typed themselves is never downgraded —
+   * the same rule `normalizeUrl` documents — so this stays false for those and
+   * for every discovered address. Certificate failures are excluded separately:
+   * they are reported from the certificate, never re-fetched over HTTP.
+   */
+  schemeWasAssumed?: boolean;
   includePerformance?: boolean;
   onProgress?: (progress: CrawlProgress) => void;
   /** Injected by tests so nothing here reaches the network. */
@@ -150,6 +166,16 @@ export interface SiteAuditOptions {
  * page that cannot be read stays an ordinary unavailable page inside a
  * perfectly good audit.
  */
+/**
+ * Why no page check ran, when a certificate stopped the entry page's fetch.
+ *
+ * ONE SENTENCE, ON EVERY PAGE CHECK, so a reader meeting the list of checks
+ * that did not run can tell why in one place. It says what happened and
+ * stops: it claims nothing about the page, because nobody read it.
+ */
+export const PAGE_CHECKS_NOT_RUN =
+  "The entry page could not be fetched securely, so no page was read for this check.";
+
 export class EntryPageUnavailableError extends Error {
   readonly reason: string;
 
@@ -160,7 +186,7 @@ export class EntryPageUnavailableError extends Error {
   }
 }
 
-export async function runSiteAudit(options: SiteAuditOptions): Promise<SiteAuditResult> {
+export async function runSiteAudit(options: SiteAuditOptions): Promise<AuditResult> {
   const deadline = options.deadline ?? createDeadline(SITE_AUDIT_BUDGET_MS);
   const crawlImpl = options.crawlImpl ?? crawlSite;
 
@@ -180,7 +206,55 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<SiteAudit
    */
   const entry = findEntryPage(crawl, options.requestedUrl);
   if (entry === null) {
-    throw new EntryPageUnavailableError(entryFailureReason(crawl, options.requestedUrl));
+    const failure = entryFailure(crawl, options.requestedUrl);
+
+    /*
+     * A FAILED CERTIFICATE IS A MEASUREMENT, NOT AN ABSENCE.
+     *
+     * When the entry page could not be fetched because the certificate
+     * offered for it failed, the thing that stopped the audit is itself the
+     * finding -- and the certificate can still be read, because the
+     * certificate check connects without trusting what it is given. So the
+     * audit goes on with the checks that need no page, and says plainly that
+     * it has nothing else.
+     *
+     * ONLY WHEN NOTHING WAS READ. A crawl that reached other pages has an
+     * audit of those pages to report, which is a different thing from this
+     * and is not quietly turned into it.
+     */
+    const certificateProblem = failure.certificateProblem;
+    if (certificateProblem !== undefined && crawl.pages.length === 0) {
+      return certificateFailureAudit(options, crawl, failure, certificateProblem, deadline);
+    }
+
+    /*
+     * AN ASSUMED https:// THAT COULD NOT CONNECT MAY BE AN HTTP-ONLY SITE.
+     *
+     * When WE added the scheme (the person typed a bare host) and the entry's
+     * HTTPS attempt did not connect at all -- not a certificate failure, which
+     * is the certificate-only report above, and not a server that answered with
+     * an error -- the site may simply not serve HTTPS. So the audit is retried
+     * over HTTP, seeded at the same host, and produces an ordinary report that
+     * grades the missing HTTPS as the Critical finding it is.
+     *
+     * The retry passes schemeWasAssumed: false, so an HTTP attempt that also
+     * fails is reported as unavailable rather than looping. An https:// the
+     * person typed themselves has schemeWasAssumed false and never reaches here,
+     * so an explicit security choice is never silently downgraded. The HTTP
+     * fetch goes through the same per-hop safety check as every other request.
+     */
+    const httpUrl =
+      options.schemeWasAssumed === true &&
+      !failure.serverResponded &&
+      certificateProblem === undefined &&
+      crawl.pages.length === 0
+        ? toHttpUrl(options.requestedUrl)
+        : null;
+    if (httpUrl !== null) {
+      return runSiteAudit({ ...options, requestedUrl: httpUrl, schemeWasAssumed: false });
+    }
+
+    throw new EntryPageUnavailableError(failure.reason);
   }
 
   /*
@@ -346,6 +420,86 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<SiteAudit
 }
 
 /**
+ * The audit of a site whose entry page could not be fetched securely.
+ *
+ * IT MEASURES WHAT DOES NOT NEED A PAGE: the certificate, the domain's
+ * records, and robots.txt as far as it could be read. The same site-level
+ * function a whole-site audit uses measures them, from the address that
+ * actually presented the failing certificate -- which is the address the
+ * entry page redirected to, when it redirected before failing.
+ *
+ * WHAT IT DID NOT MEASURE IS SAID, NOT LEFT OUT. Every page-scoped rule is
+ * listed as a check that did not run, with its reason. Left out, their
+ * silence would read as a page that passed them.
+ *
+ * NOTHING HERE IS INVENTED. There is no `data`: `AuditData` describes a page
+ * and no page was read. The response time the site checks measure is
+ * deliberately not carried, because its vocabulary cannot tell a refused
+ * certificate from a server that never answered, and "the server could not
+ * be reached" would be false about a server that answered the handshake.
+ */
+async function certificateFailureAudit(
+  options: SiteAuditOptions,
+  crawl: CrawlResult,
+  failure: EntryFailure,
+  certificateProblem: CertificateProblem,
+  deadline: Deadline,
+): Promise<CertificateFailureAudit> {
+  const normalized = normalizeUrl(options.requestedUrl);
+  const requestedUrl = normalized.ok ? normalized.url.toString() : options.requestedUrl;
+  const failedUrl = failure.certificateUrl ?? requestedUrl;
+
+  const { technical, ssl, dns } = await (options.siteChecksImpl ?? measureSite)(
+    failedUrl,
+    // The address that failed is an HTTPS one -- having a certificate to fail
+    // is what that means -- so the certificate check applies to it.
+    new URL(failedUrl).protocol === "https:",
+    deadline,
+    crawl.robots,
+  );
+
+  /*
+   * THE SITE RULES, ON THE SITE'S OWN FACTS. They read the certificate, the
+   * domain records and robots.txt and nothing else, which their fact type
+   * declares -- so they can be graded here, where there is no page, with
+   * nothing made up to satisfy a signature.
+   */
+  const siteFacts: SiteFacts = { ssl, dns, technical };
+  const graded = runRules(siteFacts, SITE_RULES);
+
+  const site = aggregateFindings([], {
+    site: {
+      siteUrl: new URL(failedUrl).origin,
+      findings: graded.findings,
+      skipped: [...graded.skipped, ...pageChecksNotRun()],
+    },
+  });
+
+  return {
+    kind: "certificate-failure",
+    website: { requestedUrl, checkedAt: new Date().toISOString() },
+    failedUrl,
+    reason: failure.reason,
+    certificateProblem,
+    ssl,
+    dns,
+    technical,
+    site: {
+      findings: site.findings,
+      skippedChecks: site.skipped,
+      // No page was read, so no page-scoped rule ran on anything.
+      evaluatedPages: 0,
+    },
+    crawl: crawl.summary,
+  };
+}
+
+/** Every page-scoped check, listed as one that did not run, with the reason. */
+function pageChecksNotRun(): SkippedCheck[] {
+  return PAGE_RULES.map((rule) => ({ ruleId: rule.id, reason: PAGE_CHECKS_NOT_RUN }));
+}
+
+/**
  * Worst first, then by rule id — exactly the order the rule runner uses.
  *
  * Needed here because this list is assembled from two separate runs: the page
@@ -367,6 +521,24 @@ function sortFindings(findings: Finding[]): Finding[] {
  * as `https://example.com/`. The final address is checked too, because the
  * entry page is entitled to redirect.
  */
+/**
+ * The same address over http, or null when it is not an https address.
+ *
+ * Only ever used to retry an assumed-https entry that could not connect. It
+ * changes the scheme and nothing else, and refuses anything that is not https
+ * so it can never turn some other address into an http one.
+ */
+function toHttpUrl(requestedUrl: string): string | null {
+  try {
+    const url = new URL(requestedUrl);
+    if (url.protocol !== "https:") return null;
+    url.protocol = "http:";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function findEntryPage(crawl: CrawlResult, requestedUrl: string): FetchedPage | null {
   const seed = normalizeCrawlUrl(requestedUrl, requestedUrl);
   if (!seed.ok) return null;
@@ -383,13 +555,33 @@ function findEntryPage(crawl: CrawlResult, requestedUrl: string): FetchedPage | 
   return null;
 }
 
+/** Why the entry page produced nothing, and what the fetcher made of it. */
+interface EntryFailure {
+  /** The collector's own sentence. */
+  reason: string;
+  /**
+   * Whether the server answered before the entry fetch failed.
+   *
+   * Defaults to true, so the HTTP fallback is taken only when a connection
+   * failure is PROVEN — a served error, a non-HTML answer, or a failure we
+   * cannot classify all leave this true and are never downgraded to HTTP.
+   */
+  serverResponded: boolean;
+  /** Set when a certificate is what stopped it. The fetcher classified it. */
+  certificateProblem?: CertificateProblem;
+  /** The address that presented that certificate. */
+  certificateUrl?: string;
+}
+
 /**
  * Why the entry page produced nothing, in the collector's own words.
  *
- * The crawler already recorded a reason; this finds it rather than composing a
- * new sentence, so the person is told what actually happened.
+ * The crawler already recorded a reason; this finds it rather than composing
+ * a new sentence, so the person is told what actually happened. The fetcher's
+ * own classification travels with it, so a caller deciding what to do about a
+ * certificate failure matches on a value and never on the sentence.
  */
-function entryFailureReason(crawl: CrawlResult, requestedUrl: string): string {
+function entryFailure(crawl: CrawlResult, requestedUrl: string): EntryFailure {
   const seed = normalizeCrawlUrl(requestedUrl, requestedUrl);
 
   if (seed.ok) {
@@ -397,17 +589,29 @@ function entryFailureReason(crawl: CrawlResult, requestedUrl: string): string {
     for (const attempt of crawl.attempts) {
       const resolved = normalizeCrawlUrl(attempt.url, attempt.url);
       if (!resolved.ok || resolved.key !== wanted) continue;
-      if (attempt.outcome === "unavailable" || attempt.outcome === "non-html") {
-        return attempt.reason;
+      // The server answered with something that is not a page, so it is up.
+      if (attempt.outcome === "non-html") return { reason: attempt.reason, serverResponded: true };
+      if (attempt.outcome === "unavailable") {
+        return {
+          reason: attempt.reason,
+          serverResponded: attempt.serverResponded,
+          certificateProblem: attempt.certificateProblem,
+          certificateUrl: attempt.certificateUrl,
+        };
       }
     }
     for (const failure of crawl.summary.unavailable) {
       const resolved = normalizeCrawlUrl(failure.url, failure.url);
-      if (resolved.ok && dedupKey(resolved.url) === wanted) return failure.reason;
+      // The frontier's summary keeps only a sentence, so whether the server
+      // answered cannot be proven here; the safe default is "it did".
+      if (resolved.ok && dedupKey(resolved.url) === wanted) return { reason: failure.reason, serverResponded: true };
     }
   }
 
   // Nothing was attempted at all — robots.txt refused it, or the crawl ran out
   // of time before it began. Said plainly, without guessing which.
-  return "That page could not be checked, so there is nothing to report on.";
+  return {
+    reason: "That page could not be checked, so there is nothing to report on.",
+    serverResponded: true,
+  };
 }

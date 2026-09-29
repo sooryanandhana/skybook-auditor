@@ -313,24 +313,31 @@ test("a table spanning a page break repeats its header row", async () => {
       value: `Result ${index}`,
     }));
 
-  const short = testDocument({ measured: [{ heading: "Facts", facts: rows(8) }] });
-  const long = testDocument({ measured: [{ heading: "Facts", facts: rows(120) }] });
+  const smallPdf = await renderPdf(testDocument({ measured: [{ heading: "Facts", facts: rows(8) }] }));
+  const midPdf = await renderPdf(testDocument({ measured: [{ heading: "Facts", facts: rows(20) }] }));
+  const longPdf = await renderPdf(testDocument({ measured: [{ heading: "Facts", facts: rows(120) }] }));
 
-  const shortPdf = await renderPdf(short);
-  const longPdf = await renderPdf(long);
-
-  const shortPages = pageCount(shortPdf);
-  const longPages = pageCount(longPdf);
-  assert.ok(longPages > shortPages, "the long table really does span more pages");
+  assert.ok(pageCount(longPdf) > pageCount(smallPdf), "the long table really does span more pages");
 
   /*
-   * Fifteen times the rows must draw more than fifteen times the glyphs,
-   * because each new page the table reaches redraws the header.
+   * Each new page the table reaches redraws its header, so the marginal glyphs
+   * PER ROW over a long, many-page span exceed those over a short one. Measured
+   * as a rate difference from the same 8-row start, so every fixed cost — the
+   * cover, every section above the table, the table's own heading — cancels and
+   * cannot tip it; only the repeated header is left. If the header stopped
+   * repeating the two rates would match and this would fail.
+   *
+   * A rate rather than the old `> 14×` total: that total divided by the small
+   * table's glyphs, which carry a fixed heading overhead the multiplier then
+   * amplified, so an unrelated section added above the table could break it
+   * although the header still repeated exactly as it should.
    */
-  assert.ok(
-    drawOps(longPdf) - drawOps(shortPdf) > (drawOps(shortPdf) - drawOps(await renderPdf(testDocument({ measured: [] })))) * 14,
-    "the extra pages carry more than just their own rows",
-  );
+  const perRow = (fromOps: number, toOps: number, fromRows: number, toRows: number) =>
+    (toOps - fromOps) / (toRows - fromRows);
+  const shortRate = perRow(drawOps(smallPdf), drawOps(midPdf), 8, 20);
+  const longRate = perRow(drawOps(smallPdf), drawOps(longPdf), 8, 120);
+
+  assert.ok(longRate > shortRate * 1.05, "the longer table draws more per row — the repeated header");
 });
 
 test("a finding taller than a page breaks rather than being clipped", async () => {

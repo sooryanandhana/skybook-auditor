@@ -12,7 +12,8 @@
  * An exception's own message never reaches a caller: it can carry a file path,
  * an internal address, or a URL with a key in it.
  */
-import type { AuditResult, AuditResultResponse, AuditStatusResponse } from "../types";
+import type { AuditResult, AuditResultResponse, AuditStatusResponse, SpeedResult } from "../types";
+import { withScore } from "../audit/withScore.ts";
 import type { Job } from "./jobStore.ts";
 
 /** Sent when a job id names nothing we hold. */
@@ -90,9 +91,9 @@ export function statusAnswer<TAttached, TExplanation>(
  * way, and says what it is in its own `kind`. Withholding it would throw away
  * a certificate that was read and graded.
  */
-export function resultAnswer<TAttached, TExplanation>(
+export function resultAnswer<TExplanation>(
   jobId: string,
-  job: Job<AuditResult, TAttached, TExplanation> | null,
+  job: Job<AuditResult, SpeedResult, TExplanation> | null,
 ): Answer<AuditResultResponse> {
   if (jobId === "") return { status: 400, body: { ok: false, error: NO_JOB_ID } };
   if (job === null) return { status: 404, body: { ok: false, error: JOB_NOT_FOUND } };
@@ -134,8 +135,21 @@ export function resultAnswer<TAttached, TExplanation>(
     };
   }
 
+  /*
+   * The finished audit, with its deterministic score attached.
+   *
+   * This is the one seam where the whole audit is in hand — the crawl result and
+   * the speed check that was attached to it — so it is where the score is taken,
+   * from both together. `withScore` reads only measured findings, never the AI
+   * commentary, and leaves the stored result untouched.
+   */
   return {
     status: 200,
-    body: { ok: true, jobId: job.id, status: job.status, result: job.result },
+    body: {
+      ok: true,
+      jobId: job.id,
+      status: job.status,
+      result: withScore(job.result, job.attached),
+    },
   };
 }

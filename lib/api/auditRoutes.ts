@@ -120,6 +120,17 @@ function jobIdFrom(request: Request): string {
 }
 
 /**
+ * Which device the speed check should simulate. Mobile unless `?strategy=desktop`.
+ *
+ * Mobile is the default and the only one that is graded and filed against the
+ * job — so a caller that names nothing, or anything but "desktop", gets the
+ * exact behaviour this endpoint always had. Desktop is display-only.
+ */
+function strategyFrom(request: Request): "mobile" | "desktop" {
+  return new URL(request.url).searchParams.get("strategy") === "desktop" ? "desktop" : "mobile";
+}
+
+/**
  * POST /api/audit — start an audit and hand back a receipt.
  *
  * The rate limit is checked before a job exists, so a caller over the limit
@@ -211,7 +222,24 @@ export async function performanceRoute(
    * The catch guards against a future change breaking that promise.
    */
   try {
-    const performance = await measure(url.url, createDeadline(PERFORMANCE_BUDGET_MS));
+    const strategy = strategyFrom(request);
+    const performance = await measure(url.url, createDeadline(PERFORMANCE_BUDGET_MS), { strategy });
+
+    /*
+     * DESKTOP IS DISPLAY-ONLY, AND THIS IS WHERE THAT IS ENFORCED.
+     *
+     * A desktop measurement is never graded and never filed against the job, so
+     * it cannot reach `result.score`: the scorer reads only the mobile speed
+     * result that was attached below. Desktop is handed back for its own panel
+     * with no findings — the browser displays it and nothing else does. Mobile
+     * alone continues to feed the score, exactly as before.
+     */
+    if (strategy === "desktop") {
+      return {
+        status: 200,
+        body: { ok: true, data: performance, findings: [], skippedChecks: [] },
+      };
+    }
 
     /*
      * Graded here, on the server, by the same engine the audit uses. The speed

@@ -360,7 +360,10 @@ test("result: a job still running is refused with 409, not half a report", () =>
 test("result: a finished audit comes back whole", () => {
   const store = createJobStore<SiteAuditResult>();
   const job = store.create("https://example.com/");
-  const audit = { site: { findings: [], skippedChecks: [], evaluatedPages: 3 } } as unknown as SiteAuditResult;
+  const audit = {
+    site: { findings: [], skippedChecks: [], evaluatedPages: 3 },
+    crawl: { complete: true },
+  } as unknown as SiteAuditResult;
   store.finish(job.id, "completed", audit);
 
   const result = auditResultRoute(getWith(`jobId=${job.id}`), { store });
@@ -375,7 +378,10 @@ test("result: a partial audit still returns its findings, labelled partial", () 
   // The findings are real. Only the claim of having seen the whole site is not.
   const store = createJobStore<SiteAuditResult>();
   const job = store.create("https://example.com/");
-  store.finish(job.id, "partial", { site: { findings: [], skippedChecks: [], evaluatedPages: 2 } } as unknown as SiteAuditResult);
+  store.finish(job.id, "partial", {
+    site: { findings: [], skippedChecks: [], evaluatedPages: 2 },
+    crawl: { complete: false },
+  } as unknown as SiteAuditResult);
 
   const result = auditResultRoute(getWith(`jobId=${job.id}`), { store });
 

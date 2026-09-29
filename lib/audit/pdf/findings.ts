@@ -116,12 +116,26 @@ function commentary(finding: PdfFinding, labels: PdfLabels): string {
 /** One finding, as a card. 7A §17 keeps cards for exactly this. */
 function findingCard(finding: PdfFinding, labels: PdfLabels): string {
   return (
-    `<article class="finding">` +
+    /*
+     * The severity travels onto the card as a class, exactly as it does onto
+     * the chip below, so the stylesheet can tint a restrained left accent. It
+     * decides nothing: the word in the chip still carries the severity, and the
+     * renderer never compares one severity with another.
+     */
+    html`<article class="finding finding-${finding.severity}">` +
     `<div class="finding-head">` +
     chip(finding) +
     html`<h4 class="finding-title">${finding.title}</h4>` +
     `</div>` +
     meta(finding) +
+    /*
+     * The evidence is what the audit measured, and it is now labelled as such,
+     * so a finding reads as three named parts in one glance: what was MEASURED,
+     * what to do about it, and — when a model wrote any — how it explains it. The
+     * label is a fixed structural word, like the scope above it, not a document
+     * value: it says nothing about the site.
+     */
+    `<p class="finding-eyebrow">Measured</p>` +
     html`<p class="evidence">${finding.evidence}</p>` +
     /*
      * The rule's own action, not a model's. Labelled and set apart because on

@@ -35,9 +35,26 @@ import styles from "./page.module.css";
 export function PerformancePanel({
   performance,
   running,
+  title = "Performance",
+  showTitle = true,
 }: {
   performance: PerformanceData;
   running: boolean;
+  /**
+   * The section's heading. Defaults to "Performance" so the existing mobile
+   * panel is unchanged; the desktop panel passes its own so two speed sections
+   * on one page are told apart. Labelling only — it changes no measurement.
+   */
+  title?: string;
+  /**
+   * Whether to print the plain "{title}" heading in the measured and
+   * not-requested states. The card wrapper sets this false because its own
+   * eyebrow and Mobile/Desktop toggle already name the section — the heading
+   * would just repeat "Mobile performance". The loading and unavailable states
+   * ignore it: their headings ("… analysis in progress/unavailable") carry the
+   * state and stay whatever this is set to. Labelling only.
+   */
+  showTitle?: boolean;
 }) {
   /*
    * The speed check is its own request now, so this is a real waiting state
@@ -47,13 +64,13 @@ export function PerformancePanel({
    * was requested, and it covers the instant before the second request starts.
    */
   if (running || performance.status === "pending") {
-    return <PerformanceRunning />;
+    return <PerformanceRunning title={title} />;
   }
 
   if (performance.status === "not-requested") {
     return (
       <section className={styles.perfPanel}>
-        <h3 className={styles.findingsHeading}>Performance</h3>
+        {showTitle && <h3 className={styles.findingsHeading}>{title}</h3>}
         <p className={styles.perfMuted}>{performance.message}</p>
       </section>
     );
@@ -62,7 +79,7 @@ export function PerformancePanel({
   if (performance.status !== "checked") {
     return (
       <section className={`${styles.perfPanel} ${styles.perfUnavailable}`}>
-        <h3 className={styles.findingsHeading}>Performance analysis unavailable</h3>
+        <h3 className={styles.findingsHeading}>{title} analysis unavailable</h3>
         {/*
           The server's own explanation, verbatim. It already distinguishes a
           timeout from a refused key from an error at Google's end, and
@@ -80,7 +97,7 @@ export function PerformancePanel({
 
   return (
     <section className={styles.perfPanel}>
-      <h3 className={styles.findingsHeading}>Performance</h3>
+      {showTitle && <h3 className={styles.findingsHeading}>{title}</h3>}
       <p className={styles.perfSummary}>{performance.message}</p>
 
       <div className={styles.perfSplit}>
@@ -270,7 +287,7 @@ function Metric({
  * genuinely knows. None of them claims anything about what Google is doing:
  * from here a slow reply and a lost one look identical.
  */
-function PerformanceRunning() {
+function PerformanceRunning({ title = "Performance" }: { title?: string }) {
   const [elapsedMs, setElapsedMs] = useState(0);
 
   useEffect(() => {
@@ -286,7 +303,7 @@ function PerformanceRunning() {
       <div className={styles.phaseHead}>
         <span className={styles.spinner} aria-hidden="true" />
         <div>
-          <h3 className={styles.perfRunningTitle}>Performance analysis in progress</h3>
+          <h3 className={styles.perfRunningTitle}>{title} analysis in progress</h3>
           <p className={styles.phaseText}>
             Google PageSpeed Insights is analysing your website. This can take up to
             90 seconds — you can carry on reading your audit while it finishes.

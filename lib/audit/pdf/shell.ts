@@ -30,7 +30,11 @@ import { COVERAGE_DETAIL_HEADING, MEASURED_HEADING, factSectionsHtml } from "./f
 import { findingsHtml } from "./findings.ts";
 import { skippedHtml } from "./skipped.ts";
 import { speedHtml } from "./speed.ts";
-import { summaryHtml } from "./summary.ts";
+import { scoreHtml } from "./score.ts";
+import { summaryHtml, aiSummaryHtml } from "./summary.ts";
+import { executiveSummaryHtml } from "./executiveSummary.ts";
+import { recommendationsHtml } from "./recommendations.ts";
+import { finalAssessmentHtml } from "./finalAssessment.ts";
 import { STYLESHEET } from "./styles.ts";
 
 
@@ -49,11 +53,21 @@ export function documentHtml(document: PdfDocument): string {
   const cover = document.cover;
 
   /*
-   * THE ORDER IS 7A §6's, and it is not arbitrary. Coverage comes before any
-   * finding because a reader has to know how much of the site was looked at
-   * before a list of problems means anything. Site-wide findings come before
-   * page-level ones because one broken certificate outranks a missing meta
-   * description on nine pages, whatever the counts say.
+   * A CLIENT-READY FLOW, and one rule in it is not negotiable. Coverage — "What
+   * we checked" — comes before any finding, because a reader has to know how much
+   * of the site was looked at before a list of problems means anything, and a
+   * partial crawl presented as a whole-site audit is the single most damaging
+   * thing this document could do (7A §6, §13). The executive summary states that
+   * same scope up front for the same reason.
+   *
+   * MEASURED BEFORE EXPLAINED, throughout. The executive summary, the score, the
+   * severity split, the coverage and the findings are all measured; the AI
+   * website summary and the model's recommendations follow them, each labelled as
+   * the model's. The final assessment restates the measured grade, and the notes
+   * on the audit itself close the document on their own page.
+   *
+   * Site-wide findings come before page-level ones because one broken certificate
+   * outranks a missing meta description on nine pages, whatever the counts say.
    */
   const labels = document.labels;
 
@@ -63,12 +77,17 @@ export function documentHtml(document: PdfDocument): string {
     `<style>${STYLESHEET}</style></head><body>` +
     coverHtml(cover) +
     `<main>` +
+    executiveSummaryHtml(document.score, document.coverage.headline) +
+    scoreHtml(document.score) +
+    summaryHtml(document.summary) +
     coverageHtml(document.coverage) +
-    summaryHtml(document.summary, labels) +
     findingsHtml(document.siteFindings, labels) +
     findingsHtml(document.pageFindings, labels) +
     skippedHtml(document.skipped) +
+    aiSummaryHtml(document.summary, labels) +
+    recommendationsHtml(document.siteFindings, document.pageFindings, labels) +
     speedHtml(document.speed, labels) +
+    finalAssessmentHtml(document.score) +
     factSectionsHtml(MEASURED_HEADING, document.measured, "measured") +
     factSectionsHtml(COVERAGE_DETAIL_HEADING, document.coverageDetail, "coverage-detail") +
     aboutHtml() +

@@ -1,0 +1,45 @@
+# Render Blueprint for the Skybook AI Website Auditor.
+#
+# ONE always-on Docker web service. The app keeps its audit jobs in an in-memory
+# Map, so it must never run more than a single instance, and the instance must
+# not sleep while an audit is in flight. On the free plan Render sleeps a service
+# after inactivity; the frontend's polling keeps it awake during an active audit,
+# but the first request after idle pays a cold start.
+#
+# Secrets are marked `sync: false`: Render does NOT read their values from this
+# file (which is committed) — you set them once in the dashboard. Only non-secret
+# operational settings carry values here.
+services:
+  - type: web
+    name: skybook-audit
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    numInstances: 1
+    # A public 200 route, so the health check never trips the auth guard.
+    healthCheckPath: /login
+    envVars:
+      # --- secrets: set these in the Render dashboard ---
+      - key: SESSION_SECRET
+        sync: false
+      - key: SKYBOOK_EMAIL
+        sync: false
+      - key: SKYBOOK_PASSWORD_HASH
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SKYBOOK_MAIL_FROM
+        sync: false
+      - key: PAGESPEED_API_KEY
+        sync: false
+      # --- operational, non-secret ---
+      # Render sits behind a proxy: trust X-Forwarded-For so rate limiting sees
+      # the real client IP rather than the proxy's.
+      - key: SKYBOOK_TRUST_PROXY
+        value: "1"
+      - key: PUPPETEER_EXECUTABLE_PATH
+        value: /usr/bin/chromium
+      - key: PUPPETEER_SKIP_DOWNLOAD
+        value: "true"

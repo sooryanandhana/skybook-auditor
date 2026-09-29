@@ -8,6 +8,7 @@ import { SignOut } from "./SignOut";
 import { AuditProgress } from "./AuditProgress";
 import { PerformancePanel } from "./PerformancePanel";
 import { ReportDownload } from "./ReportDownload";
+import { ScoreDashboard } from "./ScoreDashboard";
 import {
   SKIPPED_HEADING,
   SKIPPED_INTRO,
@@ -86,6 +87,62 @@ import styles from "./page.module.css";
 /** How often to ask the server how the audit is getting on. */
 const POLL_INTERVAL_MS = 1000;
 
+/*
+ * Small inline sidebar icons. Presentation only — no icon library, no data.
+ * Drawn with `currentColor` so they take the nav item's own colour and its
+ * active/hover states without any extra styling.
+ */
+const OVERVIEW_ICON = (
+  <svg
+    width="18"
+    height="18"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <rect x="3" y="3" width="7" height="7" rx="1.5" />
+    <rect x="14" y="3" width="7" height="7" rx="1.5" />
+    <rect x="3" y="14" width="7" height="7" rx="1.5" />
+    <rect x="14" y="14" width="7" height="7" rx="1.5" />
+  </svg>
+);
+
+const FINDINGS_ICON = (
+  <svg
+    width="18"
+    height="18"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M4 6h16M4 12h16M4 18h10" />
+  </svg>
+);
+
+const RUN_ICON = (
+  <svg
+    width="18"
+    height="18"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+
 export function AuditPage() {
   // Pieces of "state" — values the page remembers and re-renders when changed.
   const [url, setUrl] = useState("");
@@ -126,6 +183,17 @@ export function AuditPage() {
    */
   const [performanceFindings, setPerformanceFindings] = useState<Finding[]>([]);
   const [performanceSkipped, setPerformanceSkipped] = useState<SkippedCheck[]>([]);
+  /*
+   * The DESKTOP speed check, kept entirely apart from the mobile one above.
+   *
+   * DISPLAY-ONLY, AND SEPARATE ON PURPOSE. It has its own data and its own
+   * running flag, and — deliberately — no findings and no skipped state, because
+   * it is never graded and never feeds the score. Mobile alone does that. This
+   * runs as its own request after the mobile one has answered, so the mobile
+   * results appear without waiting for it.
+   */
+  const [performanceDesktop, setPerformanceDesktop] = useState<PerformanceData | null>(null);
+  const [performanceDesktopRunning, setPerformanceDesktopRunning] = useState(false);
 
   /*
    * Which audit is current.
@@ -139,6 +207,8 @@ export function AuditPage() {
   const runIdRef = useRef(0);
   /** Lets a superseded speed check be abandoned rather than merely ignored. */
   const performanceAbortRef = useRef<AbortController | null>(null);
+  /** The same, for the separate desktop speed check. */
+  const performanceDesktopAbortRef = useRef<AbortController | null>(null);
   /** The pending poll delay, so unmounting can clear it rather than leak it. */
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Set when the component goes away, so a running poll loop stops. */
@@ -156,6 +226,7 @@ export function AuditPage() {
       stoppedRef.current = true;
       if (pollTimerRef.current !== null) clearTimeout(pollTimerRef.current);
       performanceAbortRef.current?.abort();
+      performanceDesktopAbortRef.current?.abort();
     };
   }, []);
   /*
@@ -203,6 +274,8 @@ export function AuditPage() {
     runIdRef.current = runId;
     performanceAbortRef.current?.abort();
     performanceAbortRef.current = null;
+    performanceDesktopAbortRef.current?.abort();
+    performanceDesktopAbortRef.current = null;
 
     setIsLoading(true);
     setError(null);
@@ -216,6 +289,8 @@ export function AuditPage() {
     setPerformanceRunning(false);
     setPerformanceFindings([]);
     setPerformanceSkipped([]);
+    setPerformanceDesktop(null);
+    setPerformanceDesktopRunning(false);
     setExplanation(null);
     setExplanationRunning(false);
     setJobId(null);
@@ -358,8 +433,31 @@ export function AuditPage() {
          * this runs whether the speed check succeeded or not. A speed check
          * that failed is still a measured state the writing may describe.
          */
-        void startPerformance(payload.result.data.fetch.finalUrl, runId, jobId).then(() => {
+        // Read once, synchronously, while `payload.result` is narrowed to a page
+        // audit — the nested callback below no longer holds that narrowing.
+        const finalUrl = payload.result.data.fetch.finalUrl;
+        void startPerformance(finalUrl, runId, jobId).then(() => {
+          /*
+           * The score is re-read now, and only now.
+           *
+           * The score is computed on the server from the whole audit, and the
+           * speed check is measured in its own request and filed against the job
+           * as it answers. The first result was fetched before that request even
+           * started, so its Speed category read Not Assessed. Asking again once
+           * the speed check has landed gives back the same findings with a score
+           * that now includes Speed — the browser recomputes nothing; the server
+           * remains the single source of the grade.
+           */
+          void refreshScore(jobId, runId);
           void startExplanation(jobId, runId);
+          /*
+           * Desktop runs LAST and SEPARATELY. Mobile has already answered — its
+           * results, the score and the commentary are on their way — so the
+           * desktop panel fills in afterwards without holding any of them up.
+           * It is display-only and carries no jobId, so it can never be filed
+           * against the audit or reach the score.
+           */
+          void startPerformanceDesktop(finalUrl, runId);
         });
       } else {
         void startExplanation(jobId, runId);
@@ -369,6 +467,35 @@ export function AuditPage() {
       setError("Could not read the finished audit.");
     } finally {
       if (runIdRef.current === runId) setIsLoading(false);
+    }
+  }
+
+  /**
+   * Re-reads the finished audit so its score reflects the speed check.
+   *
+   * SAME AUDIT, SAME FINDINGS, FRESHER SCORE. The speed check is filed against
+   * the job as its own request answers, and the score is taken on the server
+   * from the whole audit. This asks for the delivered result again — after the
+   * speed check has landed — and keeps only its `score`, so the Speed category
+   * turns from Not Assessed into its real grade. The browser computes no grade;
+   * it swaps in the server's newer one.
+   *
+   * BEST EFFORT, AND NEVER DESTRUCTIVE. A certificate-failure result has no
+   * speed check to fold in and is left as it is. Any failure to re-read leaves
+   * the first score in place — a slightly stale Speed tile, never a wrong one.
+   */
+  async function refreshScore(jobId: string, runId: number) {
+    try {
+      const response = await fetch(`/api/audit/result?jobId=${encodeURIComponent(jobId)}`);
+      const payload: AuditResultResponse = await response.json();
+
+      if (runIdRef.current !== runId || stoppedRef.current) return;
+      if (!payload.ok || isCertificateFailureAudit(payload.result)) return;
+
+      setSiteResult(payload.result);
+    } catch {
+      // The first score stays on screen. Nothing here reports a failure: the
+      // audit is complete and graded, and only the Speed tile is a beat behind.
     }
   }
 
@@ -432,6 +559,53 @@ export function AuditPage() {
   }
 
   /**
+   * Asks the server for the DESKTOP speed figures, as its own request.
+   *
+   * DISPLAY-ONLY, AND KEPT OFF THE SCORE. It sends `strategy=desktop` and no
+   * job id, so the server neither grades it nor files it against the audit —
+   * the desktop result reaches this panel and nowhere else. It mirrors the
+   * mobile check's run-tracking and abort handling, but touches none of the
+   * findings, score or commentary state: mobile alone feeds those.
+   */
+  async function startPerformanceDesktop(finalUrl: string, runId: number) {
+    const controller = new AbortController();
+    performanceDesktopAbortRef.current = controller;
+    setPerformanceDesktopRunning(true);
+
+    try {
+      const response = await fetch("/api/audit/performance?strategy=desktop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: finalUrl }),
+        signal: controller.signal,
+      });
+
+      const payload: PerformanceResponse = await response.json();
+      if (runIdRef.current !== runId) return;
+
+      setPerformanceDesktop(
+        payload.ok
+          ? payload.data
+          : localPerformanceFailure(finalUrl, payload.error, "desktop"),
+      );
+    } catch (fetchError) {
+      // An abort is us superseding this run, not a failure to report.
+      if (fetchError instanceof DOMException && fetchError.name === "AbortError") return;
+      if (runIdRef.current !== runId) return;
+
+      setPerformanceDesktop(
+        localPerformanceFailure(
+          finalUrl,
+          "Could not reach the speed check on this server.",
+          "desktop",
+        ),
+      );
+    } finally {
+      if (runIdRef.current === runId) setPerformanceDesktopRunning(false);
+    }
+  }
+
+  /**
    * Asks the server, once, for the writing that goes beside the report.
    *
    * ONE REQUEST, AND NO RETRY. The server hands out a single claim per audit,
@@ -484,9 +658,14 @@ export function AuditPage() {
   const reportJobId = exportableJobId(jobId, result !== null || certificateFailure !== null);
 
   return (
-    <main className={styles.main}>
-      <header className={styles.header}>
-        <div className={styles.brandRow}>
+    <div className={styles.shell}>
+      {/*
+        The sidebar rail. Presentation only: the Skybook logo, a wordmark, and
+        a small nav whose links jump to sections that already exist on the page.
+        It measures nothing and decides nothing.
+      */}
+      <aside className={styles.sidebar}>
+        <div className={styles.sidebarBrand}>
           {/*
             The logo file has ~77% empty padding around it, and stacks the icon
             above the wordmark and tagline. We show only the icon here by
@@ -497,60 +676,110 @@ export function AuditPage() {
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/skybook-digital-logo-white.png" alt="" className={styles.logoImg} />
           </span>
-          <p className={styles.brand}>Skybook</p>
+          <span className={styles.sidebarWordmark}>Skybook</span>
+        </div>
+
+        <nav className={styles.nav} aria-label="Dashboard sections">
+          <a className={`${styles.navItem} ${styles.navItemActive}`} href="#overview">
+            <span className={styles.navIcon}>{OVERVIEW_ICON}</span>
+            <span>Overview</span>
+          </a>
+          <a className={styles.navItem} href="#results">
+            <span className={styles.navIcon}>{FINDINGS_ICON}</span>
+            <span>Findings</span>
+          </a>
+          <a className={styles.navItem} href="#audit">
+            <span className={styles.navIcon}>{RUN_ICON}</span>
+            <span>New audit</span>
+          </a>
+        </nav>
+
+        {/*
+          Bottom of the rail: the product label and the one and only Sign out
+          control. It stays pinned to the bottom of the fixed sidebar while the
+          content scrolls, and reuses the existing SignOut handler unchanged.
+        */}
+        <div className={styles.sidebarFooter}>
+          <p className={styles.sidebarFoot}>Website Auditor</p>
           <SignOut />
         </div>
-        <h1 className={styles.title}>Website Audit</h1>
-        <p className={styles.subtitle}>
-          Enter a website address to check its speed, SEO, security, and technical health.
-        </p>
-      </header>
+      </aside>
 
-      <form className={styles.form} onSubmit={handleSubmit}>
-        <input
-          className={styles.input}
-          type="text"
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
-          placeholder="example.com"
-          aria-label="Website address"
-          disabled={isLoading}
-        />
-        <button className={styles.button} type="submit" disabled={isLoading || !url.trim()}>
-          {isLoading ? "Checking…" : "Run Audit"}
-        </button>
-      </form>
+      <div className={styles.workspace}>
+        <main className={styles.main}>
+          {/*
+            The Website Audit header is one card at the top of the content
+            column: the eyebrow, heading and description, an "audit ready" status
+            pill, and the audit controls (address + Run Audit + the PageSpeed
+            opt-in). Same elements and handlers as before — only the frame
+            changed, so it aligns with the cards below.
+          */}
+          <header id="audit" className={styles.topbar}>
+            <div className={styles.topbarHead}>
+              <div className={styles.topbarTitles}>
+                <p className={styles.brand}>Skybook</p>
+                <h1 className={styles.title}>Website Audit</h1>
+                <p className={styles.subtitle}>
+                  Enter a website address to check its speed, SEO, security, and technical health.
+                </p>
+              </div>
+              <div className={styles.topbarActions}>
+                {/* A static readiness indicator for the header — presentation
+                    only; it reflects that the tool is ready, not audit state. */}
+                <span className={styles.statusPill}>
+                  <span className={styles.statusDot} aria-hidden="true" />
+                  Audit ready
+                </span>
+              </div>
+            </div>
 
-      {/*
-        Off by default, and says why. The speed test is the slowest thing this
-        tool does, so the cost is on the label rather than discovered after the
-        button is pressed.
-      */}
-      <label className={styles.toggle}>
-        <input
-          type="checkbox"
-          checked={includePerformance}
-          onChange={(event) => setIncludePerformance(event.target.checked)}
-          disabled={isLoading}
-        />
-        <span>
-          Include Google PageSpeed performance analysis
-          <span className={styles.toggleNote}>
-            Takes up to 90 seconds, and runs separately — your audit results
-            appear first. Uses Google&rsquo;s service, not this server.
-          </span>
-        </span>
-      </label>
+          <form className={styles.form} onSubmit={handleSubmit}>
+            <input
+              className={styles.input}
+              type="text"
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              placeholder="example.com"
+              aria-label="Website address"
+              disabled={isLoading}
+            />
+            <button className={styles.button} type="submit" disabled={isLoading || !url.trim()}>
+              {isLoading ? "Checking…" : "Run Audit"}
+            </button>
+          </form>
 
-      {/*
-        A statement of how the report is produced, not a caveat about it —
-        hence the plain subtitle style rather than the amber notice box that
-        carried the old "rules still being written" warning.
-      */}
-      <p className={styles.subtitle}>
-        This report is generated from deterministic website checks.
-        Recommendations are based on measured results.
-      </p>
+          {/*
+            Off by default, and says why. The speed test is the slowest thing this
+            tool does, so the cost is on the label rather than discovered after the
+            button is pressed.
+          */}
+          <label className={styles.toggle}>
+            <input
+              type="checkbox"
+              checked={includePerformance}
+              onChange={(event) => setIncludePerformance(event.target.checked)}
+              disabled={isLoading}
+            />
+            <span>
+              Include Google PageSpeed performance analysis
+              <span className={styles.toggleNote}>
+                Takes up to 90 seconds, and runs separately — your audit results
+                appear first. Uses Google&rsquo;s service, not this server.
+              </span>
+            </span>
+          </label>
+          </header>
+
+          {/*
+            A statement of how the report is produced, not a caveat about it —
+            hence the plain subtitle style rather than the amber notice box that
+            carried the old "rules still being written" warning. It sits below
+            the header card, as its own line, so the two read as separate.
+          */}
+          <p className={styles.subtitle}>
+            This report is generated from deterministic website checks.
+            Recommendations are based on measured results.
+          </p>
 
       {isLoading && <AuditProgress />}
 
@@ -610,12 +839,16 @@ export function AuditPage() {
           performanceRunning={performanceRunning}
           performanceFindings={performanceFindings}
           performanceSkipped={performanceSkipped}
+          performanceDesktop={performanceDesktop}
+          performanceDesktopRunning={performanceDesktopRunning}
           explanation={explanation}
           explanationRunning={explanationRunning}
           reportJobId={reportJobId}
         />
       )}
-    </main>
+        </main>
+      </div>
+    </div>
   );
 }
 
@@ -627,10 +860,14 @@ export function AuditPage() {
  * rather than any Google-specific reason, because in these cases nothing at
  * all is known about Google's service.
  */
-function localPerformanceFailure(requestedUrl: string, message: string): PerformanceData {
+function localPerformanceFailure(
+  requestedUrl: string,
+  message: string,
+  strategy: PerformanceData["strategy"] = "mobile",
+): PerformanceData {
   return {
     status: "error",
-    strategy: "mobile",
+    strategy,
     requestedUrl,
     failureReason: "internal-error",
     field: {
@@ -671,6 +908,8 @@ function Results({
   performanceRunning,
   performanceFindings,
   performanceSkipped,
+  performanceDesktop,
+  performanceDesktopRunning,
   explanation,
   explanationRunning,
   reportJobId,
@@ -682,6 +921,9 @@ function Results({
   performanceRunning: boolean;
   performanceFindings: Finding[];
   performanceSkipped: SkippedCheck[];
+  /** The separate, display-only desktop speed result. Null until it runs. */
+  performanceDesktop: PerformanceData | null;
+  performanceDesktopRunning: boolean;
   /** The server's answer about the writing. Null until it has answered. */
   explanation: AuditExplanationResponse | null;
   explanationRunning: boolean;
@@ -703,8 +945,23 @@ function Results({
       ? explanation.explanations.map((entry) => [entry.ruleId, entry])
       : [],
   );
+
+  /*
+   * The whole audit's findings, the way the score saw them.
+   *
+   * `site.findings` are the crawl's, aggregated once per rule; `performance*`
+   * are the speed check's, once it has answered. This is the same union the
+   * findings section renders below, so the dashboard's triage and gate describe
+   * exactly what the grade was taken over — and nothing here reads a severity to
+   * decide it, only to display it.
+   */
+  const dashboardFindings = [
+    ...(siteResult?.site.findings ?? data.findings),
+    ...performanceFindings,
+  ];
+
   return (
-    <section className={styles.results}>
+    <section id="results" className={styles.results}>
       <div className={styles.summary}>
         {/*
           Said plainly, because a speed check that failed must not make the
@@ -754,6 +1011,20 @@ function Results({
       </div>
 
       {/*
+        THE VERDICT, HIGH ON THE PAGE.
+
+        Directly under the identity summary and above the report action, because
+        the grade is the first thing a reader wants and the findings below are
+        what explain it. Shown only when the score is attached — a delivered
+        audit always carries one, but the type makes it optional, so a missing
+        score simply renders nothing rather than an empty frame. Every value is
+        read from `siteResult.score`; the browser grades nothing.
+      */}
+      {siteResult?.score && (
+        <ScoreDashboard score={siteResult.score} findings={dashboardFindings} />
+      )}
+
+      {/*
         Directly under the summary, because the document IS the deliverable —
         a salesperson opens this to get something to hand over, and burying
         the button below two screens of appendix would hide it. The findings
@@ -792,9 +1063,7 @@ function Results({
       <AiSummaryPanel
         answer={explanation}
         running={explanationRunning}
-        findingCount={
-          (siteResult?.site.findings ?? data.findings).length + performanceFindings.length
-        }
+        findingCount={dashboardFindings.length}
       />
 
       <FindingsSection
@@ -806,7 +1075,7 @@ function Results({
          * evaluated once. Adding `data.findings` as well would show the entry
          * page twice, since it is one of the pages already counted.
          */
-        findings={[...(siteResult?.site.findings ?? data.findings), ...performanceFindings]}
+        findings={dashboardFindings}
         skipped={[
           ...(siteResult?.site.skippedChecks ?? data.skippedChecks),
           ...performanceSkipped,
@@ -821,13 +1090,128 @@ function Results({
       {/*
         Its own section, with its own state. The audit above is complete and
         readable whatever this is doing.
+
+        MOBILE AND DESKTOP ARE TWO MEASUREMENTS, NOT ONE. Mobile is the strategy
+        that feeds the score; desktop is a separate, display-only measurement.
+        PerformanceCard is a frame and a toggle over the two — it renders the
+        existing panels unchanged and shares no data between them.
       */}
-      <PerformancePanel
-        performance={performance ?? data.performance}
-        running={performanceRunning}
+      <PerformanceCard
+        mobile={performance ?? data.performance}
+        mobileRunning={performanceRunning}
+        desktop={performanceDesktop}
+        desktopRunning={performanceDesktopRunning}
+        desktopFallback={data.performance}
       />
 
       <MeasuredFacts data={data} />
+    </section>
+  );
+}
+
+/**
+ * The Performance section: one premium card holding the two speed measurements.
+ *
+ * A FRAME AND A TOGGLE, NOTHING MORE. It renders the existing PerformancePanel
+ * unchanged — every metric, every value, and every loading/unavailable/failure
+ * state comes from that panel and from the server, untouched. This component
+ * decides only which of the two panels is on screen, and it computes no speed
+ * number of its own.
+ *
+ * MOBILE AND DESKTOP STAY SEPARATE. Mobile is always shown and is labelled as
+ * the measurement that feeds the score; desktop becomes selectable only once a
+ * desktop run has started, and is labelled display-only. The two never share
+ * data — the toggle swaps which panel renders, and each panel reads only its
+ * own props.
+ */
+function PerformanceCard({
+  mobile,
+  mobileRunning,
+  desktop,
+  desktopRunning,
+  desktopFallback,
+}: {
+  mobile: PerformanceData;
+  mobileRunning: boolean;
+  /** The separate desktop result. Null until a desktop run has started. */
+  desktop: PerformanceData | null;
+  desktopRunning: boolean;
+  /** A non-null stand-in the desktop panel shows while its run is in flight. */
+  desktopFallback: PerformanceData;
+}) {
+  const hasDesktop = desktopRunning || desktop !== null;
+  const [view, setView] = useState<"mobile" | "desktop">("mobile");
+  // Desktop can only be chosen once it exists; before that the view is mobile.
+  const active = hasDesktop ? view : "mobile";
+
+  /*
+   * The scope note explains which measurement feeds the score — but only once
+   * there is a measurement to talk about. While a check is running, was never
+   * requested, or failed, there is no result feeding anything, so the note is
+   * hidden and the panel's own message carries the state. Reads status; sets
+   * nothing.
+   */
+  const activePerf = active === "mobile" ? mobile : desktop ?? desktopFallback;
+  const activeRunning = active === "mobile" ? mobileRunning : desktopRunning;
+  const showScope = !activeRunning && activePerf.status === "checked";
+
+  return (
+    <section className={styles.perfCard} aria-labelledby="performance-heading">
+      <div className={styles.perfHead}>
+        <p id="performance-heading" className={styles.perfEyebrow}>
+          Performance
+        </p>
+
+        {/*
+          A plain accessible button group, not a tabs widget: two buttons that
+          swap which panel is shown, each announcing its state with aria-pressed.
+          It changes the view, never a measurement.
+        */}
+        {hasDesktop && (
+          <div className={styles.segmented} role="group" aria-label="Performance device">
+            <button
+              type="button"
+              aria-pressed={active === "mobile"}
+              className={`${styles.segmentBtn} ${active === "mobile" ? styles.segmentBtnActive : ""}`}
+              onClick={() => setView("mobile")}
+            >
+              Mobile
+            </button>
+            <button
+              type="button"
+              aria-pressed={active === "desktop"}
+              className={`${styles.segmentBtn} ${active === "desktop" ? styles.segmentBtnActive : ""}`}
+              onClick={() => setView("desktop")}
+            >
+              Desktop
+            </button>
+          </div>
+        )}
+      </div>
+
+      {showScope && (
+        <p className={styles.perfScopeNote}>
+          {active === "mobile"
+            ? "Mobile results feed the overall score."
+            : "Desktop is measured separately and is display-only — it never affects the score."}
+        </p>
+      )}
+
+      {active === "mobile" ? (
+        <PerformancePanel
+          performance={mobile}
+          running={mobileRunning}
+          title="Mobile performance"
+          showTitle={false}
+        />
+      ) : (
+        <PerformancePanel
+          performance={desktop ?? desktopFallback}
+          running={desktopRunning}
+          title="Desktop performance"
+          showTitle={false}
+        />
+      )}
     </section>
   );
 }
@@ -856,7 +1240,7 @@ function CertificateFailureResults({
   const view = certificateFailureView(audit);
 
   return (
-    <section className={styles.results}>
+    <section id="results" className={styles.results}>
       <div className={styles.summary}>
         <p className={styles.completeBadge}>{auditStatusText(false)}</p>
         <h2 className={styles.resultsUrl}>{withoutCredentials(audit.failedUrl)}</h2>
@@ -864,6 +1248,19 @@ function CertificateFailureResults({
           Checked {new Date(audit.website.checkedAt).toLocaleString()}
         </p>
       </div>
+
+      {/*
+        The verdict for an audit that read no page.
+
+        A certificate failure is still graded — the certificate check ran, and
+        its problem is a critical the gate reflects — so the dashboard belongs
+        here too, honestly. Its page-only categories read Not Assessed, and the
+        partial banner below carries the detail. Read from `audit.score`, which
+        the server attaches like any other; the browser grades nothing.
+      */}
+      {audit.score && (
+        <ScoreDashboard score={audit.score} findings={audit.site.findings} />
+      )}
 
       <section className={styles.crawlPartial} aria-labelledby="partial-scope">
         <h2 id="partial-scope" className={styles.crawlHeading}>
@@ -985,6 +1382,35 @@ function FindingsSection({
 
   return (
     <>
+      {/*
+        Design #2 summary row: five compact cards above the heading. Every
+        number is an existing count — the total (the same value the heading
+        shows) and the four severities the rules already set on each finding.
+        Nothing new is measured, calculated or invented; this only tallies
+        `finding.severity` for display, exactly as `severityCounts` does. The
+        app has no "Low" severity, so the fifth card is the real fourth
+        severity, "Good".
+      */}
+      <div className={styles.findingsSummary}>
+        <div className={styles.findingsSummaryCard}>
+          <span className={styles.findingsSummaryCount}>{findings.length}</span>
+          <span className={styles.findingsSummaryLabel}>Total findings</span>
+        </div>
+        {(["critical", "high", "medium", "good"] as const).map((severity) => (
+          <div
+            key={severity}
+            className={`${styles.findingsSummaryCard} ${
+              styles[`summary_${severity}` as keyof typeof styles] ?? ""
+            }`}
+          >
+            <span className={styles.findingsSummaryCount}>
+              {findings.filter((finding) => finding.severity === severity).length}
+            </span>
+            <span className={styles.findingsSummaryLabel}>{severityLabel(severity)}</span>
+          </div>
+        ))}
+      </div>
+
       <h3 className={styles.findingsHeading}>Findings ({findings.length})</h3>
 
       {counts.length > 0 && (
@@ -1136,8 +1562,16 @@ function FindingCard({
 }) {
   const reach = affectedView(finding);
 
+  /*
+   * A severity-tinted left edge, so the worst findings catch the eye in a long
+   * list without tinting the whole card. It reads `finding.severity` — a value
+   * the rules set — and never decides one. The badge beside it still carries
+   * the severity in words, so the colour is never the only signal.
+   */
+  const accent = styles[`accent_${finding.severity}` as keyof typeof styles];
+
   return (
-    <li className={styles.finding}>
+    <li className={`${styles.finding} ${accent ?? ""}`}>
       <span className={`${styles.badge} ${styles[finding.severity]}`}>
         {severityLabel(finding.severity)}
       </span>

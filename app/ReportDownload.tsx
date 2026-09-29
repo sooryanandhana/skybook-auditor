@@ -45,6 +45,9 @@ export function ReportDownload({ jobId, auditedUrl }: { jobId: string; auditedUr
 
   return (
     <section className={styles.export} aria-labelledby="report-download-heading">
+      {/* A section eyebrow, matching the dashboard's card labels. Presentation
+          only — it names the section, it is not data or a claim. */}
+      <p className={styles.exportEyebrow}>Report &amp; delivery</p>
       {/*
         An h3, like every other section inside the results. The single h2 there
         is the audited address — the results' own title — and a second one at
@@ -61,7 +64,7 @@ export function ReportDownload({ jobId, auditedUrl }: { jobId: string; auditedUr
         click; typing into a form nobody needed would be three empty boxes on
         every audit.
       */}
-      <details>
+      <details className={styles.exportDetails}>
         <summary className={styles.exportSummary}>{CLIENT_DETAILS_LABEL}</summary>
         <p className={styles.exportHint}>{CLIENT_DETAILS_HINT}</p>
         <div className={styles.exportFields}>
@@ -82,16 +85,19 @@ export function ReportDownload({ jobId, auditedUrl }: { jobId: string; auditedUr
         </div>
       </details>
 
-      <div className={styles.exportAction}>
-        <button
-          className={styles.button}
-          type="button"
-          onClick={() => void runExport(state, jobId, fields, setState)}
-          disabled={button.disabled}
-          aria-busy={button.disabled}
-        >
-          {button.label}
-        </button>
+      <div className={styles.pdfRow}>
+        <span className={styles.pdfLabel}>PDF report</span>
+        <div className={styles.exportAction}>
+          <button
+            className={styles.button}
+            type="button"
+            onClick={() => void runExport(state, jobId, fields, setState)}
+            disabled={button.disabled}
+            aria-busy={button.disabled}
+          >
+            {button.label}
+          </button>
+        </div>
       </div>
 
       {/*

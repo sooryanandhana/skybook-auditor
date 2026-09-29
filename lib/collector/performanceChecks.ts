@@ -105,6 +105,16 @@ export const RETRY_DELAY_MS = 300;
 const MIN_RETRY_BUDGET_MS = 5_000;
 
 export interface PerformanceOptions {
+  /**
+   * Which device Google simulates. Defaults to mobile.
+   *
+   * Mobile is the strategy that feeds the score; desktop is requested
+   * separately and is display-only. The collector only puts the value on the
+   * wire and labels the result with it — it grades nothing and knows nothing
+   * about the score, so a desktop measurement here is exactly a mobile one with
+   * a different device.
+   */
+  strategy?: "mobile" | "desktop";
   /** Defaults to PAGESPEED_API_KEY from the environment. */
   apiKey?: string;
   /** Swapped out by tests so they never touch the network. */
@@ -545,10 +555,11 @@ function failed(
   status: "no-api-key" | "error",
   failureReason: PerformanceFailureReason,
   message: string,
+  strategy: PerformanceData["strategy"] = "mobile",
 ): PerformanceData {
   return {
     status,
-    strategy: "mobile",
+    strategy,
     requestedUrl,
     failureReason,
     field: emptyField("error", message),
@@ -610,9 +621,12 @@ function notInspectedFor(
   field: FieldPerformance,
   lab: LabPerformance,
   requestedUrl: string,
+  strategy: PerformanceData["strategy"],
 ): string[] {
+  // The other device is not a gap here: it is measured as its own result.
+  const otherDevice = strategy === "desktop" ? "Mobile" : "Desktop";
   const notes = [
-    "Desktop speed — only the mobile experience was tested.",
+    `${otherDevice} speed — measured separately, as its own result.`,
     "Every page except the one tested.",
   ];
 
@@ -686,7 +700,9 @@ function summarise(
   field: FieldPerformance,
   lab: LabPerformance,
   requestedUrl: string,
+  strategy: PerformanceData["strategy"],
 ): string {
+  const device = strategy === "desktop" ? "desktop" : "mobile";
   const parts: string[] = [];
 
   /*
@@ -721,10 +737,10 @@ function summarise(
   // The simulation, named separately and never blended with the above.
   const labWhere = lab.measuredUrl ? ` of ${lab.measuredUrl}` : "";
   if (lab.status === "found" && lab.score !== null) {
-    parts.push(`A simulated mobile load${labWhere} scored ${lab.score} out of 100.`);
+    parts.push(`A simulated ${device} load${labWhere} scored ${lab.score} out of 100.`);
   } else if (lab.status === "found") {
     parts.push(
-      `A simulated mobile load${labWhere} completed, but returned no overall score.`,
+      `A simulated ${device} load${labWhere} completed, but returned no overall score.`,
     );
   } else {
     parts.push("The simulated load did not complete.");
@@ -840,6 +856,7 @@ async function attemptPagespeed(
   deadline: Deadline,
   doFetch: typeof fetch,
   maxBytes: number,
+  strategy: PerformanceData["strategy"],
 ): Promise<PagespeedAttempt> {
   let response: Response;
   try {
@@ -862,7 +879,7 @@ async function attemptPagespeed(
      */
     return {
       ok: false,
-      failure: failed(requestedUrl, "error", reason, message),
+      failure: failed(requestedUrl, "error", reason, message, strategy),
       retryable: false,
     };
   }
@@ -885,6 +902,7 @@ async function attemptPagespeed(
           "error",
           "api-error",
           describeApiError(response.status, null),
+          strategy,
         ),
         retryable: isRetryableStatus(response.status),
       };
@@ -900,6 +918,7 @@ async function attemptPagespeed(
           : read.reason === "response-too-large"
             ? "Speed was not measured: Google's reply was larger than this tool will read."
             : "Speed was not measured: Google's reply could not be read.",
+        strategy,
       ),
       retryable: false,
     };
@@ -921,6 +940,7 @@ async function attemptPagespeed(
         "error",
         "api-error",
         describeApiError(response.status, parsed ? body : null),
+        strategy,
       ),
       retryable: isRetryableStatus(response.status),
     };
@@ -936,6 +956,7 @@ async function attemptPagespeed(
         "error",
         "unreadable-response",
         "Speed was not measured: Google's reply was not readable data.",
+        strategy,
       ),
       retryable: false,
     };
@@ -956,6 +977,7 @@ export async function runPerformanceChecks(
   deadline: Deadline,
   options: PerformanceOptions = {},
 ): Promise<PerformanceData> {
+  const strategy = options.strategy ?? "mobile";
   const apiKey = (options.apiKey ?? process.env.PAGESPEED_API_KEY ?? "").trim();
 
   /*
@@ -970,6 +992,7 @@ export async function runPerformanceChecks(
       "no-api-key",
       "no-api-key",
       "Speed was not measured: no PageSpeed API key is configured on the server.",
+      strategy,
     );
   }
 
@@ -979,6 +1002,7 @@ export async function runPerformanceChecks(
       "error",
       "out-of-time",
       "Speed was not measured: the audit ran out of time before the speed check could start.",
+      strategy,
     );
   }
 
@@ -990,7 +1014,7 @@ export async function runPerformanceChecks(
   // is how an address containing "&" turns into a different request.
   const params = new URLSearchParams({
     url: requestedUrl,
-    strategy: "mobile",
+    strategy,
     category: "performance",
     key: apiKey,
   });
@@ -998,7 +1022,7 @@ export async function runPerformanceChecks(
   const requestUrl = `${endpoint}?${params.toString()}`;
   const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
 
-  let attempt = await attemptPagespeed(requestedUrl, requestUrl, deadline, doFetch, maxBytes);
+  let attempt = await attemptPagespeed(requestedUrl, requestUrl, deadline, doFetch, maxBytes, strategy);
 
   /*
    * One retry. Not a loop — an `if`, so there can never be a third request no
@@ -1014,7 +1038,7 @@ export async function runPerformanceChecks(
    */
   if (!attempt.ok && attempt.retryable && hasTimeToRetry(deadline, retryDelayMs)) {
     await pause(retryDelayMs);
-    attempt = await attemptPagespeed(requestedUrl, requestUrl, deadline, doFetch, maxBytes);
+    attempt = await attemptPagespeed(requestedUrl, requestUrl, deadline, doFetch, maxBytes, strategy);
   }
 
   if (!attempt.ok) return attempt.failure;
@@ -1036,17 +1060,18 @@ export async function runPerformanceChecks(
       "error",
       "unreadable-response",
       "Speed was not measured: Google's reply could not be read.",
+      strategy,
     );
   }
 
   return {
     status: "checked",
-    strategy: "mobile",
+    strategy,
     requestedUrl,
     failureReason: null,
     field,
     lab,
-    notInspected: notInspectedFor(field, lab, requestedUrl),
-    message: summarise(field, lab, requestedUrl),
+    notInspected: notInspectedFor(field, lab, requestedUrl, strategy),
+    message: summarise(field, lab, requestedUrl, strategy),
   };
 }

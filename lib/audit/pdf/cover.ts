@@ -18,10 +18,17 @@
  * notice immediately, and being wrong on the cover is the worst place to be
  * wrong.
  *
+ * THE LAYOUT IS A CORPORATE SPLIT. A white panel on the left carries the mark,
+ * the client, the report title and the signature; a navy panel on the right
+ * carries a large ring built from CSS shapes (never an image or an <svg>, so
+ * the document stays self-contained and the accessibility tree stays clean).
+ * The split lives inside the printable content box rather than bleeding to the
+ * paper edge, because the renderer draws the running head and foot in the page
+ * margins on every page and a full bleed would sit under them.
+ *
  * THE MARK IS THE REAL ARTWORK. 7A §27 forbids recreating it from what is on
- * screen, and until the asset was supplied this page carried a wordmark set in
- * type instead. It now carries the supplied image, embedded and unaltered; see
- * `logo.ts` for how it is measured and cropped.
+ * screen. It is the supplied image, embedded and unaltered; see `logo.ts`. The
+ * mark keeps a white surround, which is why it sits on the white panel.
  */
 import type { PdfCover } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
@@ -44,90 +51,138 @@ function mark(): string {
 }
 
 /**
- * Who the report is for.
+ * Who the report is for, with the audited address beneath.
  *
  * THE FALLBACK IS THE SITE, NOT A GUESS. 7A §19 fixes this: with no client
- * name the cover names the audited site. The heading above it changes with it,
+ * name the cover names the audited site. The label above it changes with it,
  * because "Prepared for" followed by a web address reads as though somebody
  * forgot to fill in a form.
+ *
+ * THE ADDRESS IS ALWAYS SHOWN, credential-stripped by 7B. A redirect is
+ * explained only when the audit actually redirected, because "Requested" and
+ * "Audited" carrying the same address twice invites a reader to look for a
+ * difference that is not there.
  */
 function addressee(cover: PdfCover): string {
   const { companyName, contactName } = cover.client;
 
   /*
-   * A LABEL, NOT A HEADING, and the distinction is structural rather than
-   * visual. These words introduce the client's name; they do not open a
-   * section. Marked up as a heading they became an H3 sitting directly under
-   * the cover's H1, which is a skipped level: a reader navigating by heading
-   * would be told the document jumps from its title to a third-level section
-   * called "Prepared for". It looks exactly the same and now says what it is.
+   * A LABEL, NOT A HEADING, and the distinction is structural. These words
+   * introduce the client's name; they do not open a section. Marked up as a
+   * heading they became an H3 under the cover's H1, which is a skipped level.
    */
-  if (companyName === null && contactName === null) {
-    return html`<p class="eyebrow">Website audit for</p><p class="client">${cover.auditedUrl}</p>`;
-  }
+  const lead =
+    companyName === null && contactName === null
+      ? `<p class="eyebrow cover-eyebrow">Website audit for</p>`
+      : `<p class="eyebrow cover-eyebrow">Prepared for</p>` +
+        (companyName === null ? "" : html`<p class="client cover-client">${companyName}</p>`) +
+        (contactName === null ? "" : html`<p class="contact cover-contact">${contactName}</p>`);
+
+  const domain = html`<p class="url cover-domain">${cover.auditedUrl}</p>`;
+
+  const redirect =
+    cover.requestedUrl === null
+      ? ""
+      : html`<p class="note cover-redirect">Requested ${cover.requestedUrl}, which redirected here</p>`;
+
+  return `<div class="cover-info-group">` + lead + domain + redirect + `</div>`;
+}
+
+/**
+ * When the site was measured, and the audit's own status line.
+ *
+ * THE AUDIT DATE, NEVER THE GENERATION DATE. 7A §20 is explicit about which one
+ * matters. The value keeps its "Measured …" wording, which is the same string
+ * the running foot and the rest of the report use; the label above it names the
+ * slot. Null when the stored timestamp could not be read, in which case the
+ * whole block is left out rather than labelled and left blank.
+ *
+ * THE STATUS LINE repeats on the cover deliberately. 7A §13 requires a partial
+ * crawl never to be presented as a whole-site audit, and this line, the partial
+ * marker and the running head all say it, so a page read on its own cannot be
+ * mistaken.
+ */
+function auditInfo(cover: PdfCover): string {
+  const date =
+    cover.checkedAt === null
+      ? ""
+      : `<p class="eyebrow cover-eyebrow">Audit date</p>` +
+        html`<p class="cover-date">Measured ${cover.checkedAt}</p>`;
+
+  const status = html`<p class="cover-status">${cover.statusLine}</p>`;
+
+  return `<div class="cover-info-group">` + date + status + `</div>`;
+}
+
+/**
+ * The one information block: who the report is for, the site, and when it was
+ * measured, grouped together beneath the title rather than scattered down the
+ * page. Two label-and-value groups, divided by a hairline, on a shared grid.
+ */
+function infoBlock(cover: PdfCover): string {
+  return `<div class="cover-info">` + addressee(cover) + auditInfo(cover) + `</div>`;
+}
+
+/**
+ * The signature, bottom-left of the white panel.
+ *
+ * THE BRAND IS ALWAYS NAMED, because Skybook is always who prepared the report.
+ * The individual preparer is optional, from `preparedBy`, and its "Prepared by
+ * …" wording is kept intact so the value reads as a whole rather than as a
+ * relabelled fragment. With no individual named, only the brand shows.
+ */
+function signature(cover: PdfCover): string {
+  const preparer =
+    cover.client.preparedBy === null
+      ? ""
+      : html`<p class="cover-sign-line">Prepared by ${cover.client.preparedBy}</p>`;
 
   return (
-    `<p class="eyebrow">Prepared for</p>` +
-    (companyName === null ? "" : html`<p class="client">${companyName}</p>`) +
-    (contactName === null ? "" : html`<p class="contact">${contactName}</p>`)
+    `<div class="cover-sign">` +
+    preparer +
+    `<p class="cover-sign-brand">Skybook</p>` +
+    `</div>`
   );
 }
 
 /**
- * The audited address, and where it started when that differed.
+ * The navy panel: a clean dark ground, and nothing drawn on it.
  *
- * Shown only when the audit actually redirected, because "Requested" and
- * "Audited" carrying the same address twice invites a reader to look for a
- * difference that is not there.
+ * The concentric ring motif that used to sit here has been removed for a plainer
+ * composition; the panel is now just the navy gradient set in the stylesheet. It
+ * carries no text and no shapes, so it adds nothing a screen reader would
+ * announce, and it never reaches an image or an <svg>.
  */
-function site(cover: PdfCover): string {
-  const audited = html`<p class="url site">${cover.auditedUrl}</p>`;
-
-  return cover.requestedUrl === null
-    ? audited
-    : audited + html`<p class="note redirect">Requested ${cover.requestedUrl}, which redirected here</p>`;
+function navyPanel(): string {
+  return `<div class="cover-right"></div>`;
 }
 
 /**
  * The cover, as one page.
  *
- * The status line and the partial marker say the same thing twice on purpose.
- * 7A §13 requires a partial crawl never to be presented as a whole-site audit,
- * and the marker repeats in the running head on every page after this one, so
- * a page read on its own cannot be mistaken either.
+ * The white panel runs on a single grid: the mark at the top with room to
+ * breathe, the dominant title in the lower middle with its accent, the grouped
+ * information block beneath it, and the signature on the baseline. The navy
+ * panel is a clean dark ground, and the seam is the thin brand strip on the
+ * boundary between them.
  */
 export function coverHtml(cover: PdfCover): string {
   const partial = cover.partial ? `<p class="partial">Partial audit</p>` : "";
 
   return (
     `<div class="cover">` +
+    `<div class="cover-left">` +
     mark() +
-    `<div class="cover-main">` +
+    `<div class="cover-titleblock">` +
     partial +
-    html`<h1>${cover.statusLine}</h1>` +
-    addressee(cover) +
-    site(cover) +
+    `<h1 class="cover-title">Website<br>Audit Report</h1>` +
+    `<span class="cover-accent"></span>` +
     `</div>` +
-    coverFoot(cover) +
+    infoBlock(cover) +
+    signature(cover) +
+    `</div>` +
+    navyPanel() +
+    `<span class="cover-seam"></span>` +
     `</div>`
   );
-}
-
-/**
- * The foot of the cover: when the site was measured, and who prepared it.
- *
- * THE AUDIT DATE, NEVER THE GENERATION DATE. 7A §20 is explicit about which
- * one matters, and it is the same value the running foot carries on every
- * later page. Null when the stored timestamp could not be read, in which case
- * the line is left out rather than labelled and left blank.
- */
-function coverFoot(cover: PdfCover): string {
-  const measured =
-    cover.checkedAt === null ? "" : html`<p class="note">Measured ${cover.checkedAt}</p>`;
-  const preparedBy =
-    cover.client.preparedBy === null
-      ? ""
-      : html`<p class="note">Prepared by ${cover.client.preparedBy}</p>`;
-
-  return `<div class="cover-foot">` + measured + preparedBy + `</div>`;
 }

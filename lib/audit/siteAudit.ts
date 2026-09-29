@@ -412,6 +412,7 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<AuditResu
     site: {
       findings: site.findings,
       skippedChecks: site.skipped,
+      ranRules: site.ran,
       evaluatedPages: site.evaluatedPages,
     },
     pages: pageAudits,
@@ -488,6 +489,7 @@ async function certificateFailureAudit(
       findings: site.findings,
       skippedChecks: site.skipped,
       // No page was read, so no page-scoped rule ran on anything.
+      ranRules: site.ran,
       evaluatedPages: 0,
     },
     crawl: crawl.summary,

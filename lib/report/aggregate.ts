@@ -69,6 +69,18 @@ export interface SiteFindings {
    * thing: not a problem, and emphatically not a pass.
    */
   skipped: SkippedCheck[];
+  /**
+   * Every page-rule id that ran on at least one evaluated page.
+   *
+   * The per-rule outcome ledger, exposed for anything that has to tell a rule
+   * that RAN and stayed quiet from one that never ran. A rule which passed on a
+   * hundred pages and was skipped on one appears in BOTH this list (it ran) and
+   * `skipped` (it was skipped somewhere); a rule skipped everywhere is in
+   * `skipped` and absent here. Without this, the two are indistinguishable from
+   * the outside, because a quiet pass leaves no finding — so a rule that mostly
+   * passed would be read as entirely skipped. Sorted for determinism.
+   */
+  ran: string[];
   /** How many pages were read and had rules run against them. */
   evaluatedPages: number;
 }
@@ -272,6 +284,8 @@ export function aggregateFindings(
     skipped: [...skipped.values()].sort(
       (a, b) => a.ruleId.localeCompare(b.ruleId) || a.reason.localeCompare(b.reason),
     ),
+    // The rule ids that ran on at least one page, in a stable order.
+    ran: [...ranOn.keys()].sort(),
     evaluatedPages: ordered.length,
   };
 }

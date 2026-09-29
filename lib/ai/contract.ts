@@ -904,8 +904,15 @@ export interface AIReportLabPerformance {
 }
 
 export interface AIReportPerformance {
-  /** Which device was simulated. */
-  readonly strategy: "mobile";
+  /**
+   * Which device was simulated. Mirrors `PerformanceData.strategy`.
+   *
+   * In practice the model is only ever shown the MOBILE result — desktop is a
+   * separate, display-only measurement that is never attached to the audit and
+   * so never reaches this contract. The type carries the union only to mirror
+   * its source; it changes nothing the model is given or asked.
+   */
+  readonly strategy: "mobile" | "desktop";
   /** The address the speed check was asked about. */
   readonly requestedUrl: string;
   /**

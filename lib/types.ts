@@ -29,6 +29,7 @@ export type NotYetImplemented = null;
  * a whole-site result can carry it without a second, drifting copy.
  */
 import type { SiteCrawlSummary } from "./collector/crawlSite";
+import type { ScoreResult } from "./scoring/score.ts";
 
 /**
  * How serious a problem is.
@@ -1126,11 +1127,16 @@ export interface LabPerformance {
 export interface PerformanceData {
   status: PerformanceStatus;
   /**
-   * Which device was simulated. Mobile only for now — it is what Google ranks
-   * on, and running both would double the time and quota for a second opinion
-   * the client's ranking does not depend on.
+   * Which device was simulated.
+   *
+   * Mobile is what Google ranks on, and it is the ONLY strategy that feeds
+   * `result.score` — the speed rules are graded on the mobile result alone.
+   * Desktop is measured as a SEPARATE, display-only result: shown in its own
+   * panel, never graded, never attached to the job, and so it can never reach
+   * the score. Running both doubles the Google time and quota, which is why the
+   * desktop request is fired separately, after the mobile one has answered.
    */
-  strategy: "mobile";
+  strategy: "mobile" | "desktop";
   /**
    * The address we asked Google to measure.
    *
@@ -1321,6 +1327,20 @@ export interface SiteFindingsSummary {
   findings: Finding[];
   /** Checks that could not run somewhere on the site. Never findings. */
   skippedChecks: SkippedCheck[];
+  /**
+   * Every page-rule id that ran on at least one evaluated page.
+   *
+   * The per-rule outcome ledger from aggregation. It exists so a consumer — the
+   * score, above all — can tell a rule that ran and passed silently on most
+   * pages from one that never ran: a quiet pass leaves no finding, and a rule
+   * skipped on even one page appears in `skippedChecks`, so without this the two
+   * are indistinguishable and a mostly-passing rule reads as entirely skipped.
+   *
+   * OPTIONAL, so every reader that predates it is unaffected and a hand-built
+   * result need not supply it. A consumer that has it can be precise; one that
+   * does not falls back to the conservative reading.
+   */
+  ranRules?: readonly string[];
   /** How many pages were read and had rules run against them. */
   evaluatedPages: number;
 }
@@ -1347,6 +1367,18 @@ export interface SiteAuditResult {
    * not a severity: a limit we imposed is not a fault of the website.
    */
   crawl: SiteCrawlSummary;
+  /**
+   * The deterministic score, computed by code from this result's own verified
+   * findings — never by an AI.
+   *
+   * ABSENT on the result the crawl produces and on the stored job, and ATTACHED
+   * only when the finished audit is delivered, because the score reads the whole
+   * audit including the speed check, which is measured separately and merged at
+   * that point. So `runSiteAudit` and the job store are unchanged, and a reader
+   * of the delivered result finds the grade already computed rather than being
+   * handed the arithmetic. See `withScore`.
+   */
+  score?: ScoreResult;
 }
 
 /**
@@ -1413,6 +1445,15 @@ export interface CertificateFailureAudit {
   site: SiteFindingsSummary;
   /** The crawl's own account of what it attempted. `evaluated` is 0. */
   crawl: SiteCrawlSummary;
+  /**
+   * The deterministic score, attached on delivery like the whole-site result's.
+   *
+   * A certificate failure is still scored: the certificate check ran and graded
+   * the site, so there are real findings to score — the certificate problem
+   * itself is a critical, which the gate reflects. No page was read, so the
+   * page-only categories score as Not Assessed rather than as a made-up pass.
+   */
+  score?: ScoreResult;
 }
 
 /**

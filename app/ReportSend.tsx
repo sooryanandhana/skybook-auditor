@@ -120,7 +120,7 @@ export function ReportSend({
 
       <div className={styles.exportAction}>
         <button
-          className={styles.button}
+          className={styles.buttonSecondary}
           type="button"
           onClick={() => setOpen((current) => !current)}
           aria-expanded={open}

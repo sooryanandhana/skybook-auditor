@@ -62,6 +62,27 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
         { label: "Excluded by robots.txt", value: "4", note: "Not a fault in the site." },
       ],
     },
+    score: {
+      graded: true,
+      grade: "B",
+      bandLabel: "Good",
+      gradeClass: "tile-good",
+      passRate: 82,
+      coveragePercent: 90,
+      statusMessage: null,
+      partialNote: null,
+      capNote: "82% of checks passed, but unresolved serious issues cap the grade at B.",
+      categories: [
+        { assessed: true, label: "Security", grade: "B", passRate: 80, coveragePercent: 83, gradeClass: "tile-good" },
+        { assessed: true, label: "Search visibility", grade: "C", passRate: 62, coveragePercent: 100, gradeClass: "tile-medium" },
+        { assessed: false, label: "Speed" },
+        { assessed: true, label: "Technical", grade: "A", passRate: 100, coveragePercent: 100, gradeClass: "tile-good" },
+      ],
+      gateHeading: "What's holding the grade back",
+      gateReasons: ["No SPF record"],
+      gateNote:
+        "These issues cap the overall grade regardless of how many other checks passed. Fixing them is what lifts it.",
+    },
     summary: {
       severityCounts: [
         { severity: "critical", label: "Critical", count: 0 },

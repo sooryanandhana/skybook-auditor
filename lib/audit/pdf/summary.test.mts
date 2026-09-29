@@ -8,7 +8,7 @@
  */
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { summaryHtml } from "./summary.ts";
+import { summaryHtml, aiSummaryHtml } from "./summary.ts";
 import { coverageHtml } from "./coverage.ts";
 import { factTable } from "./facts.ts";
 import { SENTINEL, testDocument } from "./testDocument.fixture.mts";
@@ -22,7 +22,7 @@ const summary = (over: Partial<PdfSummary> = {}) => ({ ...testDocument().summary
 // ---------------------------------------------------------------------------
 
 test("every severity is shown as a number and a word", () => {
-  const out = summaryHtml(summary(), LABELS);
+  const out = summaryHtml(summary());
 
   for (const count of testDocument().summary.severityCounts) {
     assert.ok(out.includes(`>${count.count}<`), `${count.label} shows its number`);
@@ -31,7 +31,7 @@ test("every severity is shown as a number and a word", () => {
 });
 
 test("the split keeps the order the report layer gave it", () => {
-  const out = summaryHtml(summary(), LABELS);
+  const out = summaryHtml(summary());
 
   assert.ok(out.indexOf("Critical") < out.indexOf("High"));
   assert.ok(out.indexOf("High") < out.indexOf("Medium"));
@@ -40,12 +40,12 @@ test("the split keeps the order the report layer gave it", () => {
 test("a zero is shown rather than hidden", () => {
   // Nought critical problems is a result, and a reader who cannot see it
   // cannot tell whether the check ran.
-  const out = summaryHtml(summary(), LABELS);
+  const out = summaryHtml(summary());
   assert.match(out, /tile-critical[^]*?>0</);
 });
 
 test("no counts at all produces no tiles rather than an empty row", () => {
-  const out = summaryHtml(summary({ severityCounts: [] }), LABELS);
+  const out = summaryHtml(summary({ severityCounts: [] }));
   assert.ok(!out.includes("tiles"));
 });
 
@@ -56,7 +56,6 @@ test("no counts at all produces no tiles rather than an empty row", () => {
 test("a clean audit shows the sentence the report layer chose", () => {
   const out = summaryHtml(
     summary({ state: "clean", stateSentence: "No issues found by the checks that were run." }),
-    LABELS,
   );
 
   assert.ok(out.includes("No issues found by the checks that were run."));
@@ -68,22 +67,22 @@ test("a clean audit with skipped checks says the longer thing", () => {
   // it was given and never shortens it.
   const longer =
     "No issues were found by the checks that completed, but some checks could not be evaluated.";
-  const out = summaryHtml(summary({ state: "clean-with-skipped", stateSentence: longer }), LABELS);
+  const out = summaryHtml(summary({ state: "clean-with-skipped", stateSentence: longer }));
 
   assert.ok(out.includes(longer));
 });
 
 test("an audit with findings shows no clean-state sentence", () => {
-  assert.ok(!summaryHtml(summary({ stateSentence: "" }), LABELS).includes('class="lead"'));
+  assert.ok(!summaryHtml(summary({ stateSentence: "" })).includes('class="lead"'));
 });
 
 // ---------------------------------------------------------------------------
-// The AI panel
+// The AI website summary, its own section now, distinct from the measured split
 // ---------------------------------------------------------------------------
 
-test("the summary is labelled as AI-written and carries the provenance sentence", () => {
+test("the AI section is labelled as AI-written and carries the provenance sentence", () => {
   // 7A §9. This is the one place the document states the boundary outright.
-  const out = summaryHtml(summary(), LABELS);
+  const out = aiSummaryHtml(summary(), LABELS);
 
   assert.ok(out.includes("AI summary"));
   assert.ok(out.includes(SENTINEL), "the model's own words");
@@ -91,24 +90,25 @@ test("the summary is labelled as AI-written and carries the provenance sentence"
 });
 
 test("the provenance sentence is the document's, not one written here", () => {
-  const out = summaryHtml(summary(), { ...LABELS, aiProvenance: "PROVENANCESENTENCE" });
+  const out = aiSummaryHtml(summary(), { ...LABELS, aiProvenance: "PROVENANCESENTENCE" });
 
   assert.ok(out.includes("PROVENANCESENTENCE"));
   assert.ok(!out.includes("measured by this tool"));
 });
 
-test("with no commentary the summary shows the split alone", () => {
+test("with no commentary there is no AI section, and the split stands alone", () => {
   // 7A §19. No apology, no empty panel, no note about the model: a report
-  // without commentary is a complete report.
-  const out = summaryHtml(summary({ ai: null }), LABELS);
+  // without commentary is a complete report. The measured split lives in its
+  // own section and is unaffected.
+  assert.equal(aiSummaryHtml(summary({ ai: null }), LABELS), "", "no section at all");
 
-  assert.ok(!out.includes("AI summary"));
-  assert.ok(!out.includes("class=\"ai\""));
-  assert.ok(out.includes("High"), "the measured split is still there");
+  const split = summaryHtml(summary({ ai: null }));
+  assert.ok(!split.includes("class=\"ai\""), "and no AI panel leaks into the split");
+  assert.ok(split.includes("High"), "the measured split is still there");
 });
 
 test("a partial answer says how much was left out", () => {
-  const out = summaryHtml(
+  const out = aiSummaryHtml(
     summary({
       ai: {
         executiveSummary: "Two issues.",
@@ -126,12 +126,12 @@ test("a partial answer says how much was left out", () => {
 });
 
 test("nothing was dropped, so nothing is said about dropping", () => {
-  const out = summaryHtml(summary(), LABELS);
+  const out = aiSummaryHtml(summary(), LABELS);
   assert.ok(!out.includes("not usable"));
 });
 
 test("the model's words are rendered as text", () => {
-  const out = summaryHtml(
+  const out = aiSummaryHtml(
     summary({
       ai: {
         executiveSummary: '<script>steal()</script>',

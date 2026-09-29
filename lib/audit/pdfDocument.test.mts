@@ -17,11 +17,14 @@ import { buildPdfDocument, type PdfDocument } from "./pdfDocument.ts";
 import { createJobStore } from "../jobs/jobStore.ts";
 import {
   METRIC_NOT_REPORTED,
+  categoryLabel,
   certificateProblemFacts,
   readableTimestamp,
   securityFacts,
 } from "../report/measurementsView.ts";
 import { auditStatusText } from "../report/siteFindingsView.ts";
+import { scoreAudit } from "../scoring/score.ts";
+import { withSpeed } from "./withSpeed.ts";
 import { runSeoChecks } from "../collector/seoChecks.ts";
 import { runSecurityChecks } from "../collector/securityChecks.ts";
 import { MAX_AFFECTED_PAGES } from "../report/aggregate.ts";
@@ -191,6 +194,52 @@ test("a completed audit becomes a document", () => {
   assert.equal(doc.coverage.partial, false);
   assert.equal(doc.siteFindings.count, 1);
   assert.equal(doc.pageFindings.count, 1);
+});
+
+// ---------------------------------------------------------------------------
+// The deterministic score — read, never invented
+// ---------------------------------------------------------------------------
+
+test("the document carries the score the scorer gives the whole audit, not one of its own", () => {
+  const { store, jobId } = jobWith();
+  const doc = documentFor(store, jobId);
+
+  // The same seam the result endpoint and dashboard use: no speed was attached,
+  // so the score is over the crawl alone. The PDF must show exactly that grade.
+  const expected = scoreAudit(withSpeed(storedAudit(), null));
+
+  assert.equal(doc.score.grade, expected.grade);
+  assert.equal(doc.score.passRate, expected.passRate);
+  assert.equal(doc.score.coveragePercent, Math.round(expected.coverage * 100));
+  assert.equal(doc.score.graded, expected.status === "graded");
+
+  // Four pillars, in the dashboard's order, each carrying the scorer's own grade.
+  assert.deepEqual(
+    doc.score.categories.map((category) => category.label),
+    ["Security", categoryLabel("seo"), "Speed", "Technical"],
+  );
+});
+
+test("a pillar no rule could run for reads Not Assessed, never a zero", () => {
+  // The fixture asks for no speed check, so Speed has nothing to grade.
+  const { store, jobId } = jobWith();
+  const speed = documentFor(store, jobId).score.categories.find((c) => c.label === "Speed");
+
+  assert.ok(speed);
+  assert.equal(speed.assessed, false);
+  // The not-assessed variant carries no grade or number to print as a zero.
+  assert.equal("grade" in speed, false);
+});
+
+test("the score is not moved by the AI commentary", () => {
+  const { store, jobId } = jobWith();
+  const before = documentFor(store, jobId).score;
+
+  // A written summary is attached to the job; the grade must not shift.
+  store.setExplanation(jobId, explained([META]));
+  const after = documentFor(store, jobId).score;
+
+  assert.deepEqual(after, before);
 });
 
 test("a partial crawl is never presented as a whole-site audit", () => {

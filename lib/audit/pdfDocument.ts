@@ -93,6 +93,17 @@ import {
   showsSkippedPanel,
   type FindingsState,
 } from "../report/findingsState.ts";
+import { scoreAudit, type CategoryScore, type Grade, type ScoreResult } from "../scoring/score.ts";
+import {
+  GATE_HEADING,
+  GATE_NOTE,
+  SCORE_CATEGORY_ORDER,
+  SCORE_PARTIAL_NOTE,
+  coveragePercent,
+  gateReasons,
+  gradeBandLabel,
+  scoreStatusMessage,
+} from "../report/scoreView.ts";
 import type {
   AuditData,
   Category,
@@ -258,6 +269,60 @@ export interface PdfSummary {
   readonly ai: PdfAiSummary | null;
 }
 
+// ---------------------------------------------------------------------------
+// The deterministic score, made ready for the page
+//
+// DISPLAY-ONLY, LIKE EVERYTHING ELSE HERE. Every value below is read from the
+// `ScoreResult` that `scoreAudit` already computed from the verified findings.
+// This projection grades nothing, averages nothing and re-derives nothing: it
+// chooses which of the score's own numbers the document shows and the words to
+// show them in, drawing that wording from `scoreView` so the PDF and the
+// on-screen dashboard cannot disagree about the same grade. A model never
+// reaches any of it.
+// ---------------------------------------------------------------------------
+
+/**
+ * One pillar's line in the score block, or a plain "not assessed".
+ *
+ * A DISCRIMINATED UNION on `assessed`, so a Not Assessed category carries no
+ * grade or number to show as a zero, and the renderer cannot reach one.
+ */
+export type PdfScoreCategory =
+  | { readonly assessed: false; readonly label: string }
+  | {
+      readonly assessed: true;
+      readonly label: string;
+      /** A letter, carried in words as well as colour. */
+      readonly grade: Grade;
+      readonly passRate: number;
+      readonly coveragePercent: number;
+      /** The severity class that tints the grade. */
+      readonly gradeClass: string;
+    };
+
+/** The whole score, projected for the document. */
+export interface PdfScore {
+  /** True only when a headline grade was given. */
+  readonly graded: boolean;
+  readonly grade: Grade | null;
+  readonly bandLabel: string | null;
+  /** The severity class tinting the overall grade, or "" when withheld. */
+  readonly gradeClass: string;
+  readonly passRate: number | null;
+  readonly coveragePercent: number;
+  /** The sentence explaining a withheld grade, or null when one was given. */
+  readonly statusMessage: string | null;
+  /** Said when the grade covers less than the whole site. */
+  readonly partialNote: string | null;
+  /** Said when a gate held the grade below its pass rate. */
+  readonly capNote: string | null;
+  readonly categories: readonly PdfScoreCategory[];
+  readonly gateHeading: string;
+  /** The findings that capped the grade, by title. Empty when none did. */
+  readonly gateReasons: readonly string[];
+  readonly gateNote: string | null;
+}
+
 /** Prose about one finding. Never a measurement. */
 export interface PdfCommentary {
   readonly explanation: string;
@@ -358,6 +423,8 @@ export interface PdfDocument {
   readonly labels: PdfLabels;
   readonly cover: PdfCover;
   readonly coverage: PdfCoverage;
+  /** The deterministic grade, read from `result.score`. Never recomputed here. */
+  readonly score: PdfScore;
   readonly summary: PdfSummary;
   readonly siteFindings: PdfFindingSection;
   readonly pageFindings: PdfFindingSection;
@@ -661,6 +728,14 @@ function certificateFailureDocument(
       facts: coverage.facts.map((fact) => ({ label: fact.label, value: fact.value })),
     },
 
+    /*
+     * A CERTIFICATE FAILURE IS STILL GRADED, on the checks that could run. No
+     * page was read, so its page-only categories score as Not Assessed rather
+     * than as a made-up pass, and the certificate critical caps the grade at F —
+     * the same score the result endpoint and dashboard show for this audit.
+     */
+    score: toScore(scoreAudit(audit), findings),
+
     summary: {
       severityCounts: severityCounts(findings).map((entry) => ({
         severity: entry.severity,
@@ -739,6 +814,77 @@ export interface PdfDocumentOptions {
   readonly companyName?: string;
   readonly contactName?: string;
   readonly preparedBy?: string;
+}
+
+/**
+ * The severity class that tints one grade.
+ *
+ * REUSES THE DOCUMENT'S EXISTING, CONTRAST-CHECKED PALETTE rather than inventing
+ * five grade colours: A and B are the passing green, C the amber, D the orange,
+ * F the red a critical already carries. The grade's own letter and band word
+ * carry the meaning in words, so a greyscale print loses nothing.
+ */
+function gradeClassFor(grade: Grade): string {
+  switch (grade) {
+    case "A":
+    case "B":
+      return "tile-good";
+    case "C":
+      return "tile-medium";
+    case "D":
+      return "tile-high";
+    case "F":
+      return "tile-critical";
+  }
+}
+
+function toScoreCategory(label: string, category: CategoryScore): PdfScoreCategory {
+  if (category.status !== "assessed") {
+    return { label, assessed: false };
+  }
+  return {
+    label,
+    assessed: true,
+    grade: category.grade,
+    passRate: category.passRate,
+    coveragePercent: coveragePercent(category.coverage),
+    gradeClass: gradeClassFor(category.grade),
+  };
+}
+
+/**
+ * The deterministic score, made ready for the page.
+ *
+ * READS THE SCORE, DECIDES NOTHING. The grade, the pass rate, the coverage and
+ * the gated-by ids are the scorer's; the sentences are `scoreView`'s, the same
+ * ones the dashboard shows. The one arithmetic is turning a 0–1 coverage into a
+ * percentage, exactly as the screen does. The gate titles are looked up in the
+ * findings already on the page.
+ */
+function toScore(score: ScoreResult, findings: readonly Finding[]): PdfScore {
+  const reasons = gateReasons(score, findings);
+  const capNote =
+    reasons.length > 0 && score.grade !== null && score.passRate !== null
+      ? `${score.passRate}% of checks passed, but unresolved serious issues cap the grade at ${score.grade}.`
+      : null;
+
+  return {
+    graded: score.status === "graded",
+    grade: score.grade,
+    bandLabel: score.grade !== null ? gradeBandLabel(score.grade) : null,
+    gradeClass: score.grade !== null ? gradeClassFor(score.grade) : "",
+    passRate: score.passRate,
+    coveragePercent: coveragePercent(score.coverage),
+    statusMessage: scoreStatusMessage(score),
+    partialNote: score.partial ? SCORE_PARTIAL_NOTE : null,
+    capNote,
+    categories: SCORE_CATEGORY_ORDER.map((name) =>
+      toScoreCategory(categoryLabel(name), score.categories[name]),
+    ),
+    gateHeading: GATE_HEADING,
+    gateReasons: reasons.map((reason) => reason.title),
+    gateNote: reasons.length > 0 ? GATE_NOTE : null,
+  };
 }
 
 /**
@@ -845,6 +991,14 @@ export function buildPdfDocument(
         stopReason: coverage.reason,
         facts: coverage.facts.map((fact) => ({ label: fact.label, value: fact.value })),
       },
+
+      /*
+       * THE GRADE, TAKEN FROM THE WHOLE AUDIT EXACTLY AS THE DASHBOARD TAKES IT.
+       * `whole` is already `withSpeed(job.result, job.attached)`, so scoring it
+       * here gives the identical `ScoreResult` the result endpoint attaches and
+       * the dashboard shows. Nothing is recomputed differently for the PDF.
+       */
+      score: toScore(scoreAudit(whole), findings),
 
       summary: {
         severityCounts: severityCounts(findings).map((entry) => ({

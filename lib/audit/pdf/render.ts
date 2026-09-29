@@ -37,6 +37,24 @@ import { footerTemplate, headerTemplate } from "./runningHeadFoot.ts";
 import { PAGE_FORMAT, PAGE_MARGIN, PDF_RENDER_BUDGET_MS } from "./settings.ts";
 
 /**
+ * The launch flags Chromium needs to start inside a container.
+ *
+ * A HEADLESS CHROMIUM RUNNING AS ROOT IN A CONTAINER refuses to start with its
+ * setuid sandbox enabled, which is every Linux PaaS image (Render, Railway, a
+ * plain Docker host) unless a non-root user and extra capabilities are arranged.
+ * Turning the sandbox off is the documented way to run it there.
+ *
+ * THE SANDBOX IS NOT LOAD-BEARING HERE. It contains a renderer that might run
+ * hostile web content; this renderer sets its own content from a trusted,
+ * escaped string, with JavaScript disabled and every network request aborted
+ * (see `configurePage`). There is no untrusted code for the sandbox to contain,
+ * so dropping it removes a startup failure rather than a defence. The flags are
+ * harmless on the developer's own machine, so they are passed unconditionally
+ * rather than guessed at from the environment.
+ */
+export const CHROMIUM_LAUNCH_ARGS = ["--no-sandbox", "--disable-setuid-sandbox"] as const;
+
+/**
  * Why a render produced nothing.
  *
  * A closed set, like every other failure in this project, so a caller can
@@ -134,7 +152,8 @@ export async function renderPdf(
   options: RenderOptions = {},
 ): Promise<Buffer> {
   const budgetMs = options.timeoutMs ?? PDF_RENDER_BUDGET_MS;
-  const launcher = options.launch ?? (() => puppeteer.launch({ headless: true }));
+  const launcher =
+    options.launch ?? (() => puppeteer.launch({ headless: true, args: [...CHROMIUM_LAUNCH_ARGS] }));
 
   /*
    * THE PROMISE, NOT THE BROWSER. Held as a promise and assigned before the
@@ -244,7 +263,8 @@ export async function renderHtmlDocument(
   options: RenderOptions = {},
 ): Promise<Buffer> {
   const budgetMs = options.timeoutMs ?? PDF_RENDER_BUDGET_MS;
-  const launcher = options.launch ?? (() => puppeteer.launch({ headless: true }));
+  const launcher =
+    options.launch ?? (() => puppeteer.launch({ headless: true, args: [...CHROMIUM_LAUNCH_ARGS] }));
   const held: { browser: Promise<Browser> | null } = { browser: null };
 
   try {

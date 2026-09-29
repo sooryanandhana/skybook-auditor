@@ -21,6 +21,13 @@ import { html } from "./escape.ts";
 const SUMMARY_HEADING = "Summary";
 
 /**
+ * The AI narrative's section title. A structural label that names the section
+ * in the PDF; it says nothing about the audited site, so, like the coverage and
+ * measured-facts headings, it lives here rather than travelling through 7B.
+ */
+const AI_SUMMARY_SECTION_HEADING = "AI website summary";
+
+/**
  * One severity, as a number and a word.
  *
  * THE WORD IS NOT OPTIONAL. 7A §8 and §24 both require it: colour alone never
@@ -38,46 +45,20 @@ function severityTile(count: PdfSeverityCount): string {
 }
 
 /**
- * The AI panel, or nothing at all.
+ * The whole section: the severity split, counted by 7B and printed here.
  *
- * ABSENT IS NORMAL AND IS NEVER A FAILURE. 7A §9 and §19: with no commentary
- * the summary shows the severity split alone. There is no apology, no empty
- * panel and no note about the model, because a report without commentary is a
- * complete report, and saying otherwise would invite a reader to think
- * something went wrong with their audit.
- */
-function aiPanel(summary: PdfSummary, labels: PdfLabels): string {
-  const ai = summary.ai;
-  if (ai === null) return "";
-
-  /*
-   * The dropped-entry sentence, when the validator refused part of the answer.
-   * Said out loud rather than hidden: a reader who counts the findings and
-   * counts the explanations should find the difference already accounted for.
-   * Nothing is invented to fill the gap.
-   */
-  const note = [labels.aiProvenance, ai.rejectedNote, ai.coverageNote]
-    .filter((sentence) => sentence !== null && sentence !== "")
-    .join(" ");
-
-  return (
-    `<div class="ai">` +
-    html`<p class="ai-label">${labels.aiSummaryHeading}</p>` +
-    html`<p class="ai-summary">${ai.executiveSummary}</p>` +
-    html`<p class="ai-note">${note}</p>` +
-    `</div>`
-  );
-}
-
-/**
- * The whole section.
+ * THE AI ACCOUNT IS NO LONGER HERE. It has its own section, `aiSummaryHtml`
+ * below, so the measured split and the written narrative are separated in the
+ * document as well as in authority -- the split a reader can check against the
+ * findings, the narrative labelled as the model's. That keeps this section
+ * purely measured: four numbers our own rules produced.
  *
  * The clean-state sentence appears only when there is one. 7B leaves it empty
  * when findings exist, and it carries the distinction 7A §14 insists on: "no
  * issues found" and "no issues found, but some checks could not run" are
  * different sentences, and only one of them is good news.
  */
-export function summaryHtml(summary: PdfSummary, labels: PdfLabels): string {
+export function summaryHtml(summary: PdfSummary): string {
   const state =
     summary.stateSentence === "" ? "" : html`<p class="lead">${summary.stateSentence}</p>`;
 
@@ -91,7 +72,41 @@ export function summaryHtml(summary: PdfSummary, labels: PdfLabels): string {
     `<h2>${SUMMARY_HEADING}</h2>` +
     state +
     tiles +
-    aiPanel(summary, labels) +
+    `</section>`
+  );
+}
+
+/**
+ * The AI account of the audit as a whole, as its own section.
+ *
+ * ABSENT IS NORMAL AND IS NEVER A FAILURE. 7A §9 and §19: with no commentary
+ * there is no section at all -- no apology, no empty panel, no note about the
+ * model, because a report without commentary is a complete report and saying
+ * otherwise would invite a reader to think something went wrong with their
+ * audit.
+ *
+ * LABELLED AS AI, ON THE BLUE GROUND, AND PLACED AFTER THE MEASURED SECTIONS.
+ * 7A §9 requires the model's writing to be visibly subordinate to the measured
+ * content and never mistaken for it. The provenance sentence rides with it, and
+ * the dropped-entry and coverage notes are said out loud so a reader who counts
+ * the findings and the explanations finds the difference already accounted for.
+ */
+export function aiSummaryHtml(summary: PdfSummary, labels: PdfLabels): string {
+  const ai = summary.ai;
+  if (ai === null) return "";
+
+  const note = [labels.aiProvenance, ai.rejectedNote, ai.coverageNote]
+    .filter((sentence) => sentence !== null && sentence !== "")
+    .join(" ");
+
+  return (
+    `<section class="ai-section">` +
+    `<h2>${AI_SUMMARY_SECTION_HEADING}</h2>` +
+    `<div class="ai">` +
+    html`<p class="ai-label">${labels.aiSummaryHeading}</p>` +
+    html`<p class="ai-summary">${ai.executiveSummary}</p>` +
+    html`<p class="ai-note">${note}</p>` +
+    `</div>` +
     `</section>`
   );
 }

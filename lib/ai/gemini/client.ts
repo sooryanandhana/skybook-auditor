@@ -113,7 +113,15 @@ export function geminiClient(options: GeminiOptions = {}): GoogleGenAI | null {
    * The empty case returned above is what stops the SDK writing "API key
    * should be set" to the console: it is never handed a blank key.
    */
-  const client = new GoogleGenAI({ apiKey });
+  /*
+   * PINNED TO v1alpha, DELIBERATELY. The one request this project makes goes
+   * through the SDK's `interactions.create` surface (see gemini/explain.ts),
+   * and in @google/genai 2.21.0 that surface is supported only on the v1alpha
+   * API version. The client otherwise defaults to v1beta, which does not serve
+   * that endpoint, so the call failed against the live API. Setting the version
+   * here is the whole fix; nothing else about the request changes.
+   */
+  const client = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1alpha" } });
   clients.set(apiKey, client);
   return client;
 }

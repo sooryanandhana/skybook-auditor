@@ -2,7 +2,7 @@
  * The shape the model is allowed to answer in.
  *
  * A JSON Schema, built per audit, describing exactly `AIExplanationSet` and
- * nothing else. It is handed to the provider as the `response_format.schema`
+ * nothing else. It is handed to the provider as the `config.responseJsonSchema`
  * of a single request, so the answer arrives already shaped rather than being
  * parsed out of prose.
  *

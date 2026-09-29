@@ -2857,9 +2857,9 @@ test("selectForCommentary is a plain bound and holds nothing back below it", () 
 test("no request built from a large audit offers a model more than the cap", () => {
   const request = buildExplanationRequest(buildAIReportInput(auditOf(manyFindings(60))));
 
-  const sent = JSON.parse(request.input) as { findings: { ruleId: string }[] };
+  const sent = JSON.parse(request.contents) as { findings: { ruleId: string }[] };
   const explanations = (
-    request.response_format.schema as {
+    request.config.responseJsonSchema as {
       properties: {
         explanations: {
           maxItems: number;
@@ -2883,7 +2883,7 @@ test("no request built from a large audit offers a model more than the cap", () 
 test("a finding past the cap has no id a model could name", () => {
   const request = buildExplanationRequest(buildAIReportInput(auditOf(manyFindings(60))));
   const offered = (
-    request.response_format.schema as {
+    request.config.responseJsonSchema as {
       properties: {
         explanations: { items: { properties: { ruleId: { enum?: readonly string[] } } } };
       };

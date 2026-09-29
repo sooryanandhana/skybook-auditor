@@ -78,7 +78,7 @@ async function check(candidate: unknown) {
 
 /** A stand-in for Gemini that answers with fixed text. */
 const scriptedModel = (text: string): GeminiRequestClient => ({
-  interactions: { create: async () => ({ id: "corpus-interaction", output_text: text }) },
+  models: { generateContent: async () => ({ text }) },
 });
 
 correct("I0 the contract carries the three measured findings with their deterministic severities", async () => {

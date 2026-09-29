@@ -203,8 +203,8 @@ function evidenceLengthFor(count: number, targetBytes: number): number {
  */
 function asModel(real: GeminiRequestClient, model: string): GeminiRequestClient {
   return {
-    interactions: {
-      create: (params, options) => real.interactions.create({ ...params, model }, options),
+    models: {
+      generateContent: (params) => real.models.generateContent({ ...params, model }),
     },
   };
 }
@@ -229,12 +229,13 @@ function withSchema(
   schema: JsonSchema,
 ): GeminiRequestClient {
   return {
-    interactions: {
-      create: (params, options) =>
-        real.interactions.create(
-          { ...params, model, response_format: { ...params.response_format, schema } },
-          options,
-        ),
+    models: {
+      generateContent: (params) =>
+        real.models.generateContent({
+          ...params,
+          model,
+          config: { ...params.config, responseJsonSchema: schema },
+        }),
     },
   };
 }
@@ -664,8 +665,8 @@ async function runSchemaSplit(client: GeminiRequestClient): Promise<CaseResult[]
 async function rehearseSplit(): Promise<void> {
   interface Sent {
     readonly model?: string;
-    readonly input?: string;
-    readonly response_format?: { readonly schema?: JsonSchema };
+    readonly contents?: string;
+    readonly config?: { readonly responseJsonSchema?: JsonSchema };
   }
 
   /* An array rather than a variable: a `let` written only inside a callback is
@@ -673,10 +674,10 @@ async function rehearseSplit(): Promise<void> {
   const seen: Sent[] = [];
 
   const fake: GeminiRequestClient = {
-    interactions: {
-      create: async (params) => {
+    models: {
+      generateContent: async (params) => {
         seen.push(params as Sent);
-        return { output_text: "{}" };
+        return { text: "{}" };
       },
     },
   };
@@ -694,8 +695,8 @@ async function rehearseSplit(): Promise<void> {
   const sent = seen[0];
   if (sent === undefined) throw new Error("the request never reached the client");
 
-  const shape = schemaShape(sent.response_format?.schema ?? {});
-  const findings = (JSON.parse(sent.input ?? "{}") as AIReportInput).findings.length;
+  const shape = schemaShape(sent.config?.responseJsonSchema ?? {});
+  const findings = (JSON.parse(sent.contents ?? "{}") as AIReportInput).findings.length;
 
   console.log("No request was made in this mode.");
   console.log("");

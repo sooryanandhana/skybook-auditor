@@ -1002,8 +1002,8 @@ test("explain: the report the browser reads is identical before and after", asyn
 
 /** A provider stand-in that answers with whatever text the test gives it. */
 const providerSaying = (text: string) => ({
-  interactions: {
-    create: async () => ({ id: "interaction-1", output_text: text }),
+  models: {
+    generateContent: async () => ({ text }),
   },
 });
 
@@ -1087,10 +1087,10 @@ test("explain: with no key configured, nothing is asked and the report is fine",
     options: {
       apiKey: "",
       client: {
-        interactions: {
-          create: async () => {
+        models: {
+          generateContent: async () => {
             asked += 1;
-            return { output_text: "{}" };
+            return { text: "{}" };
           },
         },
       },
@@ -1116,8 +1116,8 @@ test("explain: no key, no provider detail and no raw response reach the wire", a
     options: {
       apiKey: KEY,
       client: {
-        interactions: {
-          create: async () => {
+        models: {
+          generateContent: async () => {
             const error = new Error("500 x-goog-api-key leaked-secret-value");
             error.name = "InternalServerError";
             Object.assign(error, {

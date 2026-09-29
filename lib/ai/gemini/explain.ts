@@ -24,7 +24,7 @@
  * internals into a document a client reads -- and, in the case of headers, the
  * key itself.
  */
-import type { Interactions } from "@google/genai";
+import type { GenerateContentParameters } from "@google/genai";
 import { AI_EXPLANATION_BUDGET_MS } from "../../budgets.ts";
 import type { AIReportInput } from "../contract.ts";
 import type { AIExplanationSet } from "../explanation.ts";
@@ -45,29 +45,17 @@ import { buildExplanationRequest } from "./prompt.ts";
  *
  * WHY IT IS NAMED AS A TYPE. Tests need to count requests, and counting them
  * anywhere other than here would count something else -- a helper that was
- * called, a promise that was created. This is the method that puts a packet on
- * the wire, so a fake standing in for it counts the thing that matters.
+ * called, a promise that was created. `generateContent` is the method that puts
+ * a packet on the wire, so a fake standing in for it counts the thing that
+ * matters.
  */
-export interface GeminiInteractions {
-  create(
-    params: Interactions.CreateModelInteractionParamsNonStreaming,
-    options?: GeminiRequestOptions,
-  ): Promise<unknown>;
+export interface GeminiModels {
+  generateContent(params: GenerateContentParameters): Promise<unknown>;
 }
 
 /** As much of the SDK client as this file touches. */
 export interface GeminiRequestClient {
-  readonly interactions: GeminiInteractions;
-}
-
-/**
- * The per-request settings handed to the SDK.
- *
- * BOTH OF THESE ARE LOAD-BEARING and neither is a default. See the call site.
- */
-export interface GeminiRequestOptions {
-  readonly timeout_ms?: number;
-  readonly retries?: { readonly strategy: "none" };
+  readonly models: GeminiModels;
 }
 
 export interface ExplainOptions extends GeminiOptions {
@@ -163,10 +151,24 @@ function classify(error: unknown): ExplanationFailureReason {
   const status = typeof (error as { status?: unknown })?.status === "number"
     ? (error as { status: number }).status
     : null;
+  const message = typeof (error as { message?: unknown })?.message === "string"
+    ? (error as { message: string }).message
+    : "";
 
   // Timeouts and aborts arrive by name; neither carries a status.
   if (name.includes("Timeout") || name === "AbortError" || name === "TimeoutError") return "timeout";
   if (name.includes("Connection")) return "network";
+  /*
+   * The transport failing (DNS, refused connection, TLS) surfaces here as
+   * undici's `fetch` rejection: a `TypeError` whose message is exactly "fetch
+   * failed", rethrown unwrapped by `generateContent` -- where the older
+   * `interactions` path wrapped it as a connection error caught above. Matched
+   * precisely, so an unrelated `TypeError` still falls through to
+   * `internal-error` rather than a false claim that the service was unreachable.
+   * The message is read to classify, never to display; the reason code is all
+   * that leaves this function.
+   */
+  if (name === "TypeError" && message === "fetch failed") return "network";
 
   if (status === 429) return "rate-limited";
   if (status === 401 || status === 403) return "not-authorised";
@@ -200,12 +202,12 @@ function classify(error: unknown): ExplanationFailureReason {
  * The answer's text, or null when there was none.
  *
  * UNTRUSTED, LIKE EVERYTHING ELSE FROM OVER THERE. The documented accessor is
- * `output_text`, and this checks that what sits there really is a non-empty
- * string rather than assuming the documentation describes every reply.
+ * `text`, and this checks that what sits there really is a non-empty string
+ * rather than assuming the documentation describes every reply.
  */
 function outputText(response: unknown): string | null {
   if (response === null || typeof response !== "object") return null;
-  const text = (response as { output_text?: unknown }).output_text;
+  const text = (response as { text?: unknown }).text;
   if (typeof text !== "string" || text.trim() === "") return null;
   return text;
 }
@@ -253,21 +255,32 @@ export async function explainAudit(
     let response: unknown;
     try {
       /*
-       * THE ONE REQUEST. Both options are load-bearing and were established by
-       * exercising the installed SDK rather than by reading its types:
+       * THE ONE REQUEST. The two HTTP options are load-bearing and were
+       * established by exercising the installed SDK rather than by reading its
+       * types:
        *
-       * `retries` -- the default policy is four retries with backoff on 408,
-       * 409, 429 and every 5xx, so one call here would be five requests on a
-       * rate limit. This project makes one request per audit and means it.
+       * `retryOptions.attempts` -- the SDK's default is five attempts with
+       * backoff on 408, 429 and every 5xx, so one call here would be five
+       * requests on a rate limit. `attempts: 1` means the original request and
+       * no retry. This project makes one request per audit and means it.
        *
-       * `timeout_ms` -- the provider's timeout is applied PER ATTEMPT. With
-       * retries on, a 45-second bound would have been a 45-second bound four
-       * times over. With retries off, one attempt is the whole call, so this
-       * number is the whole wait.
+       * `timeout` -- the provider's timeout is applied PER ATTEMPT. With retries
+       * off, one attempt is the whole call, so this number is the whole wait.
+       *
+       * They live in `config.httpOptions` because `generateContent` takes a
+       * single parameter object; the request itself is built by prompt.ts, and
+       * these settings about HOW it is sent are merged in here, where the call
+       * is made.
        */
-      response = await client.interactions.create(request, {
-        timeout_ms: options.timeoutMs ?? AI_EXPLANATION_BUDGET_MS,
-        retries: { strategy: "none" },
+      response = await client.models.generateContent({
+        ...request,
+        config: {
+          ...request.config,
+          httpOptions: {
+            timeout: options.timeoutMs ?? AI_EXPLANATION_BUDGET_MS,
+            retryOptions: { attempts: 1 },
+          },
+        },
       });
     } catch (error) {
       return notExplained(classify(error));

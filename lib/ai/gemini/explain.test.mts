@@ -4,9 +4,9 @@
  *
  * TWO KINDS OF FAKE, AND BOTH ARE HERE ON PURPOSE.
  *
- * Most tests hand the adapter a stand-in for the provider's `interactions`
- * object and count how many times its `create` was called. That counts the
- * method that puts a packet on the wire, which is what "one request" means.
+ * Most tests hand the adapter a stand-in for the provider's `models` object and
+ * count how many times its `generateContent` was called. That counts the method
+ * that puts a packet on the wire, which is what "one request" means.
  *
  * The section at the end goes further: it uses the REAL SDK client with the
  * global `fetch` replaced, and counts HTTP requests. That is the only way to
@@ -36,10 +36,9 @@ interface Recorder {
   readonly client: GeminiRequestClient;
   /** How many times the provider's request method was actually invoked. */
   calls: number;
-  /** Every request object handed over, so the trust boundary can be read. */
+  /** Every request object handed over, so the trust boundary and the request
+   *  options (which now live in `config.httpOptions`) can both be read. */
   readonly requests: unknown[];
-  /** Every options object handed over, so the retry and timeout can be read. */
-  readonly options: unknown[];
 }
 
 /** A provider that answers however the test says, and counts being asked. */
@@ -47,13 +46,11 @@ function recorder(answer: (call: number) => Promise<unknown>): Recorder {
   const state: Recorder = {
     calls: 0,
     requests: [],
-    options: [],
     client: {
-      interactions: {
-        create(params, options) {
+      models: {
+        generateContent(params) {
           state.calls += 1;
           state.requests.push(params);
-          state.options.push(options);
           return answer(state.calls);
         },
       },
@@ -77,7 +74,7 @@ function sdkError(name: string, status: number | null): Error {
 }
 
 /** A reply carrying text, the way the documented accessor carries it. */
-const answered = (text: string) => ({ id: "interaction-1", output_text: text });
+const answered = (text: string) => ({ text });
 
 const explanation = (ruleId: string, extra: Record<string, unknown> = {}) => ({
   ruleId,
@@ -297,7 +294,7 @@ test("a provider failure never becomes a statement about the website", async () 
 
 test("a fault in this code is its own state, not a thrown exception", async () => {
   const exploding: GeminiRequestClient = {
-    get interactions(): never {
+    get models(): never {
       throw new Error("something in here is broken");
     },
   };
@@ -406,7 +403,7 @@ test("no field a model could grade with survives the adapter", async () => {
 test("raw provider output never leaves the adapter", async () => {
   const provider = replies({
     id: "interaction-1",
-    output_text: JSON.stringify(goodAnswer()),
+    text: JSON.stringify(goodAnswer()),
     usage: { input_tokens: 15_000 },
     model_version: "internal-build-1234",
   });
@@ -505,11 +502,11 @@ test("the site's own words are sent as data and never as instructions", async ()
   const provider = replies(answered(JSON.stringify(goodAnswer())));
   await explainAudit(reportInput(), { apiKey: KEY, client: provider.client });
 
-  const sent = provider.requests[0] as { system_instruction: string; input: string };
+  const sent = provider.requests[0] as { config: { systemInstruction: string }; contents: string };
 
-  assert.equal(sent.system_instruction, SYSTEM_INSTRUCTION, "the brief was altered");
-  assert.ok(!sent.system_instruction.includes(HOSTILE));
-  assert.ok(sent.input.includes(HOSTILE), "the site's words must arrive intact, as data");
+  assert.equal(sent.config.systemInstruction, SYSTEM_INSTRUCTION, "the brief was altered");
+  assert.ok(!sent.config.systemInstruction.includes(HOSTILE));
+  assert.ok(sent.contents.includes(HOSTILE), "the site's words must arrive intact, as data");
 });
 
 test("the audit reaches the model exactly as it was measured", () => {
@@ -526,8 +523,8 @@ test("the audit reaches the model exactly as it was measured", () => {
 
     await explainAudit(input, { apiKey: KEY, client: provider.client });
 
-    const sent = provider.requests[0] as { input: string };
-    assert.deepEqual(JSON.parse(sent.input), JSON.parse(JSON.stringify(input)));
+    const sent = provider.requests[0] as { contents: string };
+    assert.deepEqual(JSON.parse(sent.contents), JSON.parse(JSON.stringify(input)));
   })();
 });
 
@@ -564,11 +561,11 @@ test("hostile website text is not sanitised, filtered or interpreted", async () 
   const provider = replies(answered(JSON.stringify(goodAnswer({ explanations: [] }))));
   await explainAudit(input, { apiKey: KEY, client: provider.client });
 
-  const sent = provider.requests[0] as { input: string; system_instruction: string };
+  const sent = provider.requests[0] as { contents: string; config: { systemInstruction: string } };
 
   // Passed through untouched: the boundary is the parameter, not a filter.
-  assert.equal(JSON.parse(sent.input).findings[0].title, attack);
-  assert.equal(sent.system_instruction, SYSTEM_INSTRUCTION);
+  assert.equal(JSON.parse(sent.contents).findings[0].title, attack);
+  assert.equal(sent.config.systemInstruction, SYSTEM_INSTRUCTION);
 });
 
 test("an obedient model that marks everything good still cannot", async () => {
@@ -602,10 +599,13 @@ test("the provider is told not to retry, and given a deadline", async () => {
   const provider = replies(answered(JSON.stringify(goodAnswer())));
   await explainAudit(reportInput(), { apiKey: KEY, client: provider.client });
 
-  const options = provider.options[0] as { timeout_ms?: number; retries?: { strategy?: string } };
+  const sent = provider.requests[0] as {
+    config: { httpOptions?: { timeout?: number; retryOptions?: { attempts?: number } } };
+  };
 
-  assert.deepEqual(options.retries, { strategy: "none" });
-  assert.equal(options.timeout_ms, AI_EXPLANATION_BUDGET_MS);
+  // attempts: 1 means the original request and no retry.
+  assert.equal(sent.config.httpOptions?.retryOptions?.attempts, 1);
+  assert.equal(sent.config.httpOptions?.timeout, AI_EXPLANATION_BUDGET_MS);
 });
 
 test("the AI deadline is its own, not the audit's", async () => {
@@ -649,6 +649,10 @@ const jsonResponse = (status: number, payload: unknown) =>
     status,
     headers: { "content-type": "application/json" },
   });
+
+/** A 200 body shaped the way generateContent returns text, so `.text` reads it. */
+const contentResponse = (text: string) =>
+  jsonResponse(200, { candidates: [{ content: { role: "model", parts: [{ text }] } }] });
 
 test("a rate limit costs one HTTP request, because the SDK's retries are off", async () => {
   /*
@@ -769,7 +773,7 @@ test("a network failure through the real client is one request", async () => {
 
 test("a good answer through the real client is one request and validated prose", async () => {
   await withStubbedFetch(
-    async () => jsonResponse(200, { id: "x", output_text: JSON.stringify(goodAnswer()) }),
+    async () => contentResponse(JSON.stringify(goodAnswer())),
     async (count) => {
       const result = await explainAudit(reportInput(), {
         apiKey: "offline-key-for-this-test",
@@ -828,7 +832,7 @@ test("the adapter makes exactly one call to the provider, textually as well", ()
    * second one.
    */
   const adapter = fs.readFileSync(new URL("./explain.ts", import.meta.url), "utf8");
-  const REQUEST = "interactions.create(";
+  const REQUEST = "models.generateContent(";
   const code = adapter.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
   assert.equal(
@@ -836,7 +840,9 @@ test("the adapter makes exactly one call to the provider, textually as well", ()
     1,
     "there is more than one place in the adapter a request could be made",
   );
-  assert.ok(!/\bfor\b[\s\S]{0,300}interactions\.create/.test(code), "a request inside a loop");
-  assert.ok(!/\bwhile\b[\s\S]{0,300}interactions\.create/.test(code), "a request inside a loop");
-  assert.ok(!/\bretry\b/i.test(code), "the adapter has retry logic of its own");
+  assert.ok(!/\bfor\b[\s\S]{0,300}models\.generateContent/.test(code), "a request inside a loop");
+  assert.ok(!/\bwhile\b[\s\S]{0,300}models\.generateContent/.test(code), "a request inside a loop");
+  // `retryOptions: { attempts: 1 }` DISABLES retries; it is not retry logic.
+  // Strip that one SDK option before asserting the adapter rolls no retry of its own.
+  assert.ok(!/\bretry\b/i.test(code.replace(/retryOptions/g, "")), "the adapter has retry logic of its own");
 });

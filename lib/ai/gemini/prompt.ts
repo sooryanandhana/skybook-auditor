@@ -14,8 +14,8 @@
  * place a competitor or a compromised plugin would put one.
  *
  * The defence is that the two never share a field. The brief goes in
- * `system_instruction`; the audit data goes in `input`; the provider keeps
- * them apart on its side. There is no marker, banner or fence in the text that
+ * `config.systemInstruction`; the audit data goes in `contents`; the provider
+ * keeps them apart on its side. There is no marker, banner or fence in the text that
  * the data could imitate, because there is nothing to imitate -- a sentence in
  * a page title cannot climb out of the parameter it was put in.
  *
@@ -31,6 +31,7 @@
  *
  * NOTHING HERE MAKES A REQUEST. This file builds an object and returns it.
  */
+import type { GenerateContentParameters } from "@google/genai";
 import type { AIReportInput } from "../contract.ts";
 import { GEMINI_MODEL } from "./config.ts";
 import { explanationSchema, type JsonSchema } from "./schema.ts";
@@ -121,20 +122,21 @@ export const SYSTEM_INSTRUCTION = [
 /**
  * A request, ready to be handed to the provider.
  *
- * The field names are the provider's own. The object was checked against the
- * SDK's parameter type for a non-streaming model interaction, and a test keeps
- * that check honest by asserting assignability at compile time.
+ * The field names are the provider's own. The object is assignable to the SDK's
+ * `generateContent` parameter type, and a test keeps that check honest by
+ * asserting assignability at compile time. The trusted brief and the untrusted
+ * audit data sit in different parameters -- `config.systemInstruction` and
+ * `contents` -- which is the whole of the boundary.
  */
 export interface GeminiExplanationRequest {
   readonly model: string;
-  /** Trusted. Written by this project, never derived from an audit. */
-  readonly system_instruction: string;
-  /** Untrusted. The audited site's data, and nothing else. */
-  readonly input: string;
-  readonly response_format: {
-    readonly type: "text";
-    readonly mime_type: "application/json";
-    readonly schema: JsonSchema;
+  /** Untrusted. The audited site's data as JSON, and nothing else. */
+  readonly contents: string;
+  readonly config: {
+    /** Trusted. Written by this project, never derived from an audit. */
+    readonly systemInstruction: string;
+    readonly responseMimeType: "application/json";
+    readonly responseJsonSchema: JsonSchema;
   };
 }
 
@@ -157,14 +159,21 @@ export interface GeminiExplanationRequest {
  * the code that makes it.
  */
 export function buildExplanationRequest(input: AIReportInput): GeminiExplanationRequest {
-  return {
+  const request = {
     model: GEMINI_MODEL,
-    system_instruction: SYSTEM_INSTRUCTION,
-    input: JSON.stringify(input),
-    response_format: {
-      type: "text",
-      mime_type: "application/json",
-      schema: explanationSchema(input),
+    contents: JSON.stringify(input),
+    config: {
+      systemInstruction: SYSTEM_INSTRUCTION,
+      responseMimeType: "application/json" as const,
+      responseJsonSchema: explanationSchema(input),
     },
   };
+
+  /*
+   * COMPILE-TIME PROOF THAT THIS IS A VALID REQUEST. `satisfies` checks the
+   * object against the SDK's own `generateContent` parameter type without
+   * widening it, so a rename on the provider's side (or a wrong field here)
+   * stops the build rather than failing in production.
+   */
+  return request satisfies GenerateContentParameters;
 }

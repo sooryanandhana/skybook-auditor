@@ -53,18 +53,24 @@ export function documentHtml(document: PdfDocument): string {
   const cover = document.cover;
 
   /*
-   * A CLIENT-READY FLOW, and one rule in it is not negotiable. Coverage — "What
-   * we checked" — comes before any finding, because a reader has to know how much
-   * of the site was looked at before a list of problems means anything, and a
-   * partial crawl presented as a whole-site audit is the single most damaging
-   * thing this document could do (7A §6, §13). The executive summary states that
-   * same scope up front for the same reason.
+   * A CLIENT-READY FLOW, and one rule in it is not negotiable. The measured
+   * coverage — "What we checked" — comes before any finding, because a reader has
+   * to know how much of the site was looked at before a list of problems means
+   * anything, and a partial crawl presented as a whole-site audit is the single
+   * most damaging thing this document could do (7A §6, §13).
    *
-   * MEASURED BEFORE EXPLAINED, throughout. The executive summary, the score, the
-   * severity split, the coverage and the findings are all measured; the AI
-   * website summary and the model's recommendations follow them, each labelled as
-   * the model's. The final assessment restates the measured grade, and the notes
-   * on the audit itself close the document on their own page.
+   * THE OVERVIEW LEADS: the executive summary and the overall score open the
+   * document, and the AI summary sits directly beneath the score so a reader
+   * meets the plain-English account of the audit before the detailed measured
+   * sections. The AI summary is clearly labelled as the model's, and it invents
+   * nothing — its overall summary, key findings and recommendations are the
+   * validated explanations, and its "what we checked" and "next steps" are
+   * derived from the measured findings.
+   *
+   * MEASURED DETAIL FOLLOWS: the severity split, the coverage, the findings, the
+   * speed check and the measured facts come after it, each measured by this tool.
+   * The final assessment restates the measured grade, and the notes on the audit
+   * itself close the document on their own page.
    *
    * Site-wide findings come before page-level ones because one broken certificate
    * outranks a missing meta description on nine pages, whatever the counts say.
@@ -92,12 +98,12 @@ export function documentHtml(document: PdfDocument): string {
     `<main>` +
     executiveSummaryHtml(document.score, document.coverage.headline) +
     scoreHtml(document.score) +
+    clientSummaryHtml(document.clientSummary, labels, aiNote) +
     summaryHtml(document.summary) +
     coverageHtml(document.coverage) +
     findingsHtml(document.siteFindings, labels) +
     findingsHtml(document.pageFindings, labels) +
     skippedHtml(document.skipped) +
-    clientSummaryHtml(document.clientSummary, labels, aiNote) +
     speedHtml(document.speed, labels) +
     finalAssessmentHtml(document.score) +
     factSectionsHtml(MEASURED_HEADING, document.measured, "measured") +

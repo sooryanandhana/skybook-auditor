@@ -44,7 +44,7 @@ export function clientSummaryHtml(summary: ClientAiSummary, labels: PdfLabels, n
   const checked =
     summary.whatWeChecked.length === 0
       ? ""
-      : `<h3 class="client-ai-subhead">${WHAT_WE_CHECKED_HEADING}</h3>` +
+      : `<p class="client-ai-subhead">${WHAT_WE_CHECKED_HEADING}</p>` +
         `<ul class="client-ai-list">` +
         summary.whatWeChecked.map((line) => html`<li>${line}</li>`).join("") +
         `</ul>`;
@@ -52,7 +52,7 @@ export function clientSummaryHtml(summary: ClientAiSummary, labels: PdfLabels, n
   const found =
     summary.keyFindings.length === 0
       ? ""
-      : `<h3 class="client-ai-subhead">${KEY_FINDINGS_HEADING}</h3>` +
+      : `<p class="client-ai-subhead">${KEY_FINDINGS_HEADING}</p>` +
         summary.keyFindings
           .map(
             (item) =>
@@ -67,7 +67,7 @@ export function clientSummaryHtml(summary: ClientAiSummary, labels: PdfLabels, n
   const improve =
     summary.recommendations.length === 0
       ? ""
-      : `<h3 class="client-ai-subhead">${RECOMMENDED_HEADING}</h3>` +
+      : `<p class="client-ai-subhead">${RECOMMENDED_HEADING}</p>` +
         summary.recommendations
           .map(
             (item) =>
@@ -81,7 +81,7 @@ export function clientSummaryHtml(summary: ClientAiSummary, labels: PdfLabels, n
   const steps =
     summary.nextSteps.length === 0
       ? ""
-      : `<h3 class="client-ai-subhead">${NEXT_STEPS_HEADING}</h3>` +
+      : `<p class="client-ai-subhead">${NEXT_STEPS_HEADING}</p>` +
         `<ol class="client-ai-steps">` +
         summary.nextSteps.map((step) => html`<li>${step}</li>`).join("") +
         `</ol>`;

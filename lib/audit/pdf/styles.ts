@@ -787,7 +787,7 @@ export const STYLESHEET: string =
    * moves the heading down with the content it introduces rather than leaving
    * it stranded as the last line on a page.
    */
-  h1, h2, h3, .finding-title, .ai-label, .caveat-label, .remediation-label, .finding-eyebrow {
+  h1, h2, h3, .finding-title, .ai-label, .caveat-label, .remediation-label, .finding-eyebrow, .client-ai-subhead {
     break-after: avoid;
   }
 

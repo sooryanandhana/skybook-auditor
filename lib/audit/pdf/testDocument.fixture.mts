@@ -99,6 +99,39 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
         coverageNote: null,
       },
     },
+    clientSummary: {
+      overallSummary: `This site has two issues worth attention. ${SENTINEL}`,
+      whatWeChecked: [
+        "Security — certificates, DNS records and the protections that keep the site and its visitors safe.",
+        "Search visibility — the titles, descriptions and page structure that decide how the site appears in search results.",
+      ],
+      keyFindings: [
+        {
+          finding: "No SPF record",
+          explanation: "Mail servers cannot tell which senders are allowed to use this domain.",
+          impact: "Messages from the business are more likely to be treated as spam.",
+        },
+        {
+          finding: "No meta description",
+          explanation: "Search engines write their own summary when a page supplies none.",
+          impact: "The snippet a customer reads in results is chosen for you.",
+        },
+      ],
+      recommendations: [
+        {
+          action: "Publish an SPF record for this domain.",
+          reason: "Messages from the business are more likely to be treated as spam.",
+        },
+        {
+          action: "Write a description of about 155 characters.",
+          reason: "The snippet a customer reads in results is chosen for you.",
+        },
+      ],
+      nextSteps: [
+        "Resolve the high-priority issue: No SPF record.",
+        "Resolve the medium-priority issue: No meta description.",
+      ],
+    },
     siteFindings: {
       heading: "Site-wide issues",
       intro: "These apply to the whole website.",

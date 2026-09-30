@@ -8,13 +8,12 @@
  */
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { summaryHtml, aiSummaryHtml } from "./summary.ts";
+import { summaryHtml } from "./summary.ts";
 import { coverageHtml } from "./coverage.ts";
 import { factTable } from "./facts.ts";
-import { SENTINEL, testDocument } from "./testDocument.fixture.mts";
-import type { PdfLabels, PdfSummary } from "../pdfDocument.ts";
+import { testDocument } from "./testDocument.fixture.mts";
+import type { PdfSummary } from "../pdfDocument.ts";
 
-const LABELS: PdfLabels = testDocument().labels;
 const summary = (over: Partial<PdfSummary> = {}) => ({ ...testDocument().summary, ...over });
 
 // ---------------------------------------------------------------------------
@@ -76,76 +75,12 @@ test("an audit with findings shows no clean-state sentence", () => {
   assert.ok(!summaryHtml(summary({ stateSentence: "" })).includes('class="lead"'));
 });
 
-// ---------------------------------------------------------------------------
-// The AI website summary, its own section now, distinct from the measured split
-// ---------------------------------------------------------------------------
-
-test("the AI section is labelled as AI-written and carries the provenance sentence", () => {
-  // 7A §9. This is the one place the document states the boundary outright.
-  const out = aiSummaryHtml(summary(), LABELS);
-
-  assert.ok(out.includes("AI summary"));
-  assert.ok(out.includes(SENTINEL), "the model's own words");
-  assert.ok(out.includes("were measured by this tool"));
-});
-
-test("the provenance sentence is the document's, not one written here", () => {
-  const out = aiSummaryHtml(summary(), { ...LABELS, aiProvenance: "PROVENANCESENTENCE" });
-
-  assert.ok(out.includes("PROVENANCESENTENCE"));
-  assert.ok(!out.includes("measured by this tool"));
-});
-
-test("with no commentary there is no AI section, and the split stands alone", () => {
-  // 7A §19. No apology, no empty panel, no note about the model: a report
-  // without commentary is a complete report. The measured split lives in its
-  // own section and is unaffected.
-  assert.equal(aiSummaryHtml(summary({ ai: null }), LABELS), "", "no section at all");
-
+test("with no commentary the measured split still stands alone", () => {
+  // The AI narrative is now its own section (see clientSummary.test.mts). The
+  // measured split must never carry an AI panel, whatever the AI produced.
   const split = summaryHtml(summary({ ai: null }));
-  assert.ok(!split.includes("class=\"ai\""), "and no AI panel leaks into the split");
+  assert.ok(!split.includes('class="ai"'), "no AI panel leaks into the split");
   assert.ok(split.includes("High"), "the measured split is still there");
-});
-
-test("a partial answer says how much was left out", () => {
-  const out = aiSummaryHtml(
-    summary({
-      ai: {
-        executiveSummary: "Two issues.",
-        partial: true,
-        rejectedCount: 3,
-        rejectedNote: "3 explanations were not usable and were left out.",
-        coverageNote: null,
-      },
-    }),
-    LABELS,
-  );
-
-  assert.ok(out.includes("3 explanations were not usable and were left out."));
-  assert.ok(out.includes("were measured by this tool"), "beside the provenance, not instead of it");
-});
-
-test("nothing was dropped, so nothing is said about dropping", () => {
-  const out = aiSummaryHtml(summary(), LABELS);
-  assert.ok(!out.includes("not usable"));
-});
-
-test("the model's words are rendered as text", () => {
-  const out = aiSummaryHtml(
-    summary({
-      ai: {
-        executiveSummary: '<script>steal()</script>',
-        partial: false,
-        rejectedCount: 0,
-        rejectedNote: null,
-        coverageNote: null,
-      },
-    }),
-    LABELS,
-  );
-
-  assert.ok(!out.includes("<script>"));
-  assert.ok(out.includes("&lt;script&gt;"));
 });
 
 // ---------------------------------------------------------------------------

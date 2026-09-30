@@ -2362,6 +2362,81 @@
   white-space: pre-wrap;
 }
 
+/* The five client-facing sub-sections inside the AI panel. Each is introduced
+   by a small brand-tinted label so the panel reads as one narrative in parts,
+   consistent with the panel heading above. */
+.aiSubheading {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--brand);
+  margin: 0.95rem 0 0.35rem;
+}
+
+.aiList {
+  margin: 0;
+  padding-left: 1.15rem;
+  max-width: 68ch;
+}
+
+.aiList li {
+  font-size: 0.9rem;
+  color: #16202e;
+  line-height: 1.5;
+  margin-bottom: 0.3rem;
+}
+
+/* "What we found" and "How to improve": one small block per item, so a title
+   sits above its explanation rather than running into it. */
+.aiDetailList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  max-width: 68ch;
+}
+
+.aiDetailItem {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.aiDetailTitle {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #16202e;
+  line-height: 1.4;
+}
+
+.aiDetailText {
+  font-size: 0.88rem;
+  color: #384456;
+  line-height: 1.5;
+}
+
+.aiDetailImpact {
+  font-size: 0.84rem;
+  color: #5b6779;
+  line-height: 1.5;
+}
+
+.aiSteps {
+  margin: 0;
+  padding-left: 1.3rem;
+  max-width: 68ch;
+}
+
+.aiSteps li {
+  font-size: 0.9rem;
+  color: #16202e;
+  line-height: 1.5;
+  margin-bottom: 0.3rem;
+}
+
 /* The sentence that keeps the two kinds of content apart in the reader's head.
    It is not decoration: it is the claim that the numbers above came from
    somewhere else. */

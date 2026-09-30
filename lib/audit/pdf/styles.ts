@@ -461,6 +461,33 @@ export const STYLESHEET: string =
   }
   .ai-note { font-size: 8pt; color: ${INK_FAINT}; max-width: 68ch; margin: 6pt 0 0; }
 
+  /* ---------- the client-facing AI summary ----------
+     One panel, five plain-English parts. It is allowed to break across pages,
+     because it can be long, while each key-finding and recommendation card is
+     kept whole. Same blue AI ground and provenance label as the commentary, so
+     a reader still reads it as written-from-measured. */
+  .client-ai {
+    background: ${AI_BG};
+    border: .75pt solid ${PANEL_BORDER};
+    border-left: 3pt solid ${SKYBOOK_MID};
+    border-radius: 7pt;
+    padding: 9pt 11pt;
+    margin: 0 0 10pt;
+  }
+  .client-ai-summary { font-size: 9.5pt; line-height: 1.5; color: ${INK}; max-width: 68ch; margin: 4pt 0 0; }
+  .client-ai-subhead {
+    font-size: 8.5pt; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+    color: ${SKYBOOK_DEEP}; margin: 10pt 0 4pt;
+  }
+  .client-ai-list { margin: 0 0 4pt; padding-left: 14pt; max-width: 68ch; }
+  .client-ai-list li { font-size: 9pt; line-height: 1.45; color: ${INK_SOFT}; margin: 0 0 2pt; }
+  .client-ai-item { break-inside: avoid; margin: 0 0 6pt; max-width: 68ch; }
+  .client-ai-item-title { font-size: 9.5pt; font-weight: 600; color: ${INK}; margin: 0 0 1pt; }
+  .client-ai-item-text { font-size: 9pt; line-height: 1.45; color: ${INK_SOFT}; margin: 0 0 1pt; }
+  .client-ai-item-impact { font-size: 8.5pt; line-height: 1.45; color: ${INK_FAINT}; margin: 0; }
+  .client-ai-steps { margin: 0 0 4pt; padding-left: 14pt; max-width: 68ch; }
+  .client-ai-steps li { font-size: 9pt; line-height: 1.45; color: ${INK}; margin: 0 0 2pt; }
+
   /* ---------- a finding ---------- */
 
   .finding {

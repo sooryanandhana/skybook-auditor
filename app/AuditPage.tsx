@@ -67,6 +67,7 @@ import {
 } from "@/lib/report/measurementsView";
 import type { SiteCrawlSummary } from "@/lib/collector/crawlSite";
 import type { AIExplanation } from "@/lib/ai/explanation";
+import { buildClientAiSummary } from "@/lib/report/clientSummary";
 import type {
   AuditData,
   AuditExplanationResponse,
@@ -1064,6 +1065,8 @@ function Results({
         answer={explanation}
         running={explanationRunning}
         findingCount={dashboardFindings.length}
+        findings={dashboardFindings}
+        explanations={explanations}
       />
 
       <FindingsSection
@@ -1686,11 +1689,17 @@ function AiSummaryPanel({
   answer,
   running,
   findingCount,
+  findings,
+  explanations,
 }: {
   answer: AuditExplanationResponse | null;
   running: boolean;
   /** How many findings are on the page, so any without commentary are accounted for. */
   findingCount: number;
+  /** The graded findings, so the derived sections can be built from measured data. */
+  findings: Finding[];
+  /** Validated AI commentary by rule id (a finding's `id`). Empty when there is none. */
+  explanations: Map<string, AIExplanation>;
 }) {
   if (running || answer === null) {
     return (
@@ -1701,46 +1710,102 @@ function AiSummaryPanel({
     );
   }
 
-  if (!answer.ok || answer.state === "not-explained") {
-    /*
-     * A sentence the server wrote, shown as it was written.
-     *
-     * It never contains a provider's own words, a status line or an exception,
-     * and it never says anything about the website. The audit above is
-     * complete either way, and the wording is chosen so a reader cannot
-     * mistake a missing paragraph for a missing check.
-     */
-    const message = answer.ok ? answer.message : answer.error;
+  const explained = answer.ok && answer.state === "explained";
+  /*
+   * A sentence the server wrote, shown when the model produced nothing usable.
+   * It never contains a provider's own words, a status line or an exception, and
+   * it never says anything about the website.
+   */
+  const unavailable = !answer.ok ? answer.error : answer.state === "not-explained" ? answer.message : null;
 
-    return (
-      <section className={styles.aiPanel}>
-        <p className={styles.aiPanelHeading}>AI summary</p>
-        <p className={styles.aiUnavailable}>{message}</p>
-        <p className={styles.aiUnavailableNote}>
-          Every finding below was measured and graded by this tool, and is
-          unaffected.
-        </p>
-      </section>
-    );
-  }
-
-  if (answer.executiveSummary.trim() === "") return null;
+  /*
+   * ONE PROJECTION, FIVE SECTIONS. The overall summary, key findings and
+   * recommendations are the model's validated prose; "What we checked" and
+   * "Next steps" are derived from the measured findings, so they stand even when
+   * the model failed. buildClientAiSummary invents nothing.
+   */
+  const summary = buildClientAiSummary(
+    findings,
+    explanations,
+    explained ? answer.executiveSummary : null,
+  );
 
   const coverage = coverageNote(findingCount, MAX_EXPLAINED_FINDINGS);
 
   return (
     <section className={styles.aiPanel}>
       <p className={styles.aiPanelHeading}>{AI_SUMMARY_HEADING}</p>
-      <p className={styles.aiSummary}>{answer.executiveSummary}</p>
+
+      {summary.overallSummary !== null && (
+        <>
+          <p className={styles.aiSubheading}>Overall summary</p>
+          <p className={styles.aiSummary}>{summary.overallSummary}</p>
+        </>
+      )}
+
+      {unavailable !== null && (
+        <p className={styles.aiUnavailable}>{unavailable}</p>
+      )}
+
+      {summary.whatWeChecked.length > 0 && (
+        <>
+          <p className={styles.aiSubheading}>What we checked</p>
+          <ul className={styles.aiList}>
+            {summary.whatWeChecked.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {summary.keyFindings.length > 0 && (
+        <>
+          <p className={styles.aiSubheading}>What we found</p>
+          <ul className={styles.aiDetailList}>
+            {summary.keyFindings.map((item) => (
+              <li key={item.finding} className={styles.aiDetailItem}>
+                <span className={styles.aiDetailTitle}>{item.finding}</span>
+                <span className={styles.aiDetailText}>{item.explanation}</span>
+                <span className={styles.aiDetailImpact}>{item.impact}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {summary.recommendations.length > 0 && (
+        <>
+          <p className={styles.aiSubheading}>How to improve</p>
+          <ul className={styles.aiDetailList}>
+            {summary.recommendations.map((item) => (
+              <li key={item.action} className={styles.aiDetailItem}>
+                <span className={styles.aiDetailTitle}>{item.action}</span>
+                <span className={styles.aiDetailText}>{item.reason}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {summary.nextSteps.length > 0 && (
+        <>
+          <p className={styles.aiSubheading}>Next steps</p>
+          <ol className={styles.aiSteps}>
+            {summary.nextSteps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+        </>
+      )}
+
       <p className={styles.aiPanelNote}>
-        {AI_PROVENANCE}
-        {answer.partial && ` ${rejectedNote(answer.rejectedCount) ?? ""}`}
+        {explained ? AI_PROVENANCE : "Every finding below was measured and graded by this tool, and is unaffected."}
+        {explained && answer.partial && ` ${rejectedNote(answer.rejectedCount) ?? ""}`}
         {/*
-          Said for the same reason the dropped-entry sentence is: a reader who
-          counts the findings and counts the explanations should find the
+          Said so a reader who counts findings and explanations finds the
           difference already accounted for.
         */}
-        {coverage !== null && ` ${coverage}`}
+        {explained && coverage !== null && ` ${coverage}`}
       </p>
     </section>
   );

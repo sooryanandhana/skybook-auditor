@@ -31,9 +31,9 @@ import { findingsHtml } from "./findings.ts";
 import { skippedHtml } from "./skipped.ts";
 import { speedHtml } from "./speed.ts";
 import { scoreHtml } from "./score.ts";
-import { summaryHtml, aiSummaryHtml } from "./summary.ts";
+import { summaryHtml } from "./summary.ts";
 import { executiveSummaryHtml } from "./executiveSummary.ts";
-import { recommendationsHtml } from "./recommendations.ts";
+import { clientSummaryHtml } from "./clientSummary.ts";
 import { finalAssessmentHtml } from "./finalAssessment.ts";
 import { STYLESHEET } from "./styles.ts";
 
@@ -71,6 +71,19 @@ export function documentHtml(document: PdfDocument): string {
    */
   const labels = document.labels;
 
+  /*
+   * The provenance sentence and the honesty notes that ride with the AI section,
+   * built from the same validated answer the client summary was. Empty when no
+   * model answer was produced, in which case the section draws nothing anyway.
+   */
+  const ai = document.summary.ai;
+  const aiNote =
+    ai === null
+      ? ""
+      : [labels.aiProvenance, ai.rejectedNote, ai.coverageNote]
+          .filter((sentence) => sentence !== null && sentence !== "")
+          .join(" ");
+
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
     html`<title>${documentTitle(document)}</title>` +
@@ -84,8 +97,7 @@ export function documentHtml(document: PdfDocument): string {
     findingsHtml(document.siteFindings, labels) +
     findingsHtml(document.pageFindings, labels) +
     skippedHtml(document.skipped) +
-    aiSummaryHtml(document.summary, labels) +
-    recommendationsHtml(document.siteFindings, document.pageFindings, labels) +
+    clientSummaryHtml(document.clientSummary, labels, aiNote) +
     speedHtml(document.speed, labels) +
     finalAssessmentHtml(document.score) +
     factSectionsHtml(MEASURED_HEADING, document.measured, "measured") +

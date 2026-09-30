@@ -86,6 +86,14 @@ import {
   coverageNote,
   rejectedNote,
 } from "../report/commentaryView.ts";
+import { buildClientAiSummary, type ClientAiSummary } from "../report/clientSummary.ts";
+/*
+ * RE-EXPORTED SO THE RENDERER STAYS SEALED. The PDF section files may import only
+ * from within their own folder and from this projection (a test in shell.test
+ * enforces it), so the client-summary section reads its type from here rather
+ * than reaching into the report layer directly.
+ */
+export type { ClientAiSummary, ClientKeyFinding, ClientRecommendation } from "../report/clientSummary.ts";
 import {
   SKIPPED_HEADING,
   SKIPPED_INTRO,
@@ -426,6 +434,12 @@ export interface PdfDocument {
   /** The deterministic grade, read from `result.score`. Never recomputed here. */
   readonly score: PdfScore;
   readonly summary: PdfSummary;
+  /**
+   * The client-facing AI summary, in five plain-English sections. Built from the
+   * same validated answer and the same measured findings the sections below use;
+   * no second model call is made for the PDF (7A §9).
+   */
+  readonly clientSummary: ClientAiSummary;
   readonly siteFindings: PdfFindingSection;
   readonly pageFindings: PdfFindingSection;
   /** Null when nothing was skipped, which is when the panel is not shown. */
@@ -747,6 +761,10 @@ function certificateFailureDocument(
       ai: null,
     },
 
+    // No commentary was produced for a certificate failure, so the client
+    // summary carries only its derived sections.
+    clientSummary: buildClientAiSummary(findings, commentary, null),
+
     siteFindings: toSection(site, "site", SITE_FINDINGS_HEADING, SITE_FINDINGS_INTRO, commentary),
     // Empty, and the renderer draws nothing for it. No page was read, so
     // there is no page-level finding and none may be implied.
@@ -1010,6 +1028,14 @@ export function buildPdfDocument(
         stateSentence: findingsHeadline(findings, state),
         ai: aiSummary,
       },
+
+      /*
+       * THE SAME VALIDATED ANSWER, RESHAPED FOR A CLIENT. Built from the findings
+       * and the commentary already in hand -- no second model call. Overall
+       * summary, key findings and recommendations are the model's validated prose;
+       * "what we checked" and "next steps" are derived from the measured findings.
+       */
+      clientSummary: buildClientAiSummary(findings, commentary, aiSummary?.executiveSummary ?? null),
 
       siteFindings: toSection(
         site,

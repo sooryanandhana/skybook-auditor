@@ -64,6 +64,25 @@ test("script, style, noscript and template contents are not visible text", () =>
   }
 });
 
+test("a long noscript banner does not push a JS shell over the coverage gate", () => {
+  // The realistic false positive: a client-rendered shell whose only body text is
+  // a lengthy "please enable JavaScript" notice — well over the threshold in raw
+  // characters. If noscript were counted, the shell would read as a real page and
+  // its body rules would fire on content that no visitor sees. Measured through
+  // runSeoChecks, the production path, so the stripping is proven where it counts.
+  const banner =
+    "This application requires JavaScript to run. Please enable JavaScript in your " +
+    "browser settings and reload the page to continue using our online shop.";
+  assert.ok(banner.length > MIN_BODY_TEXT_FOR_SEO, "the banner alone would clear the gate if counted");
+
+  const shell = `<html><head><title>App</title></head><body>` +
+    `<div id="root"></div><noscript>${banner}</noscript><script src="/b.js"></script></body>`;
+
+  const seo = runSeoChecks(shell, "https://app.test/");
+  assert.equal(seo.bodyTextLength, 0, "the noscript notice is not visible body text");
+  assert.equal(fromRenderedBody(seo).measured, false, "so body rules stay skipped, not passed");
+});
+
 test("measuring does not disturb the rest of the parse", () => {
   // It works on a clone. If it did not, removing script tags would change the
   // facts every other check reads afterwards.

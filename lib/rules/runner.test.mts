@@ -921,6 +921,89 @@ test("a thrown non-Error value is handled without crashing", () => {
 // The narrowed fact type is isolated too
 // ---------------------------------------------------------------------------
 
+// ===========================================================================
+// THE `ran` LEDGER
+//
+// A rule that passes quietly leaves no finding, so from the outside "ran and
+// passed" is indistinguishable from "never ran". `ran` is the one record that
+// tells them apart, and the scorer depends on it to refuse a silent pass to a
+// rule that never executed. So: exactly the rules that reached a verdict are in
+// it, and nothing that was skipped or threw ever is.
+// ===========================================================================
+
+/** A rule that measures fine and passes quietly — no fire, no pass report. */
+function quietPass(id: string) {
+  return defineRule({
+    id,
+    scope: "page",
+    remediation: "Fix the underlying issue.",
+    title: `Rule ${id}`,
+    category: "seo",
+    severity: "medium",
+    select: (data) => measured(data.seo),
+    evaluate: () => passes,
+  });
+}
+
+test("a rule that fired is recorded as having run", () => {
+  const { ran } = runRules(facts(), [firingRule("fired.rule", "high")]);
+  assert.deepEqual(ran, ["fired.rule"]);
+});
+
+test("a rule that passed quietly is recorded as having run", () => {
+  // The case the ledger exists for: a quiet pass produces no finding, so only
+  // `ran` proves it executed.
+  const { findings, ran } = runRules(facts(), [quietPass("quiet.rule")]);
+  assert.deepEqual(findings, [], "a quiet pass says nothing");
+  assert.deepEqual(ran, ["quiet.rule"], "but it did run");
+});
+
+test("a rule that passed with a message is recorded as having run", () => {
+  const good = facts({
+    seo: { ...facts().seo, metaDescriptionText: "A description.", metaDescriptionLength: 14 },
+  });
+  const { ran } = runRules(good, [noMetaDescription]);
+  assert.deepEqual(ran, ["missing-meta-description"]);
+});
+
+test("a rule that was skipped for want of a measurement is NOT recorded as run", () => {
+  const rule = greedyRule("greedy.technical", (data) => fromTechnical(data.technical));
+  const { skipped, ran } = runRules(facts({ technical: null }), [rule]);
+  assert.equal(skipped.length, 1, "it was skipped");
+  assert.deepEqual(ran, [], "a skipped rule never ran");
+});
+
+test("a rule that threw is NOT recorded as run", () => {
+  const { result } = withSilencedWarnings(() =>
+    runRules(facts(), [throwingSelector("boom.select"), throwingEvaluator("boom.evaluate")]),
+  );
+  assert.deepEqual(result.ran, [], "a rule that crashed did not run to a verdict");
+});
+
+test("ran holds exactly the rules that reached a verdict, skips and throws excluded", () => {
+  const { result } = withSilencedWarnings(() =>
+    runRules(facts({ technical: null }), [
+      firingRule("b.fired", "high"),
+      quietPass("a.quiet"),
+      greedyRule("c.skipped", (data) => fromTechnical(data.technical)),
+      throwingSelector("d.threw"),
+    ]),
+  );
+  assert.deepEqual(
+    result.ran,
+    ["a.quiet", "b.fired"],
+    "only the fired and the quiet-passed rule ran; the skipped and thrown are out",
+  );
+});
+
+test("ran is sorted and independent of the order the rules were listed", () => {
+  const rules = [firingRule("z", "high"), quietPass("a"), firingRule("m", "medium")];
+  const forward = runRules(facts(), rules).ran;
+  const reversed = runRules(facts(), [...rules].reverse()).ran;
+  assert.deepEqual(forward, ["a", "m", "z"], "sorted for determinism");
+  assert.deepEqual(forward, reversed, "and unaffected by rule order");
+});
+
 test("isolation works for rules on the narrower performance fact type", () => {
   // The speed rules read PerformanceFacts, not AuditFacts. One runner, one
   // guard, both fact types.

@@ -1,6 +1,6 @@
 // The .ts extensions are required so Node can run the unit tests directly;
 // Next.js resolves them the same way.
-import { AUDIT_RULES, PAGE_RULES, SPEED_RULES } from "../rules/all.ts";
+import { AUDIT_RULES, PAGE_RULES, SITE_RULES, SPEED_RULES } from "../rules/all.ts";
 import type { AuditResult, Category, Finding, Severity, SkippedCheck } from "../types.ts";
 
 /**
@@ -34,8 +34,17 @@ import type { AuditResult, Category, Finding, Severity, SkippedCheck } from "../
  *     skipped on some other page — the ledger is what stops a mostly-passing
  *     rule reading as entirely skipped. (Where no ledger is present, the reading
  *     falls back to the conservative one: absent-and-skipped ⇒ skipped.)
- *   - A site or speed rule runs once: a "good" finding, or nothing at all when
- *     it passed quietly, means passed; only the skipped list means skipped.
+ *   - A site rule runs once. When the ledger records site rules (a real audit
+ *     always does), the ledger is authoritative: present ⇒ it ran and, not having
+ *     fired, passed; ABSENT ⇒ it never ran and reads as skipped, NEVER as a
+ *     silent pass. A rule the scorer expects but that no part of the pipeline
+ *     accounted for can no longer slip through as a pass. Only where the ledger
+ *     does not cover site rules (a legacy result, or one with no ledger at all)
+ *     does the older reading apply: a "good" finding or a quiet run means passed,
+ *     the skipped list means skipped.
+ *   - A speed rule runs once via a separate request and carries no ledger, so it
+ *     keeps that same reading: a "good" finding or a quiet run means passed, the
+ *     skipped list means skipped.
  *
  * TWO WEIGHTINGS, DELIBERATELY SEPARATE.
  *   - WITHIN a category, rules are weighted by the stakes they carry: a passing
@@ -169,9 +178,20 @@ interface Ledger {
   firedIds: ReadonlySet<string>;
   passedIds: ReadonlySet<string>;
   skippedIds: ReadonlySet<string>;
-  /** Page-rule ids known to have run on at least one page, or null when absent. */
-  ranPageIds: ReadonlySet<string> | null;
+  /**
+   * Every rule id known to have RUN — page rules that ran on at least one page,
+   * and the site rules that ran once — or null when no ledger was recorded.
+   */
+  ranIds: ReadonlySet<string> | null;
   pageRuleIds: ReadonlySet<string>;
+  siteRuleIds: ReadonlySet<string>;
+  /**
+   * True when the ledger demonstrably covers site rules — at least one site rule
+   * appears in it. Only then is a site rule's ABSENCE from the ledger meaningful
+   * ("it did not run"); a page-only or legacy ledger never mentioned site rules,
+   * so their absence there says nothing and the older reading must stand.
+   */
+  hasSiteLedger: boolean;
 }
 
 function classify(rule: { id: string; severity: "critical" | "high" | "medium"; category: Category }, l: Ledger): Classified {
@@ -179,14 +199,26 @@ function classify(rule: { id: string; severity: "critical" | "high" | "medium"; 
 
   if (l.firedIds.has(rule.id)) return { ...base, kind: "fired" };
 
-  if (l.pageRuleIds.has(rule.id) && l.ranPageIds !== null) {
+  if (l.pageRuleIds.has(rule.id) && l.ranIds !== null) {
     // A crawl page rule, with the ledger to read it precisely. Running on any
     // page without firing is a pass there — even if it was skipped elsewhere.
-    if (l.ranPageIds.has(rule.id)) return { ...base, kind: "passed" };
+    if (l.ranIds.has(rule.id)) return { ...base, kind: "passed" };
     return { ...base, kind: "skipped" };
   }
 
-  // A site or speed rule (runs once), or a page rule with no ledger to consult.
+  if (l.siteRuleIds.has(rule.id) && l.hasSiteLedger) {
+    // A site rule, with a ledger that covers site rules — so the ledger decides.
+    // It ran once: present ⇒ it ran and, not having fired above, passed. ABSENT
+    // ⇒ it never ran, which reads as SKIPPED and never as a silent pass. This is
+    // the defensive guarantee: a site rule the scorer expects but that nothing in
+    // the pipeline actually accounted for cannot slip through as a pass.
+    if (l.ranIds!.has(rule.id)) return { ...base, kind: "passed" };
+    return { ...base, kind: "skipped" };
+  }
+
+  // A site rule with no site-covering ledger (legacy/absent), a speed rule (its
+  // request carries no ledger), or a page rule with no ledger to consult. Read
+  // from what the rule actually said.
   if (l.passedIds.has(rule.id)) return { ...base, kind: "passed" };
   if (l.skippedIds.has(rule.id)) return { ...base, kind: "skipped" };
   // Neither a finding nor a skipped check: it ran and passed with nothing to say.
@@ -211,12 +243,17 @@ export function scoreAudit(result: AuditResult): ScoreResult {
     findings.some((f) => f.category === "speed") ||
     skipped.some((s) => speedRuleIds.has(s.ruleId));
 
+  const ranIds = result.site.ranRules ? new Set(result.site.ranRules) : null;
   const ledger: Ledger = {
     firedIds: new Set(findings.filter((f: Finding) => f.severity !== "good").map((f) => f.id)),
     passedIds: new Set(findings.filter((f: Finding) => f.severity === "good").map((f) => f.id)),
     skippedIds: new Set(skipped.map((s: SkippedCheck) => s.ruleId)),
-    ranPageIds: result.site.ranRules ? new Set(result.site.ranRules) : null,
+    ranIds,
     pageRuleIds: new Set(PAGE_RULES.map((r) => r.id)),
+    siteRuleIds: new Set(SITE_RULES.map((r) => r.id)),
+    // A page-only or legacy ledger never lists a site rule; the presence of even
+    // one proves this ledger accounts for site rules, so their absence is real.
+    hasSiteLedger: ranIds !== null && SITE_RULES.some((r) => ranIds.has(r.id)),
   };
 
   const expected = [...AUDIT_RULES, ...(speedAssessed ? SPEED_RULES : [])];

@@ -9,6 +9,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import { assertUniqueRuleIds, runRules } from "./runner.ts";
+import { fromRenderedBody, fromServedHead, MIN_BODY_TEXT_FOR_SEO } from "./selectors.ts";
 import { ALL_RULES, AUDIT_RULES } from "./all.ts";
 import { SEO_RULES } from "./seo.ts";
 import { TECHNICAL_RULES } from "./technical.ts";
@@ -458,6 +459,55 @@ test("a tag that IS served is judged however thin the body is", () => {
   // The one tag the shell does not carry is the one we cannot judge.
   assert.ok(!fired.includes("seo.canonical.missing"));
   assert.ok(skippedIds.includes("seo.canonical.missing"));
+});
+
+// ===========================================================================
+// THE COVERAGE THRESHOLD, PINNED EXACTLY
+//
+// The integration tests above use a 0-character shell and real ≥50 bodies. The
+// boundary itself — 49 declines, 50 grades — is where an off-by-one would either
+// silently stop grading genuinely thin real pages, or start firing on shells
+// again. These lock MIN_BODY_TEXT_FOR_SEO at the selector level so a change to it
+// is a deliberate, test-visible act.
+// ===========================================================================
+
+test("fromRenderedBody grades a body exactly at the threshold and declines one below it", () => {
+  const at = fromRenderedBody(seoWith({ bodyTextLength: MIN_BODY_TEXT_FOR_SEO }));
+  assert.equal(at.measured, true, "exactly at the threshold is judged");
+
+  const below = fromRenderedBody(seoWith({ bodyTextLength: MIN_BODY_TEXT_FOR_SEO - 1 }));
+  assert.equal(below.measured, false, "one character below is declined, not passed");
+  assert.ok(!below.measured && /does not run JavaScript/.test(below.reason), "and says why");
+  // The number it declined on is stated, so the gap is legible, not hidden.
+  assert.ok(!below.measured && below.reason.includes(String(MIN_BODY_TEXT_FOR_SEO - 1)));
+});
+
+test("fromRenderedBody frames the decline as a scan limitation, never a site fault", () => {
+  const below = fromRenderedBody(seoWith({ bodyTextLength: 0 }));
+  assert.ok(!below.measured);
+  if (below.measured) return;
+  assert.match(below.reason, /too little to judge/);
+  // It must not read as a verdict on the website's quality.
+  assert.doesNotMatch(below.reason, /broken|poor|bad|invalid|error/i);
+});
+
+test("fromServedHead: a present tag is judged however thin the body, even at zero", () => {
+  // Presence is certain. A tag we can see did not stop existing because a script
+  // might have added others — so the rule runs and passes on its own evidence.
+  const present = fromServedHead(seoWith({ bodyTextLength: 0 }), () => true);
+  assert.equal(present.measured, true, "a served tag is always judged");
+});
+
+test("fromServedHead: an absent tag is judged at the threshold but declined below it", () => {
+  const isPresent = () => false;
+
+  const at = fromServedHead(seoWith({ bodyTextLength: MIN_BODY_TEXT_FOR_SEO }), isPresent);
+  assert.equal(at.measured, true, "on a real-bodied page an absent tag is genuinely absent");
+
+  const below = fromServedHead(seoWith({ bodyTextLength: MIN_BODY_TEXT_FOR_SEO - 1 }), isPresent);
+  assert.equal(below.measured, false, "on a JS-rendered shell its absence is not evidence it is missing");
+  assert.ok(!below.measured && /does not run JavaScript/.test(below.reason));
+  assert.ok(!below.measured && /not evidence/.test(below.reason), "it states this is a coverage limit");
 });
 
 // ===========================================================================

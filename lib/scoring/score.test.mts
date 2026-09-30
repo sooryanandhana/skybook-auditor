@@ -12,7 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { AUDIT_RULES, PAGE_RULES, SPEED_RULES } from "../rules/all.ts";
+import { AUDIT_RULES, PAGE_RULES, SITE_RULES, SPEED_RULES } from "../rules/all.ts";
 import { CATEGORY_WEIGHT, MIN_RULES_TO_GRADE, scoreAudit, type ScoreResult } from "./score.ts";
 import type { AuditResult, Category, Finding, Severity, SkippedCheck } from "../types.ts";
 
@@ -213,6 +213,70 @@ test("without a ledger, the conservative reading still holds", () => {
   const score = scoreAudit(siteResult({ skipped: [{ ruleId: MEDIUM, reason: "x" }] }));
   assert.equal(score.grade, "A");
   assert.ok(score.skippedCount >= 1);
+});
+
+// ---------------------------------------------------------------------------
+// The site-rule ledger: an expected rule missing from a COMPLETE ledger must
+// never become a silent pass. This is the defensive guarantee — a rule the
+// pipeline forgot to account for reads as skipped, not as "the site was fine".
+// ---------------------------------------------------------------------------
+
+const ALL_SITE_IDS = SITE_RULES.map((r) => r.id);
+// A ledger that mentions site rules is, by definition, one that covers them.
+const COMPLETE_LEDGER = [...ALL_PAGE_IDS, ...ALL_SITE_IDS];
+
+test("with a complete ledger, a site rule missing from it reads as skipped, never a silent pass", () => {
+  assert.ok(ALL_SITE_IDS.length > 0, "the catalogue has site rules to reason about");
+  const omitted = ALL_SITE_IDS[0];
+
+  const complete = scoreAudit(siteResult({ ran: COMPLETE_LEDGER }));
+  const missingOne = scoreAudit(siteResult({ ran: COMPLETE_LEDGER.filter((id) => id !== omitted) }));
+
+  // The omitted rule fired nothing, is on no skipped list, and is absent from a
+  // ledger that DOES cover site rules — so it could only ever have been counted
+  // as a pass by the old fallback. It must instead read as skipped: one fewer
+  // pass, one more skip, less coverage. The grade is unmoved (a skip never is).
+  assert.equal(missingOne.passedCount, complete.passedCount - 1, "not counted as a pass");
+  assert.equal(missingOne.skippedCount, complete.skippedCount + 1, "counted as a skip");
+  assert.ok(missingOne.coverage < complete.coverage, "coverage reflects the gap");
+});
+
+test("a page-only (legacy) ledger does not turn site rules into skips", () => {
+  // ALL_PAGE_IDS names no site rule, so this ledger does not cover site rules;
+  // their absence from it is not evidence they did not run. They pass quietly,
+  // exactly as before the site half of the ledger existed — no regression.
+  const legacy = scoreAudit(siteResult({ ran: ALL_PAGE_IDS }));
+  const noLedger = scoreAudit(siteResult({}));
+
+  assert.equal(legacy.grade, "A");
+  assert.equal(legacy.passRate, 100);
+  assert.equal(legacy.passedCount, noLedger.passedCount, "site rules still pass");
+  assert.equal(legacy.skippedCount, noLedger.skippedCount, "and none became a skip");
+});
+
+test("with a complete ledger, a site rule present but quiet still passes", () => {
+  // The other half of the guarantee: a rule that DID run and said nothing must
+  // still read as a pass, so the hardening does not turn quiet passes into gaps.
+  const complete = scoreAudit(siteResult({ ran: COMPLETE_LEDGER }));
+  assert.equal(complete.grade, "A");
+  assert.equal(complete.passRate, 100);
+  assert.equal(complete.skippedCount, 0, "nothing was skipped");
+});
+
+test("under a complete ledger a fired site rule still reads as fired", () => {
+  const siteCritical = SITE_RULES.find((r) => r.severity === "critical");
+  assert.ok(siteCritical, "the catalogue has a critical site rule");
+  const score = scoreAudit(
+    siteResult({
+      findings: [finding(siteCritical!.id, siteCritical!.severity, siteCritical!.category)],
+      ran: COMPLETE_LEDGER,
+    }),
+  );
+  // A fired rule ran, so it is in the ledger; the fired reading must win over
+  // the ran-and-passed one.
+  assert.ok(score.firedCount >= 1, "the fired rule is counted as fired");
+  assert.equal(score.grade, "F", "a fired critical still forces F");
+  assert.ok(score.gatedBy.includes(siteCritical!.id), "and it gates the grade");
 });
 
 // ---------------------------------------------------------------------------

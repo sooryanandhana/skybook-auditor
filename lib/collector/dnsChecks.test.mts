@@ -258,6 +258,33 @@ test("asks the resolver only once for the same name and record type", () => {
   assert.equal(cache.queryCount(), 1);
 });
 
+test("joins a TXT record split into several chunks before SPF is read", async () => {
+  // DNS splits a string longer than 255 bytes into several chunks on the wire,
+  // and Node hands them back as an array. They MUST be re-joined: a long SPF
+  // record arriving as ["v=spf1 include:… ", "…~all"] would otherwise be read as
+  // two fragments, and the whole audit downstream expects one record beginning
+  // v=spf1. A single-chunk fixture would pass while a real long record broke.
+  const part1 = "v=spf1 include:_spf.a.example include:_spf.b.example ";
+  const part2 = "include:_spf.c.example include:_spf.d.example ~all";
+  const whole = part1 + part2;
+
+  const resolver = {
+    resolve4: () => Promise.resolve([]),
+    resolve6: () => Promise.resolve([]),
+    resolveMx: () => Promise.resolve([]),
+    resolveNs: () => Promise.resolve([]),
+    resolveTxt: () => Promise.resolve([[part1, part2]]),
+  } as unknown as Resolver;
+
+  const joined = await createLookupCache(resolver).resolveTxt("example.com");
+  assert.deepEqual(joined, [whole], "the chunks are re-joined with no separator");
+
+  // And the reader sees the whole record, so it is recognised and kept intact.
+  const spf = extractSpf(txtResult(joined));
+  assert.equal(spf.status, "found");
+  assert.equal(spf.record, whole);
+});
+
 test("keeps different names and record types apart", () => {
   const { asked, resolver } = countingResolver();
   const cache = createLookupCache(resolver);

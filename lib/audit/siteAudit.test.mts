@@ -259,6 +259,24 @@ test("a crawled page is measured and graded by the existing engine", async () =>
   assert.ok(result.data.findings.some((f) => f.id.startsWith("seo.")));
 });
 
+test("the ran-ledger covers BOTH page and site rules that ran", async () => {
+  // The scorer reads `ranRules` to tell a rule that ran and passed quietly from
+  // one that never ran. On a healthy site every site rule runs, so every site
+  // rule id must be in the ledger — otherwise the scorer, treating an absent
+  // expected rule as skipped, would wrongly mark a passing site rule as a gap.
+  const result = await audit(crawlResult());
+  const ledger = new Set(result.site.ranRules ?? []);
+
+  for (const rule of SITE_RULES) {
+    assert.ok(ledger.has(rule.id), `site rule ${rule.id} ran and must be in the ledger`);
+  }
+  // And it still carries the page rules that ran, so both halves are present.
+  assert.ok(
+    PAGE_RULES.some((rule) => ledger.has(rule.id)),
+    "page rules that ran are in the ledger too",
+  );
+});
+
 test("severity on a site finding is the rule's own, never recomputed", async () => {
   const pages = Array.from({ length: 5 }, (_, i) => page(`https://example.com/p${i}`));
   const result = await audit(crawlResult({ pages }), "https://example.com/p0");
@@ -1384,4 +1402,30 @@ test("the site rules are graded on the site's own facts, with no page among them
   const untrusted = result.site.findings.find((finding) => finding.id === "security.ssl.untrusted");
   assert.ok(untrusted, "a site rule ran and fired on the certificate that was read");
   assert.equal(untrusted.scope, "site");
+});
+
+test("a certificate-failure audit records the site rules it ran in its ledger", async () => {
+  // No page is read, so the ledger here is the site rules alone — but it must
+  // still be recorded, or the scorer cannot tell a site rule that ran and passed
+  // from one that never ran, and would silently pass the latter.
+  const result = await runSiteAudit({
+    requestedUrl: SITE,
+    crawlImpl: crawlReturning(certificateRefused()).impl,
+    siteChecksImpl: healthySite,
+  });
+  assert.ok(isCertificateFailureAudit(result));
+  if (!isCertificateFailureAudit(result)) return;
+
+  const ledger = new Set(result.site.ranRules ?? []);
+  const skippedIds = new Set(result.site.skippedChecks.map((s) => s.ruleId));
+  assert.ok(ledger.size > 0, "the site rules that ran are recorded even with no page");
+  for (const rule of SITE_RULES) {
+    // Each site rule either ran (in the ledger) or was skipped for want of a
+    // measurement — never silently absent, which the scorer would read as a pass.
+    assert.ok(ledger.has(rule.id) || skippedIds.has(rule.id), `site rule ${rule.id} is accounted for`);
+  }
+  // No page was read, so no page rule ran; none may appear in the ledger.
+  for (const rule of PAGE_RULES) {
+    assert.ok(!ledger.has(rule.id), `page rule ${rule.id} did not run and must be absent`);
+  }
 });

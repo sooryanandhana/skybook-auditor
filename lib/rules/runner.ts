@@ -98,6 +98,18 @@ export interface RuleRunResult {
    * something a report should say. A silent gap reads as a pass.
    */
   skipped: Array<{ ruleId: string; reason: string }>;
+  /**
+   * The ids of every rule that ACTUALLY RAN — evaluated to a verdict, whether it
+   * fired, passed with a message, or passed quietly with nothing to say. A rule
+   * that was skipped (its measurement was unavailable) or that threw is NOT here.
+   *
+   * WHY IT IS RETURNED. A rule that passes quietly produces no finding, so from
+   * the outside "ran and passed" is indistinguishable from "never ran". The
+   * scorer must tell those apart — a rule that never ran must never be scored as
+   * a pass — so the one place that knows a rule ran records it here. Sorted for
+   * determinism.
+   */
+  ran: string[];
 }
 
 /** Worst first, so a reader meets the important things at the top. */
@@ -118,6 +130,7 @@ const SEVERITY_ORDER: Record<Severity, number> = {
 export function runRules<F>(data: F, rules: readonly CompiledRule<F>[]): RuleRunResult {
   const findings: Finding[] = [];
   const skipped: Array<{ ruleId: string; reason: string }> = [];
+  const ran: string[] = [];
 
   for (const rule of rules) {
     /*
@@ -158,6 +171,10 @@ export function runRules<F>(data: F, rules: readonly CompiledRule<F>[]): RuleRun
       continue;
     }
 
+    // A rule that reached a verdict RAN, whether it fired, passed with a message,
+    // or passed quietly. Only a skipped (or thrown) rule did not.
+    if (outcome.kind !== "skipped") ran.push(outcome.ruleId);
+
     if (outcome.kind === "finding" || outcome.kind === "pass") {
       findings.push(outcome.finding);
     } else if (outcome.kind === "skipped") {
@@ -170,7 +187,7 @@ export function runRules<F>(data: F, rules: readonly CompiledRule<F>[]): RuleRun
     return bySeverity !== 0 ? bySeverity : a.id.localeCompare(b.id);
   });
 
-  return { findings, skipped };
+  return { findings, skipped, ran: [...ran].sort() };
 }
 
 /**

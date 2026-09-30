@@ -233,6 +233,80 @@ test("falls back to the subject name when a certificate has no SANs", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The REAL date format the platform hands us
+//
+// The certificate() helper above formats dates with toUTCString()
+// ("Mon, 01 Jun 2026 …"), but Node's getPeerCertificate returns OpenSSL's own
+// format instead — "Jun  1 00:00:00 2026 GMT", with the day space-padded to two
+// columns. A fixture in the wrong format could pass while production silently
+// read NaN for every expiry. These pin the shape production actually receives.
+// ---------------------------------------------------------------------------
+
+test("parses OpenSSL's own valid_to format, padded single-digit day and all", () => {
+  const result = describeCertificate(
+    {
+      // Exactly as Node reports it: month, TWO-space-padded day, time, year, GMT.
+      valid_from: "May  2 00:00:00 2026 GMT",
+      valid_to: "Jun  1 00:00:00 2026 GMT",
+      subjectaltname: "DNS:example.com",
+    } as never,
+    "example.com",
+    "TLSv1.3",
+    new Date("2026-05-22T00:00:00Z"),
+  );
+
+  assert.equal(result.validTo, "2026-06-01T00:00:00.000Z", "the real format must parse, not read NaN");
+  assert.equal(result.validFrom, "2026-05-02T00:00:00.000Z");
+  assert.equal(result.daysUntilExpiry, 10, "and the day count is computed from it");
+});
+
+test("parses a two-digit day in OpenSSL format too", () => {
+  const result = describeCertificate(
+    { valid_to: "Jan 15 12:30:00 2027 GMT", subjectaltname: "DNS:example.com" } as never,
+    "example.com",
+    null,
+    new Date("2027-01-05T12:30:00Z"),
+  );
+  assert.equal(result.validTo, "2027-01-15T12:30:00.000Z");
+  assert.equal(result.daysUntilExpiry, 10);
+});
+
+test("expiry is whole days floored: still-valid part-days read as 0, never negative", () => {
+  // 12 hours left is not expired; flooring must give 0 ("expires today"), and it
+  // must not round up to 1 or down past zero. This boundary decides whether an
+  // about-to-expire certificate reads as a warning or as already broken.
+  const now = new Date("2026-06-01T00:00:00Z");
+  const soon = describeCertificate(
+    { valid_to: "Jun  1 12:00:00 2026 GMT", subjectaltname: "DNS:example.com" } as never,
+    "example.com",
+    null,
+    now,
+  );
+  assert.equal(soon.daysUntilExpiry, 0, "12 hours left is today, not expired");
+});
+
+test("a certificate expired hours ago floors to a negative day, not 0", () => {
+  // Just-expired must not read as "expires today" (0). Flooring a small negative
+  // fraction gives -1, which is the honest "already expired" signal.
+  const now = new Date("2026-06-01T12:00:00Z");
+  const justExpired = describeCertificate(
+    { valid_to: "Jun  1 00:00:00 2026 GMT", subjectaltname: "DNS:example.com" } as never,
+    "example.com",
+    null,
+    now,
+  );
+  assert.equal(justExpired.daysUntilExpiry, -1, "expired hours ago is negative, never 0");
+});
+
+test("wildcard matching normalises case and a trailing dot on the SAN", () => {
+  // A SAN can arrive upper-cased or fully qualified with a trailing dot; neither
+  // must defeat the wildcard match, or a valid certificate reads as a mismatch.
+  assert.equal(matchHostname("www.example.com", ["*.EXAMPLE.COM"]), "wildcard");
+  assert.equal(matchHostname("www.example.com", ["*.example.com."]), "wildcard");
+  assert.equal(matchHostname("WWW.Example.Com", ["*.example.com"]), "wildcard");
+});
+
+// ---------------------------------------------------------------------------
 // An unreadable certificate is not a mismatched one
 //
 // Saying "the certificate does not cover this address" about one we never read

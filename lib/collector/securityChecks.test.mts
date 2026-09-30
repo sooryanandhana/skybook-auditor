@@ -1112,6 +1112,23 @@ test("an unreadable expiry attribute concludes nothing", () => {
   }
 });
 
+test("a malformed Max-Age does not shadow a valid Expires — the deletion is still seen", () => {
+  // RFC 6265 §5.2.2: a Max-Age that does not read as an integer is ignored, and
+  // Expires is consulted instead. A parser that treated any Max-Age as
+  // authoritative would miss this logout and grade a cleared cookie as if stored.
+  assert.equal(
+    parseCookies(["old=; Max-Age=soon; Expires=Thu, 01 Jan 1970 00:00:00 GMT"], NOW).cookies[0].expired,
+    true,
+    "the unreadable Max-Age is ignored and the past Expires expires the cookie",
+  );
+  // And the mirror: a malformed Max-Age with a FUTURE Expires keeps the cookie.
+  assert.equal(
+    parseCookies(["sid=abc; Max-Age=; Expires=Tue, 01 Jan 2030 00:00:00 GMT"], NOW).cookies[0].expired,
+    false,
+    "the unreadable Max-Age is ignored and the future Expires keeps it",
+  );
+});
+
 test("a deletion and a real cookie in one response are told apart", () => {
   const { cookies } = parseCookies(["old=; Max-Age=0", "sid=abc; Path=/"], NOW);
 

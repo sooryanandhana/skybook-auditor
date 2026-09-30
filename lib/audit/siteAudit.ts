@@ -375,7 +375,7 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<AuditResu
   const siteGraded =
     pageAudits.length > 0
       ? runRules(pageAudits[0].data, SITE_RULES)
-      : { findings: [], skipped: [] };
+      : { findings: [], skipped: [], ran: [] };
 
   const site = aggregateFindings(pageResults, {
     // Page rules only: the denominator is a count of PAGES, and a site rule
@@ -412,7 +412,12 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<AuditResu
     site: {
       findings: site.findings,
       skippedChecks: site.skipped,
-      ranRules: site.ran,
+      // The authoritative ran-ledger the scorer reads: the page rules that ran
+      // across the crawl (from the aggregator) UNION the site rules that ran once
+      // above. Without the site half, a site rule that ran and passed quietly
+      // would be absent from the ledger and, once the scorer treats an absent
+      // expected rule as skipped rather than passed, be miscounted.
+      ranRules: mergeRanLedger(site.ran, siteGraded.ran),
       evaluatedPages: site.evaluatedPages,
     },
     pages: pageAudits,
@@ -488,8 +493,11 @@ async function certificateFailureAudit(
     site: {
       findings: site.findings,
       skippedChecks: site.skipped,
-      // No page was read, so no page-scoped rule ran on anything.
-      ranRules: site.ran,
+      // No page was read, so no page-scoped rule ran (`site.ran` is empty here);
+      // the ledger is the SITE rules that ran once against the certificate, DNS
+      // and robots facts. It must still be recorded, so the scorer can tell a
+      // site rule that ran and passed from one that never ran at all.
+      ranRules: mergeRanLedger(site.ran, graded.ran),
       evaluatedPages: 0,
     },
     crawl: crawl.summary,
@@ -499,6 +507,17 @@ async function certificateFailureAudit(
 /** Every page-scoped check, listed as one that did not run, with the reason. */
 function pageChecksNotRun(): SkippedCheck[] {
   return PAGE_RULES.map((rule) => ({ ruleId: rule.id, reason: PAGE_CHECKS_NOT_RUN }));
+}
+
+/**
+ * The one ran-ledger the scorer reads: page rules that ran across the crawl,
+ * plus the site rules that ran once. De-duplicated and sorted so the result is
+ * deterministic, and each list already holds only ids of rules that reached a
+ * verdict — a skipped or thrown rule is in neither, so nothing here can mark one
+ * as having run.
+ */
+function mergeRanLedger(pageRan: readonly string[], siteRan: readonly string[]): string[] {
+  return [...new Set([...pageRan, ...siteRan])].sort();
 }
 
 /**

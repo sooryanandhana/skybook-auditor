@@ -106,7 +106,7 @@ export async function loginRoute(
   const { email, password } = submitted(body);
   const caller = callerAddress(request, trustsProxy(options));
 
-  const attempt = signIn(email, password, caller, options, now);
+  const attempt = await signIn(email, password, caller, options, now);
 
   /*
    * THE SLOW-DOWN IS SPENT HERE, once, whatever the outcome. `signIn` decided
@@ -128,7 +128,7 @@ export async function loginRoute(
     return { ok: false, status, error: attempt.message };
   }
 
-  const cookie = signSession(attempt.email, options, now);
+  const cookie = signSession(attempt.user.id, attempt.user.role, options, now);
   if (cookie === null) {
     /*
      * The password was right and this server still cannot issue a session. Not
@@ -137,7 +137,7 @@ export async function loginRoute(
     return { ok: false, status: 503, error: CANNOT_SIGN_IN };
   }
 
-  return { ok: true, email: attempt.email, cookie, maxAgeSeconds: sessionCookieOptions().maxAge };
+  return { ok: true, email: attempt.user.email, cookie, maxAgeSeconds: sessionCookieOptions().maxAge };
 }
 
 /**

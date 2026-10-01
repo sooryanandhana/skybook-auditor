@@ -45,6 +45,35 @@ const SECRET = "test-secret-that-is-long-enough-to-be-accepted-0123456789";
 const FROM = "reports@skybook.example";
 const RECIPIENT = "ana@harbourdental.example";
 const NOW = 1_757_000_000_000;
+const USER_ID = "11111111-1111-1111-1111-111111111111";
+
+/** The ACTIVE account whose cookie a signed-in request carries. */
+const ACTIVE_USER = {
+  id: USER_ID,
+  email: "sam@skybook.example",
+  password_hash: "scrypt:aa:bb",
+  role: "SALES",
+  status: "ACTIVE",
+  created_at: new Date(NOW),
+  updated_at: new Date(NOW),
+  approved_by: null,
+  approved_at: null,
+  last_login_at: null,
+  must_change_password: false,
+};
+
+/** A fake database returning the account for its own id, for the guard. */
+function dbReturning(user: Record<string, unknown>) {
+  return {
+    async query(sql: string, params: unknown[] = []) {
+      if (/^\s*SELECT/i.test(sql)) {
+        const id = String(params[0] ?? "");
+        return { rows: id === user.id ? [user] : [] };
+      }
+      return { rows: [] };
+    },
+  };
+}
 
 /** One real audit, built once and shared, exactly as the export tests do. */
 const REAL_AUDIT = await runRealAudit({
@@ -119,7 +148,7 @@ const request = (body: unknown, signedIn = true, caller = "1.2.3.4") =>
       "content-type": "application/json",
       "x-forwarded-for": caller,
       ...(signedIn
-        ? { cookie: `${SESSION_COOKIE}=${signSession("sam@skybook.example", { secret: SECRET }, NOW)}` }
+        ? { cookie: `${SESSION_COOKIE}=${signSession(USER_ID, "SALES", { secret: SECRET }, NOW)}` }
         : {}),
     },
     body: typeof body === "string" ? body : JSON.stringify(body),
@@ -129,6 +158,7 @@ const deps = (extra: Record<string, unknown> = {}) => ({
   secret: SECRET,
   from: FROM,
   now: NOW,
+  db: dbReturning(ACTIVE_USER),
   ...extra,
 });
 

@@ -4,9 +4,9 @@
  * THE INTERESTING TESTS ARE THE FORGERIES. Proving that a cookie this module
  * signed is a cookie this module believes takes one line and says almost
  * nothing. What is worth writing is every way a browser might try to promote
- * itself: editing the address inside, keeping the signature and swapping the
- * payload, keeping the payload and swapping the signature, replaying an old
- * one, and presenting a cookie signed with a different key.
+ * itself: editing the id inside, swapping the role, keeping the signature and
+ * swapping the payload, keeping the payload and swapping the signature,
+ * replaying an old one, and presenting a cookie signed with a different key.
  */
 import { strict as assert } from "node:assert";
 import test from "node:test";
@@ -28,42 +28,45 @@ const OTHER = "another-secret-that-is-long-enough-to-be-accepted-98765432";
 
 const options = { secret: SECRET };
 const NOW = 1_757_000_000_000;
+const USER_ID = "11111111-1111-1111-1111-111111111111";
 
 /* ---------------------------------------------------------------------------
    The happy path, briefly
    --------------------------------------------------------------------------- */
 
-test("a cookie this server signed carries the address back", () => {
-  const cookie = signSession("ana@skybook.example", options, NOW);
+test("a cookie this server signed carries the id and role back", () => {
+  const cookie = signSession(USER_ID, "SALES", options, NOW);
 
   assert.ok(cookie !== null);
   assert.deepEqual(readSession(cookie, options, NOW), {
-    email: "ana@skybook.example",
+    userId: USER_ID,
+    role: "SALES",
     expiresAt: NOW + SESSION_MAX_AGE_MS,
   });
 });
 
-test("it carries an address rather than a yes", () => {
+test("it carries who and what, not just a yes", () => {
   /*
-   * The property that makes roles and a later move to Google possible without
-   * a rewrite. A cookie meaning only "signed in" would be the same size and
-   * would name nobody.
+   * A cookie meaning only "signed in" would be the same size and would name
+   * nobody. The id is who to resolve on each request; the role is a signed
+   * claim the interface can read without a database.
    */
-  const session = readSession(signSession("sam@skybook.example", options, NOW), options, NOW);
+  const session = readSession(signSession(USER_ID, "MANAGEMENT", options, NOW), options, NOW);
 
-  assert.equal(session?.email, "sam@skybook.example");
+  assert.equal(session?.userId, USER_ID);
+  assert.equal(session?.role, "MANAGEMENT");
 });
 
 /* ---------------------------------------------------------------------------
    Forgeries
    --------------------------------------------------------------------------- */
 
-test("an edited address is refused", () => {
-  const cookie = signSession("ana@skybook.example", options, NOW) ?? "";
+test("an edited id is refused", () => {
+  const cookie = signSession(USER_ID, "SALES", options, NOW) ?? "";
   const [payload, signature] = cookie.split(".");
 
   const forged = Buffer.from(
-    JSON.stringify({ email: "attacker@example.com", expiresAt: NOW + SESSION_MAX_AGE_MS }),
+    JSON.stringify({ userId: "00000000-0000-0000-0000-000000000000", role: "SALES", expiresAt: NOW + SESSION_MAX_AGE_MS }),
     "utf8",
   ).toString("base64url");
 
@@ -71,20 +74,32 @@ test("an edited address is refused", () => {
   assert.notEqual(payload, forged, "the test is only meaningful if the payload really differs");
 });
 
-test("an extended expiry is refused", () => {
-  // The most tempting edit of all: keep the address, move the clock.
+test("an edited role is refused — a SALES cookie cannot promote itself to MANAGEMENT", () => {
+  // The whole reason the role is inside the signature: editing it must break it.
+  const signature = (signSession(USER_ID, "SALES", options, NOW) ?? "").split(".")[1];
+
   const forged = Buffer.from(
-    JSON.stringify({ email: "ana@skybook.example", expiresAt: NOW + 10 * SESSION_MAX_AGE_MS }),
+    JSON.stringify({ userId: USER_ID, role: "MANAGEMENT", expiresAt: NOW + SESSION_MAX_AGE_MS }),
     "utf8",
   ).toString("base64url");
-  const signature = (signSession("ana@skybook.example", options, NOW) ?? "").split(".")[1];
+
+  assert.equal(readSession(`${forged}.${signature}`, options, NOW), null);
+});
+
+test("an extended expiry is refused", () => {
+  // The most tempting edit of all: keep the id, move the clock.
+  const forged = Buffer.from(
+    JSON.stringify({ userId: USER_ID, role: "SALES", expiresAt: NOW + 10 * SESSION_MAX_AGE_MS }),
+    "utf8",
+  ).toString("base64url");
+  const signature = (signSession(USER_ID, "SALES", options, NOW) ?? "").split(".")[1];
 
   assert.equal(readSession(`${forged}.${signature}`, options, NOW), null);
 });
 
 test("a cookie signed with another key is refused", () => {
   // What a stolen copy of this source buys somebody without the secret.
-  const elsewhere = signSession("ana@skybook.example", { secret: OTHER }, NOW);
+  const elsewhere = signSession(USER_ID, "SALES", { secret: OTHER }, NOW);
 
   assert.equal(readSession(elsewhere, options, NOW), null);
 });
@@ -104,17 +119,20 @@ test("nonsense in the cookie is refused rather than parsed", () => {
   }
 });
 
-test("a correctly signed cookie carrying the wrong shape is refused", async () => {
+test("a correctly signed cookie carrying the wrong shape is refused", () => {
   /*
    * The case that matters if this server ever signs something else with the
-   * same key: a valid signature is not a valid session.
+   * same key: a valid signature is not a valid session. An unknown role is
+   * included, because a role outside the set must not be read as a sign-in.
    */
   for (const payload of [
-    { email: "", expiresAt: NOW + 1000 },
-    { email: "ana@skybook.example" },
-    { email: "ana@skybook.example", expiresAt: "soon" },
-    { email: 42, expiresAt: NOW + 1000 },
-    { expiresAt: NOW + 1000 },
+    { userId: "", role: "SALES", expiresAt: NOW + 1000 },
+    { userId: USER_ID, role: "SALES" },
+    { userId: USER_ID, role: "SALES", expiresAt: "soon" },
+    { userId: USER_ID, role: "ADMIN", expiresAt: NOW + 1000 },
+    { userId: USER_ID, expiresAt: NOW + 1000 },
+    { userId: 42, role: "SALES", expiresAt: NOW + 1000 },
+    { role: "SALES", expiresAt: NOW + 1000 },
   ]) {
     const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
     const signature = createHmac("sha256", SECRET).update(encoded).digest("base64url");
@@ -133,7 +151,7 @@ test("no cookie at all is refused", () => {
    --------------------------------------------------------------------------- */
 
 test("a session stops working the moment it expires", () => {
-  const cookie = signSession("ana@skybook.example", options, NOW);
+  const cookie = signSession(USER_ID, "SALES", options, NOW);
 
   assert.ok(readSession(cookie, options, NOW + SESSION_MAX_AGE_MS - 1) !== null, "valid just before");
   assert.equal(readSession(cookie, options, NOW + SESSION_MAX_AGE_MS), null, "and not on the moment");
@@ -141,9 +159,9 @@ test("a session stops working the moment it expires", () => {
 });
 
 test("a session lasts a working day rather than a month", () => {
-  // Expiry is the only revocation this application has: there is no session
-  // store to delete from. A long one would be a laptop left in a client's
-  // reception signed in for a fortnight.
+  // Expiry is the cheapest revocation this application has. A manager switching
+  // an account off is immediate (the guard re-reads status); expiry closes the
+  // window on a laptop left signed in with nobody to switch it off.
   assert.equal(SESSION_MAX_AGE_MS, 8 * 60 * 60 * 1000);
 });
 
@@ -158,8 +176,8 @@ test("a server with no secret signs nothing and believes nothing", () => {
    */
   for (const missing of [{ secret: "" }, { secret: "   " }]) {
     assert.equal(sessionAvailability(missing).configured, false);
-    assert.equal(signSession("ana@skybook.example", missing, NOW), null);
-    assert.equal(readSession(signSession("ana@skybook.example", options, NOW), missing, NOW), null);
+    assert.equal(signSession(USER_ID, "SALES", missing, NOW), null);
+    assert.equal(readSession(signSession(USER_ID, "SALES", options, NOW), missing, NOW), null);
   }
 });
 
@@ -169,7 +187,7 @@ test("a short secret is treated as no secret", () => {
   const availability = sessionAvailability({ secret: "changeme" });
 
   assert.equal(availability.configured, false);
-  assert.equal(signSession("ana@skybook.example", { secret: "changeme" }, NOW), null);
+  assert.equal(signSession(USER_ID, "SALES", { secret: "changeme" }, NOW), null);
 });
 
 test("the sentence about a missing secret names the variable and never a value", () => {
@@ -226,14 +244,14 @@ test("the cookie has one name, and nothing builds a second one", () => {
 
 test("the session is signed rather than encrypted, and says so", () => {
   /*
-   * Worth pinning because the difference decides what may be put inside. The
-   * address is readable by anyone holding the cookie, which is fine; a secret
+   * Worth pinning because the difference decides what may be put inside. The id
+   * and role are readable by anyone holding the cookie, which is fine; a secret
    * placed in there later would not be.
    */
-  const cookie = signSession("ana@skybook.example", options, NOW) ?? "";
+  const cookie = signSession(USER_ID, "SALES", options, NOW) ?? "";
   const payload = Buffer.from(cookie.split(".")[0], "base64url").toString("utf8");
 
-  assert.match(payload, /ana@skybook\.example/, "readable, as a signed payload is");
+  assert.match(payload, new RegExp(USER_ID), "readable, as a signed payload is");
 });
 
 test("nothing here reaches a store, a provider or the audit engine", () => {
@@ -244,7 +262,9 @@ test("nothing here reaches a store, a provider or the audit engine", () => {
    * forbade "gemini" and failed on a comment saying this module is shaped like
    * the Gemini client. A design parallel described in prose is not a
    * dependency, and a test that cannot tell them apart is a test that punishes
-   * explaining yourself.
+   * explaining yourself. The session reads only a TYPE from the user repository
+   * (erased at runtime) and no database code; the pg driver is proven confined
+   * to lib/db by the walk in lib/db/dependencies.test.mts.
    */
   for (const forbidden of [
     "fetch(",
@@ -257,6 +277,7 @@ test("nothing here reaches a store, a provider or the audit engine", () => {
     "../audit/",
     "../collector/",
     "../rules/",
+    "../db/",
   ]) {
     assert.ok(!source.includes(forbidden), `the session module must not reach ${forbidden}`);
   }

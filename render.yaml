@@ -18,8 +18,19 @@ services:
     numInstances: 1
     # A public 200 route, so the health check never trips the auth guard.
     healthCheckPath: /login
+    # No preDeployCommand: it is a paid-plan feature, and this service stays on
+    # the free plan. The migration runs instead as the first thing the container
+    # does on startup (see the Dockerfile CMD): it brings the schema up to date
+    # before the server starts, and a failed migration exits the container non-
+    # zero so the previous version keeps serving. Migrations are idempotent, so
+    # the re-run on every restart (including waking from free-plan sleep) is safe.
     envVars:
       # --- secrets: set these in the Render dashboard ---
+      # The user-accounts database. Create a Render PostgreSQL instance and paste
+      # its Internal Connection String here, or wire it automatically with a
+      # `databases:` block plus `fromDatabase`. The migration step needs it too.
+      - key: DATABASE_URL
+        sync: false
       - key: SESSION_SECRET
         sync: false
       - key: SKYBOOK_EMAIL

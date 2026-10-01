@@ -15,12 +15,17 @@
  * person it belongs to typed it -- and the property worth having is that a
  * browser cannot promote itself by editing a value.
  *
- * IT CARRIES AN ADDRESS RATHER THAN A YES. A cookie saying "signed in" would
- * be the same size and would tell a later version of this application nothing
- * about who is asking. Roles and a move to Google Workspace both need a person
- * to point at, and this is the cheapest possible moment to start carrying one.
+ * IT CARRIES WHO AND WHAT, RATHER THAN A YES. The payload is the user's id and
+ * their role, not merely "signed in": the id is who to look up in the database
+ * on each request, and the role is a signed claim the interface can read without
+ * one. Neither is a secret — the id is an opaque handle and the role is not
+ * sensitive — and both are protected from editing by the signature, which is the
+ * property that matters. The database remains the source of truth: the guard
+ * re-reads the account every request, so a role or a status changed there takes
+ * effect at once, whatever an older cookie still claims.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
+import type { Role } from "../users/userRepository.ts";
 
 /** The cookie's name. One place, because the route and the proxy both need it. */
 export const SESSION_COOKIE = "skybook_session";
@@ -111,7 +116,10 @@ export function sessionAvailability(options: SessionOptions = {}): SessionAvaila
 
 /** What a signed cookie says once it has been believed. */
 export interface Session {
-  readonly email: string;
+  /** Who is signed in — the id to resolve the account by on each request. */
+  readonly userId: string;
+  /** Their role at the moment the session was issued. A signed claim. */
+  readonly role: Role;
   /** When it stops being valid, as milliseconds since the epoch. */
   readonly expiresAt: number;
 }
@@ -129,14 +137,15 @@ const sign = (payload: string, secret: string) =>
  * signs in -- not that everybody does.
  */
 export function signSession(
-  email: string,
+  userId: string,
+  role: Role,
   options: SessionOptions = {},
   now: number = Date.now(),
 ): string | null {
   const secret = resolveSecret(options);
   if (!sessionAvailability(options).configured) return null;
 
-  const payload = encode(JSON.stringify({ email, expiresAt: now + SESSION_MAX_AGE_MS }));
+  const payload = encode(JSON.stringify({ userId, role, expiresAt: now + SESSION_MAX_AGE_MS }));
   return `${payload}.${sign(payload, secret)}`;
 }
 
@@ -190,11 +199,15 @@ export function readSession(
   }
 
   if (typeof claimed !== "object" || claimed === null) return null;
-  const { email, expiresAt } = claimed as { email?: unknown; expiresAt?: unknown };
+  const { userId, role, expiresAt } = claimed as { userId?: unknown; role?: unknown; expiresAt?: unknown };
 
-  if (typeof email !== "string" || email === "") return null;
+  if (typeof userId !== "string" || userId === "") return null;
+  // A valid signature is not a valid session: the role must be one this
+  // application issues, or a payload signed for some other purpose with the same
+  // key would be read as a sign-in.
+  if (role !== "MANAGEMENT" && role !== "SALES") return null;
   if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return null;
   if (expiresAt <= now) return null;
 
-  return { email, expiresAt };
+  return { userId, role, expiresAt };
 }

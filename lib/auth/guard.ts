@@ -18,7 +18,18 @@
  * is not signed in, which is a courtesy to a person using a browser. This is
  * the security boundary, and it runs even when nothing rendered.
  */
-import { SESSION_COOKIE, readSession, type Session, type SessionOptions } from "./session.ts";
+import { SESSION_COOKIE, readSession, type SessionOptions } from "./session.ts";
+import { findById, type Db, type Role, type User } from "../users/userRepository.ts";
+
+/** What the guard needs: the signing secret, and the database to resolve by. */
+export interface GuardOptions extends SessionOptions {
+  /**
+   * The database to resolve the signed-in account from. Injected by tests so
+   * they can drive the guard with a fake and no live PostgreSQL; omitted in
+   * production, where the shared pool is used.
+   */
+  readonly db?: Db;
+}
 
 /**
  * What an unauthorised caller is told.
@@ -60,17 +71,58 @@ export function sessionCookie(request: Request): string | null {
 }
 
 /**
- * The session behind a request, or null.
+ * The ACTIVE account behind a request, or null.
  *
- * Null is the whole answer. A caller that wants to know WHY has asked a
- * question this function will not answer, for the reason above.
+ * TWO CHECKS, IN ORDER. First the cookie must be a session this server signed
+ * and has not expired — that is cheap and needs no database. Only then is the
+ * account it names resolved, and it is let through ONLY while its status is
+ * ACTIVE. Reading the status every request is what makes deactivation immediate:
+ * a manager switching an account off ends its access on the account's very next
+ * call, whatever an older cookie still carries.
+ *
+ * NULL IS THE WHOLE ANSWER, for every failure alike — no cookie, a forged or
+ * expired one, no account, a non-ACTIVE account, or a database that could not be
+ * reached. A caller that wants to know WHICH has asked a question this will not
+ * answer, because telling them apart tells somebody probing which guess was
+ * closer. A database that is down therefore fails closed, like everything else.
  */
-export function requireSession(
+export async function requireSession(
   request: Request,
-  options: SessionOptions = {},
+  options: GuardOptions = {},
   now: number = Date.now(),
-): Session | null {
-  return readSession(sessionCookie(request), options, now);
+): Promise<User | null> {
+  const session = readSession(sessionCookie(request), options, now);
+  if (session === null) return null;
+
+  let user: User | null;
+  try {
+    user = await findById(session.userId, options.db);
+  } catch {
+    return null;
+  }
+
+  if (user === null || user.status !== "ACTIVE") return null;
+  return user;
+}
+
+/**
+ * The ACTIVE account behind a request WHEN it holds the required role, or null.
+ *
+ * Built on `requireSession`, so every refusal above is a refusal here too, and
+ * the role is read from the account in the database rather than from the cookie
+ * — a role changed by a manager takes effect at once, and a cookie cannot claim
+ * a role its account does not currently hold. Management-only routes call this;
+ * the ordinary routes call `requireSession`.
+ */
+export async function requireRole(
+  request: Request,
+  role: Role,
+  options: GuardOptions = {},
+  now: number = Date.now(),
+): Promise<User | null> {
+  const user = await requireSession(request, options, now);
+  if (user === null || user.role !== role) return null;
+  return user;
 }
 
 /** The body and status a route returns when nobody is signed in. */

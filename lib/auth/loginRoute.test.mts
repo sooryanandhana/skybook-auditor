@@ -17,12 +17,48 @@ const HASH = hashPassword(PASSWORD);
 const SECRET = "test-secret-that-is-long-enough-to-be-accepted-0123456789";
 const NOW = 1_757_000_000_000;
 
+/** The ACTIVE account the salesperson signs in with, as a database row. */
+const ACTIVE_USER = {
+  id: "11111111-1111-1111-1111-111111111111",
+  email: "ana@skybook.example",
+  password_hash: HASH,
+  role: "SALES",
+  status: "ACTIVE",
+  created_at: new Date(NOW),
+  updated_at: new Date(NOW),
+  approved_by: null,
+  approved_at: null,
+  last_login_at: null,
+  must_change_password: false,
+};
+
+/** A fake database returning the account for its own address, case-insensitively. */
+function dbReturning(user: Record<string, unknown>) {
+  return {
+    async query(sql: string, params: unknown[] = []) {
+      if (/^\s*SELECT/i.test(sql)) {
+        const wanted = String(params[0] ?? "").toLowerCase();
+        return { rows: wanted === String(user.email).toLowerCase() ? [user] : [] };
+      }
+      return { rows: [] };
+    },
+  };
+}
+
+/** A database that cannot be reached, for the server-fault path. */
+const brokenDb = {
+  async query(): Promise<{ rows: unknown[] }> {
+    throw new Error("database unavailable");
+  },
+};
+
 /**
- * The shared options. `sleep` is instant so the account slow-down is exercised
- * without a test ever waiting; `trustProxy` defaults off, exactly as production
- * does, so a test that wants the per-caller limit asks for it explicitly.
+ * The shared options. `db` holds the ACTIVE account; `sleep` is instant so the
+ * account slow-down is exercised without a test ever waiting; `trustProxy`
+ * defaults off, exactly as production does, so a test that wants the per-caller
+ * limit asks for it explicitly.
  */
-const options = { email: "ana@skybook.example", passwordHash: HASH, secret: SECRET, sleep: async () => {} };
+const options = { db: dbReturning(ACTIVE_USER), secret: SECRET, sleep: async () => {} };
 const trusting = { ...options, trustProxy: true };
 
 const attempt = (body: unknown, caller = "1.2.3.4") =>
@@ -45,18 +81,23 @@ test("the right credentials produce a session that the guard will believe", () =
     assert.equal(result.ok, true);
     if (!result.ok) return;
 
-    // The end-to-end property: what sign-in issues, the guard accepts.
-    assert.deepEqual(readSession(result.cookie, options, NOW)?.email, "ana@skybook.example");
+    // The end-to-end property: what sign-in issues, the guard reads back — the
+    // user's id and role, not their address.
+    const issued = readSession(result.cookie, options, NOW);
+    assert.equal(issued?.userId, ACTIVE_USER.id);
+    assert.equal(issued?.role, "SALES");
+    // The address still comes back in the response body, for the page to greet.
     assert.equal(result.email, "ana@skybook.example");
     assert.equal(result.maxAgeSeconds, sessionCookieOptions().maxAge);
   });
 });
 
-test("the session carries an address and nothing else", () => {
+test("the session carries the id, role and expiry, and nothing else", () => {
   /*
-   * No role, no permissions, no user type, no flag. The whole model is who is
-   * signed in, and that is what keeps a later move to Google a change to one
-   * file.
+   * No password, no hash, no address inside the cookie — the id is who to look
+   * up and the role is a signed claim. Keeping the payload to exactly these
+   * three is what stops anything sensitive drifting into a value anyone holding
+   * the cookie can read.
    */
   resetAttempts();
 
@@ -66,7 +107,7 @@ test("the session carries an address and nothing else", () => {
       if (!result.ok) return;
 
       const session = readSession(result.cookie, options, NOW);
-      assert.deepEqual(Object.keys(session ?? {}).sort(), ["email", "expiresAt"]);
+      assert.deepEqual(Object.keys(session ?? {}).sort(), ["expiresAt", "role", "userId"]);
     },
   );
 });
@@ -117,7 +158,7 @@ test("extra fields in the body are ignored rather than read", async () => {
   if (!outcome.ok) return;
 
   const session = readSession(outcome.cookie, options, NOW);
-  assert.deepEqual(Object.keys(session ?? {}).sort(), ["email", "expiresAt"]);
+  assert.deepEqual(Object.keys(session ?? {}).sort(), ["expiresAt", "role", "userId"]);
 });
 
 test("behind a trusted proxy, too many attempts from one address are refused with 429", async () => {
@@ -152,12 +193,14 @@ test("a server that cannot sign a session says so rather than blaming the passwo
   assert.equal(outcome.ok === false && outcome.error, CANNOT_SIGN_IN);
 });
 
-test("a server with no account configured refuses with 503, not 401", async () => {
+test("a server whose database cannot be reached refuses with 503, not 401", async () => {
+  // The password may well be right; the server simply cannot check it. That is
+  // the server's fault, so it must not read as a typo.
   resetAttempts();
 
   const outcome = await loginRoute(
     attempt({ email: "ana@skybook.example", password: PASSWORD }),
-    { secret: SECRET },
+    { db: brokenDb, secret: SECRET },
     NOW,
   );
 
@@ -326,7 +369,7 @@ test("the trust-proxy flag is read from the environment when the option is absen
   try {
     process.env.SKYBOOK_TRUST_PROXY = "true";
     resetAttempts();
-    const envOptions = { email: "ana@skybook.example", passwordHash: HASH, secret: SECRET, sleep: async () => {} };
+    const envOptions = { db: dbReturning(ACTIVE_USER), secret: SECRET, sleep: async () => {} };
     for (let n = 0; n < 10; n += 1) {
       await loginRoute(attempt({ email: "ana@skybook.example", password: "no" }, "9.9.9.9"), envOptions, NOW);
     }

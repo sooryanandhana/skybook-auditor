@@ -52,9 +52,26 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
+# The database migration tooling, so container startup (`npm run migrate`) can
+# bring the schema up to date before the server starts. The `pg` driver is
+# already present — the app's own database code pulls it into the traced
+# standalone bundle above. The real package.json is copied so `npm run migrate`
+# finds the script; node resolves modules from node_modules, so its richer
+# dependency list changes nothing at runtime.
+COPY --from=builder /app/lib/db ./lib/db
+COPY --from=builder /app/package.json ./package.json
+
 # Run unprivileged. Chromium starts with --no-sandbox (set in render.ts), which
 # is what lets a non-root, container Chromium launch at all.
 USER node
 
 EXPOSE 10000
-CMD ["node", "server.js"]
+# Migrate, THEN serve. Render's free plan has no pre-deploy hook, so the
+# container itself brings the schema up to date on startup. `&&` is the whole
+# safety property: if `npm run migrate` exits non-zero the server never starts
+# and the container exits non-zero (Render keeps the previous version serving
+# rather than running against a database without its `users` table). `exec`
+# hands the process over to node so it becomes PID 1 and receives stop signals.
+# Migrations are idempotent — already-applied ones are skipped — so restarting
+# a free service that has gone to sleep re-runs this safely.
+CMD ["sh", "-c", "npm run migrate && exec node server.js"]

@@ -14,7 +14,7 @@ export async function GET(request: Request): Promise<NextResponse<AuditResultRes
    * rendered a page never passed the sign-in, so every route asks for
    * itself. The decision is in lib/auth/guard.ts and is tested there.
    */
-  if (requireSession(request) === null) {
+  if ((await requireSession(request)) === null) {
     const refused = unauthorised();
     return NextResponse.json(refused.body, { status: refused.status });
   }

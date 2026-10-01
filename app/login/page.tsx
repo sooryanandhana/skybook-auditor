@@ -114,6 +114,10 @@ export default function LoginPage() {
           </button>
         </div>
 
+        <p className={styles.exportHint}>
+          Need an account? <a href="/register">Request one</a>
+        </p>
+
         {problem !== null && (
           <p className={styles.exportProblem} role="alert">
             {problem}

@@ -27,8 +27,7 @@ import { JOB_NOT_FOUND, NO_JOB_ID, NOT_READY, UNKNOWN_FAILURE } from "../jobs/jo
 import { buildPdfDocument } from "../audit/pdfDocument.ts";
 import { renderPdf, PDF_RENDER_MESSAGES, PdfRenderError } from "../audit/pdf/render.ts";
 import { exportFilename, type PdfExportFields } from "./pdfExportRoute.ts";
-import { requireSession, UNAUTHORISED } from "../auth/guard.ts";
-import type { SessionOptions } from "../auth/session.ts";
+import { requireSession, UNAUTHORISED, type GuardOptions } from "../auth/guard.ts";
 import {
   contentFingerprint,
   previewFor,
@@ -71,7 +70,7 @@ export type SendReportResult =
   | { readonly ok: true; readonly recipient: string }
   | { readonly ok: false; readonly status: number; readonly error: string };
 
-export interface SendReportDeps extends SessionOptions {
+export interface SendReportDeps extends GuardOptions {
   readonly store?: AuditJobStore;
   /** Whether a trusted proxy set the forwarded address. Off by default. */
   readonly trustProxy?: boolean;
@@ -164,7 +163,7 @@ export async function sendReportRoute(
   const now = deps.now ?? Date.now();
 
   // 1. Signed in. The page redirect is a courtesy; this is the boundary.
-  if (requireSession(request, deps, now) === null) {
+  if ((await requireSession(request, deps, now)) === null) {
     return { ok: false, status: 401, error: UNAUTHORISED };
   }
 

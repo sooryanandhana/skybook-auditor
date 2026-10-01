@@ -1,35 +1,32 @@
 /**
  * Whether a person may sign in, and how many times they may get it wrong.
  *
- * ONE ACCOUNT, SEEDED, AND NO USER TABLE. This is a sales tool used by one
- * salesperson, and the two things a real account system exists for -- letting
- * people sign themselves up, and letting them recover a forgotten password --
- * are both unwanted here. Recovery is worse than unwanted: it needs the
- * ability to send email, which is the exact feature this login is being built
- * in front of. Accounts nobody could recover would be a login that locks the
- * tool rather than protecting it.
+ * ACCOUNTS LIVE IN THE DATABASE, one row each in the `users` table, read and
+ * written only through `lib/users`. This file decides WHETHER an attempt signs
+ * in — it finds the account, requires it to be ACTIVE, checks the password, and
+ * counts the guesses — but it never writes SQL of its own and never sees a
+ * plaintext password beyond the one it is handed to check.
  *
- * SO THE ACCOUNT LIVES IN THE ENVIRONMENT, as an address and a hash. Changing
- * the password means running the hashing command again and editing one line,
- * which is the right amount of ceremony for one user and no ceremony at all
- * compared with a database.
+ * ONLY AN ACTIVE ACCOUNT MAY SIGN IN. A PENDING account is awaiting a manager's
+ * approval, a REJECTED one was refused, and an INACTIVE one was switched off;
+ * all three are refused in exactly the same words as a wrong password, so an
+ * attempt learns nothing about which case it hit.
  *
  * THE PASSWORD IS NEVER STORED, LOGGED OR COMPARED DIRECTLY. What is stored is
  * a scrypt hash with its own salt, and comparison is constant-time. Both of
  * those are one line each and both are the difference between a shortcut and a
- * habit that follows this code into production.
+ * habit that follows this code into production. The hashing — `hashPassword`
+ * and `checkPassword` below — is unchanged by the move to a database: a hash is
+ * a hash wherever it is kept.
  *
  * DESIGNED SO THAT REPLACING IT CHANGES NOTHING ELSE. Everything above this
  * function answers "who is signed in" by reading a session, and a session
- * carries an address. Whether that address was proved by a password today or
- * by Google Workspace later is this file's business and nobody else's.
+ * carries who the person is. Whether that was proved by a password today or by
+ * Google Workspace later is this file's business and nobody else's.
  */
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { UNATTRIBUTED } from "../callerAddress.ts";
-
-/** Where the one account is read from. Neither is prefixed `NEXT_PUBLIC_`. */
-export const EMAIL_VARIABLE = "SKYBOOK_EMAIL";
-export const PASSWORD_HASH_VARIABLE = "SKYBOOK_PASSWORD_HASH";
+import { findByEmail, updateLastLogin, type Db, type Role, type User } from "../users/userRepository.ts";
 
 /**
  * The scrypt cost. Deliberately slow, which is the entire point of it.
@@ -213,9 +210,19 @@ export function accountDelayMs(failuresInWindow: number): number {
    --------------------------------------------------------------------------- */
 
 export interface CredentialOptions {
-  /** Overrides the environment. Supplied by tests, so none depends on the machine. */
-  readonly email?: string;
-  readonly passwordHash?: string;
+  /**
+   * The database to read accounts from. Injected by tests so they can drive
+   * sign-in with a fake and no live PostgreSQL; omitted in production, where the
+   * shared pool is used.
+   */
+  readonly db?: Db;
+}
+
+/** Who signed in, carried back so the session can identify them. */
+export interface AuthenticatedUser {
+  readonly id: string;
+  readonly email: string;
+  readonly role: Role;
 }
 
 /**
@@ -226,14 +233,14 @@ export interface CredentialOptions {
  * message rule below for what a person is told.
  */
 export type SignInResult = (
-  | { readonly ok: true; readonly email: string }
+  | { readonly ok: true; readonly user: AuthenticatedUser }
   | { readonly ok: false; readonly reason: "rejected" | "rate-limited" | "not-configured"; readonly message: string }
 ) & {
   /**
    * How long the caller should be made to wait before the answer is returned.
    *
-   * DECIDED HERE, APPLIED BY THE ROUTE. This function stays synchronous and
-   * testable -- a test asserts the number without waiting -- and the route
+   * DECIDED HERE, APPLIED BY THE ROUTE. The number is computed from failures
+   * already recorded -- a test asserts it without waiting -- and the route
    * awaits an injectable sleep. Zero on every fast path, including a right
    * password and a per-caller 429; above zero only when the account is being
    * guessed at and the free attempts are spent.
@@ -255,49 +262,50 @@ export const RATE_LIMITED =
   "Too many failed sign-in attempts. Wait a few minutes and try again.";
 
 const NOT_CONFIGURED =
-  "No sign-in account is configured on this server. The audit engine is unaffected.";
-
-const configured = (options: CredentialOptions) => ({
-  email: (options.email ?? process.env[EMAIL_VARIABLE] ?? "").trim().toLowerCase(),
-  passwordHash: (options.passwordHash ?? process.env[PASSWORD_HASH_VARIABLE] ?? "").trim(),
-});
+  "Sign-in is temporarily unavailable on this server. The audit engine is unaffected.";
 
 /**
- * Whether an account exists to sign in to, in a form that is safe to log.
+ * A valid scrypt hash of a throwaway password, computed once and kept.
  *
- * Carries neither the address nor the hash -- only whether both are there.
+ * TIMING EQUALISATION. When no account matches the address there is no stored
+ * hash to check, and returning straight away would refuse a wrong address in a
+ * millisecond while a real one takes a tenth of a second -- and that difference
+ * is itself an answer to "does this account exist". So an attempt against an
+ * unknown address still runs one scrypt, against this placeholder, and still
+ * fails. It is not a secret and matches no real password.
  */
-export function credentialsAvailable(options: CredentialOptions = {}): boolean {
-  const { email, passwordHash } = configured(options);
-  return email !== "" && passwordHash !== "";
+let placeholderHash: string | null = null;
+function timingHash(): string {
+  return (placeholderHash ??= hashPassword("timing-equalisation-placeholder"));
 }
 
 /**
- * One attempt to sign in.
+ * One attempt to sign in, against the accounts in the database.
  *
- * THE RATE CHECK COMES FIRST, before the password is even hashed. Hashing is
- * deliberately slow, so checking afterwards would let somebody spend this
- * server's processor by guessing, which is a denial of service wearing a
- * password attempt's clothes.
+ * THE RATE CHECK COMES FIRST, before the database is touched or the password is
+ * hashed. Hashing is deliberately slow, so checking afterwards would let
+ * somebody spend this server's processor — and now its database — by guessing,
+ * which is a denial of service wearing a password attempt's clothes.
+ *
+ * THE STEPS, IN ORDER: trim and lower-case the address; look the account up;
+ * require it to be ACTIVE; check the password; on success, stamp the login time
+ * and return who signed in. A PENDING, REJECTED or INACTIVE account, an unknown
+ * address and a wrong password are all refused in the same words.
  *
  * A SUCCESS CLEARS THE CALLER'S FAILURES. Somebody who mistyped four times and
  * then got it right is not four failures away from being locked out.
  *
- * THE ADDRESS IS COMPARED CASE-INSENSITIVELY and the password is not. Nobody
- * thinks of their email address as having a case; everybody knows a password
- * does.
+ * THE ADDRESS IS COMPARED CASE-INSENSITIVELY (the column is `citext`) and the
+ * password is not. Nobody thinks of their email address as having a case;
+ * everybody knows a password does.
  */
-export function signIn(
+export async function signIn(
   email: string,
   password: string,
   caller: string,
   options: CredentialOptions = {},
   now: number = Date.now(),
-): SignInResult {
-  if (!credentialsAvailable(options)) {
-    return { ok: false, reason: "not-configured", message: NOT_CONFIGURED, delayMs: 0 };
-  }
-
+): Promise<SignInResult> {
   const recentFailures = recent(caller, now);
 
   /*
@@ -324,24 +332,43 @@ export function signIn(
    */
   const delayMs = accountDelayMs(recentAccountFailures(now).length);
 
-  const account = configured(options);
-  const addressMatches = email.trim().toLowerCase() === account.email;
+  let user: User | null;
+  try {
+    user = await findByEmail(email.trim().toLowerCase(), options.db);
+  } catch {
+    /*
+     * The database could not be reached. That is the server's problem, not the
+     * person's, so it is not a rejection, records no failure, and the route
+     * answers 503 rather than "wrong password".
+     */
+    return { ok: false, reason: "not-configured", message: NOT_CONFIGURED, delayMs: 0 };
+  }
 
   /*
-   * BOTH CHECKS RUN WHETHER OR NOT THE FIRST PASSED. Returning early on a
-   * wrong address would answer in a millisecond while a right one takes a
-   * tenth of a second, and that difference is itself an answer to the question
-   * "does this address exist".
+   * ONE SCRYPT ALWAYS RUNS. Against the account's hash when there is one, and
+   * against a placeholder when there is not, so an unknown address and a wrong
+   * password take the same time to refuse -- the timing cannot be read as an
+   * answer to "does this account exist".
    */
-  const passwordMatches = checkPassword(password, account.passwordHash);
+  const passwordMatches = checkPassword(password, user?.passwordHash ?? timingHash());
 
-  if (!addressMatches || !passwordMatches) {
+  /*
+   * ONLY AN ACTIVE ACCOUNT WITH THE RIGHT PASSWORD SIGNS IN. A missing account,
+   * a non-ACTIVE one and a wrong password are one outcome with one message, so
+   * an attempt learns nothing about which it hit.
+   */
+  if (user === null || user.status !== "ACTIVE" || !passwordMatches) {
     if (caller !== UNATTRIBUTED) failures.set(caller, [...recentFailures, now]);
     accountFailures = [...recentAccountFailures(now), now];
     return { ok: false, reason: "rejected", message: REJECTED, delayMs };
   }
 
+  /*
+   * The login time is stamped best-effort: a write that fails must not deny an
+   * already-authenticated user access, so a rejected stamp is swallowed.
+   */
+  await updateLastLogin(user.id, options.db).catch(() => undefined);
   failures.delete(caller);
   accountFailures = [];
-  return { ok: true, email: account.email, delayMs };
+  return { ok: true, user: { id: user.id, email: user.email, role: user.role }, delayMs };
 }

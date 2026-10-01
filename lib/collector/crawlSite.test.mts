@@ -478,11 +478,17 @@ test("no HTTP or crawling dependency was introduced", () => {
    * report, it is imported only by `lib/audit/pdf`, and a test in that folder
    * walks the tree to prove nothing else reaches it. No collector imports it,
    * which is asserted directly below.
+   *
+   * `pg` was argued for and added when the single env-var login was replaced
+   * with database-backed user accounts: it is the PostgreSQL driver, imported
+   * only by `lib/db`, and a test there walks the tree to prove nothing else
+   * reaches it. The crawler never sees it, which is the property this guards.
    */
   assert.deepEqual(Object.keys(pkg.dependencies).sort(), [
     "@google/genai",
     "cheerio",
     "next",
+    "pg",
     "puppeteer",
     "react",
     "react-dom",

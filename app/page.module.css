@@ -394,6 +394,25 @@
   gap: 0.35rem;
 }
 
+/* The management console's top row: "Back to auditor" on the left, Sign out on
+   the right. The console is a plain page with no sidebar, so this is its only
+   navigation. Space-between keeps the two apart and wraps cleanly on narrow
+   screens; Sign out brings its own base .signOut styling. */
+.consoleBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.backLink {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--brand);
+}
+
 .brandRow {
   display: flex;
   align-items: center;

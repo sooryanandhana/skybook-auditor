@@ -144,7 +144,37 @@ const RUN_ICON = (
   </svg>
 );
 
-export function AuditPage() {
+/* A small "people" glyph for the management link. Drawn like the others, with
+   `currentColor`, so it takes the nav item's colour and survives the icon-only
+   rail at ≤1024px where the label is hidden. */
+const TEAM_ICON = (
+  <svg
+    width="18"
+    height="18"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+  </svg>
+);
+
+/**
+ * The audit dashboard.
+ *
+ * `isManagement` DECIDES ONE PIECE OF CHROME, NOTHING ELSE: whether the sidebar
+ * shows the link to the management console. It is presentation only — a signed
+ * claim read for display — and never an authorisation check. The console is
+ * guarded on the server (`/users` page) and at its API (`requireRole`, which
+ * re-reads the database every request); this link's presence changes neither.
+ */
+export function AuditPage({ isManagement = false }: { isManagement?: boolean }) {
   // Pieces of "state" — values the page remembers and re-renders when changed.
   const [url, setUrl] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -693,6 +723,19 @@ export function AuditPage() {
             <span className={styles.navIcon}>{RUN_ICON}</span>
             <span>New audit</span>
           </a>
+          {/*
+            Management only, and the one role-aware element on this page. A real
+            link (not a button) because it navigates; it reuses the nav item's
+            own styles, so it collapses to an icon at ≤1024px and sits in the
+            top row at ≤720px exactly as the section links do. Hidden entirely
+            for SALES — the destination is also guarded server-side regardless.
+          */}
+          {isManagement && (
+            <a className={styles.navItem} href="/users">
+              <span className={styles.navIcon}>{TEAM_ICON}</span>
+              <span>Team accounts</span>
+            </a>
+          )}
         </nav>
 
         {/*

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { SignOut } from "../SignOut";
 import styles from "../page.module.css";
 
 /**
@@ -94,6 +95,22 @@ export function ManageUsers() {
   return (
     <main className={styles.main}>
       <header className={styles.header}>
+        {/*
+          A way back to the auditor and a way out. The console is its own page
+          with no sidebar, so without this a manager would be stranded here.
+          "Back to auditor" is a plain link (navigation); Sign out reuses the
+          shared component unchanged (a POST button, never a prefetchable link).
+        */}
+        <div className={styles.consoleBar}>
+          {/* A plain link, like the login/register cross-links: a full load back
+              to the auditor re-renders the server page and re-reads the session,
+              which is exactly what we want on leaving the console. */}
+          {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- intentional full navigation to the auditor, matching the app's other internal links */}
+          <a className={styles.backLink} href="/">
+            ← Back to auditor
+          </a>
+          <SignOut />
+        </div>
         <h1 className={styles.title}>Team accounts</h1>
         <p className={styles.subtitle}>Approve new sign-ups, and manage who can use the auditor.</p>
       </header>

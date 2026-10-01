@@ -31,5 +31,13 @@ export default async function HomePage() {
 
   if (session === null) redirect(LOGIN_PATH);
 
-  return <AuditPage />;
+  /*
+   * The role is passed for ONE thing: whether to show the management link in the
+   * sidebar. It is a signed claim read for display, never for authorisation — the
+   * console's real boundary stays `/api/users`, which re-reads the account from
+   * the database on every request. Reading it from the session here (rather than
+   * the database) is deliberate: the link tracks the same source as the `/users`
+   * page gate, so a newly promoted manager sees it only after signing in again.
+   */
+  return <AuditPage isManagement={session.role === "MANAGEMENT"} />;
 }

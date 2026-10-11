@@ -340,6 +340,15 @@ export const STYLESHEET: string =
   /* ---------- sections ---------- */
 
   section { margin: 0 0 10pt; }
+  /*
+   * SECTION RHYTHM. A more generous gap between the narrative sections, so the
+   * report reads as a sequence of distinct, unhurried parts rather than a dense
+   * column — the biggest single lever on whether it feels premium or cramped.
+   * Whitespace only; nothing measured changes. The two reference-table sections
+   * (the measured facts and the crawl detail) keep the tighter gap: they begin
+   * on their own page and their pagination is deliberately left exactly as it was.
+   */
+  section:not(.measured):not(.coverage-detail) { margin-bottom: 15pt; }
   .lead { max-width: 68ch; }
   h2 { margin-top: 0; }
   .group + .group { margin-top: 12pt; }
@@ -781,6 +790,29 @@ export const STYLESHEET: string =
   .recommend-item,
   .final-head,
   .ai { break-inside: avoid; }
+
+  /*
+   * THE FINAL ASSESSMENT STAYS WHOLE. It is a short closing recap — the grade,
+   * a line of status, and the gate's own priorities — and it reads as one thing.
+   * Kept together it never strands its priority list alone on an otherwise empty
+   * page, which is the awkward break §18 asks to avoid. Chromium splits it anyway
+   * in the rare case it is genuinely taller than a page, which is the right
+   * fallback; the measured-facts tables that follow always start a fresh page.
+   */
+  .final { break-inside: avoid; }
+  /*
+   * WHAT WE CHECKED STAYS WHOLE. The heading, its one-line count and the short
+   * coverage table read as one thing, so the table never starts on the page after
+   * its heading or splits after its first row. Chromium splits it anyway if it is
+   * ever taller than a page.
+   */
+  .coverage { break-inside: avoid; }
+  /*
+   * A SECTION HEADING KEEPS ITS ACCENT BAR. The bar is the heading's own ::before
+   * block, stacked above the text, so without this a page break can fall between
+   * the two and strand the bar at the foot of a page with the heading on the next.
+   */
+  section > h2 { break-inside: avoid; }
 
   /*
    * A HEADING NEVER SITS ALONE AT THE FOOT. §18 names this too. The break-after rule

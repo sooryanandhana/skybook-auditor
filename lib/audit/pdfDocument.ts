@@ -1085,7 +1085,12 @@ export function buildPdfDocument(
           heading: "Crawl status",
           facts: [
             { label: "Crawl status", value: crawlStatusText(crawl) },
-            { label: "Stopped because", value: stopReasonText(crawl) },
+            /*
+             * ONLY FOR AN INCOMPLETE CRAWL. A stop reason explains why the crawl
+             * ended early, so a complete crawl has none to show. `crawlView`
+             * applies the same condition.
+             */
+            ...(crawl.complete ? [] : [{ label: "Stopped because", value: stopReasonText(crawl) }]),
             ...discoverySourceFacts(crawl),
             ...sitemapDiscoveryFacts(crawl),
             ...robotsFacts(crawl, data.technical),

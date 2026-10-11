@@ -19,10 +19,11 @@ import {
   METRIC_NOT_REPORTED,
   categoryLabel,
   certificateProblemFacts,
+  crawlStatusText,
   readableTimestamp,
   securityFacts,
 } from "../report/measurementsView.ts";
-import { auditStatusText } from "../report/siteFindingsView.ts";
+import { auditStatusText, stopReasonText } from "../report/siteFindingsView.ts";
 import { scoreAudit } from "../scoring/score.ts";
 import { withSpeed } from "./withSpeed.ts";
 import { runSeoChecks } from "../collector/seoChecks.ts";
@@ -257,6 +258,96 @@ test("a partial crawl is never presented as a whole-site audit", () => {
   assert.equal(doc.cover.statusLine, "Partial website audit");
   assert.equal(doc.coverage.partial, true);
   assert.match(doc.coverage.stopReason ?? "", /150-page safety limit/);
+});
+
+// ---------------------------------------------------------------------------
+// The crawl status table says why a crawl stopped only when it stopped short
+// ---------------------------------------------------------------------------
+
+/** The rows of the "Crawl status" group in the coverage detail. */
+function crawlStatusRows(doc: PdfDocument): readonly { label: string; value: string }[] {
+  const group = doc.coverageDetail.find((section) => section.heading === "Crawl status");
+  if (group === undefined) assert.fail("the document carries no Crawl status group");
+  return group.facts;
+}
+
+const rowValue = (rows: readonly { label: string; value: string }[], label: string) =>
+  rows.find((row) => row.label === label)?.value;
+
+test("a complete crawl carries no reason for stopping", () => {
+  /*
+   * A crawl that finished has nothing to explain. The stop-reason wording for a
+   * drained queue is about sitemaps that could not be read, and beneath a
+   * "Complete" status it contradicted the row above it and the cover.
+   */
+  const audit = storedAudit();
+  const { store, jobId } = jobWith("completed", audit);
+  const rows = crawlStatusRows(documentFor(store, jobId));
+
+  assert.equal(rowValue(rows, "Stopped because"), undefined, "no stop reason beside a complete crawl");
+  assert.ok(!rows.some((row) => /sitemaps could not be read/.test(row.value)), "and the sentence is nowhere in the group");
+
+  // The status itself is untouched, and is still the report layer's own line.
+  assert.equal(rowValue(rows, "Crawl status"), crawlStatusText(audit.crawl));
+  assert.match(rowValue(rows, "Crawl status") ?? "", /^Complete/);
+  assert.equal(rows[0].label, "Crawl status", "and it still leads the group");
+});
+
+test("a crawl stopped at its limit still says why", () => {
+  const audit = storedAudit({
+    crawl: { ...storedAudit().crawl, complete: false, stoppedBecause: "max-pages" },
+  });
+  const { store, jobId } = jobWith("partial", audit);
+  const rows = crawlStatusRows(documentFor(store, jobId));
+
+  assert.equal(rowValue(rows, "Stopped because"), stopReasonText(audit.crawl));
+  assert.match(rowValue(rows, "Stopped because") ?? "", /150-page safety limit/);
+
+  assert.equal(rowValue(rows, "Crawl status"), crawlStatusText(audit.crawl));
+  assert.match(rowValue(rows, "Crawl status") ?? "", /^Partial/);
+  assert.deepEqual(
+    rows.slice(0, 2).map((row) => row.label),
+    ["Crawl status", "Stopped because"],
+    "the reason sits directly under the status, as before",
+  );
+});
+
+test("pages all visited but sitemaps cut short is still partial, and still explained", () => {
+  /*
+   * The one case the sitemap sentence was written for: the queue drained, so
+   * the page crawl says "completed", and yet the site was not fully covered.
+   */
+  const audit = storedAudit({
+    crawl: {
+      ...storedAudit().crawl,
+      complete: false,
+      stoppedBecause: "completed",
+      sitemapDiscovery: { attempted: true, complete: false, stoppedBecause: "max-files" },
+    },
+  });
+  const { store, jobId } = jobWith("partial", audit);
+  const rows = crawlStatusRows(documentFor(store, jobId));
+
+  assert.match(rowValue(rows, "Stopped because") ?? "", /sitemaps could not be read in full/);
+  assert.match(rowValue(rows, "Crawl status") ?? "", /^Partial/);
+});
+
+test("removing the stop reason from a complete crawl removes that row and nothing else", () => {
+  const complete = storedAudit();
+  const partial = storedAudit({
+    crawl: { ...storedAudit().crawl, complete: false, stoppedBecause: "max-pages" },
+  });
+  const completeJob = jobWith("completed", complete);
+  const partialJob = jobWith("partial", partial);
+
+  const completeLabels = crawlStatusRows(documentFor(completeJob.store, completeJob.jobId)).map((row) => row.label);
+  const partialLabels = crawlStatusRows(documentFor(partialJob.store, partialJob.jobId)).map((row) => row.label);
+
+  assert.deepEqual(
+    completeLabels,
+    partialLabels.filter((label) => label !== "Stopped because"),
+    "every other row of the group is present in both, in the same order",
+  );
 });
 
 /**

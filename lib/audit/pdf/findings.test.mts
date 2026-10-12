@@ -217,6 +217,151 @@ test("the remediation is labelled and set apart from the evidence", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Commentary never prints the measured text a second time
+// ---------------------------------------------------------------------------
+
+/*
+ * A MODEL OFTEN ANSWERS WITH THE CARD'S OWN SENTENCES. Asked what was found it
+ * returns the evidence, and asked what to do it returns the remediation, both
+ * of which are already on the card directly above. In a real report that made
+ * every card half as long again and put one finding on each page.
+ *
+ * THE RISK RUNS BOTH WAYS, so both are tested. Printing a repeat wastes the
+ * reader's time; dropping something the model really did add loses content.
+ */
+
+/** The measured sentences on the page finding's card, as the fixture has them. */
+const EVIDENCE = pageFinding().evidence;
+const REMEDIATION = pageFinding().remediation;
+/** Prose that repeats neither of them. */
+const NEW_EXPLANATION = "Search engines write their own summary when a page supplies none.";
+const NEW_IMPACT = "The snippet a customer reads is chosen for you.";
+const NEW_RECOMMENDATION = "Write a description for each page.";
+
+/** The page finding's card, carrying the given commentary. */
+function cardWith(commentary: PdfFinding["commentary"]): string {
+  return findingsHtml(sectionOf([{ ...pageFinding(), commentary }]), LABELS);
+}
+
+const countOf = (out: string, needle: string) => out.split(needle).length - 1;
+
+test("an explanation that repeats the measured evidence is not printed again", () => {
+  const out = cardWith({ explanation: EVIDENCE, businessImpact: NEW_IMPACT, recommendation: NEW_RECOMMENDATION });
+
+  assert.equal(countOf(out, EVIDENCE), 1, "the evidence is on the card once, as measured text");
+  assert.ok(positionOf(out, EVIDENCE) < positionOf(out, "What to do"), "and that once is the measured one");
+  assert.ok(out.includes(NEW_IMPACT), "what the model added is kept");
+  assert.ok(out.includes(NEW_RECOMMENDATION));
+});
+
+test("a recommendation that repeats the remediation is dropped with its sub-label", () => {
+  const out = cardWith({ explanation: NEW_EXPLANATION, businessImpact: NEW_IMPACT, recommendation: REMEDIATION });
+
+  assert.equal(countOf(out, REMEDIATION), 1, "the remediation is on the card once");
+  assert.ok(out.includes('class="remediation"'), "in the measured What to do panel");
+  assert.ok(!out.includes("Suggested next step"), "and no label is left heading nothing");
+  assert.ok(out.includes(NEW_EXPLANATION), "the rest of the commentary is kept");
+  assert.ok(out.includes("Why it matters"));
+  assert.ok(out.includes(NEW_IMPACT));
+});
+
+test("capitals, spacing and a closing full stop do not make a repeat into new text", () => {
+  // Differences no reader would notice. Without this a stray space or a missing
+  // full stop from the model would bring the whole repeat back.
+  const out = cardWith({
+    explanation: "  no META description   tag was found",
+    businessImpact: NEW_IMPACT,
+    recommendation: "WRITE A DESCRIPTION OF ABOUT 155 CHARACTERS",
+  });
+
+  assert.ok(!out.includes("META"), "the re-spaced, re-cased evidence is recognised");
+  assert.ok(!out.includes("WRITE A DESCRIPTION"), "and so is the remediation");
+  assert.ok(!out.includes("Suggested next step"));
+  assert.equal(countOf(out, EVIDENCE), 1, "the measured evidence is untouched");
+  assert.equal(countOf(out, REMEDIATION), 1, "and so is the measured remediation");
+  assert.ok(out.includes(NEW_IMPACT));
+});
+
+test("commentary that repeats nothing keeps all three parts, in contract order", () => {
+  const out = cardWith({
+    explanation: NEW_EXPLANATION,
+    businessImpact: NEW_IMPACT,
+    recommendation: NEW_RECOMMENDATION,
+  });
+
+  assert.ok(positionOf(out, "AI explanation") < positionOf(out, NEW_EXPLANATION));
+  assert.ok(positionOf(out, NEW_EXPLANATION) < positionOf(out, "Why it matters"));
+  assert.ok(positionOf(out, "Why it matters") < positionOf(out, NEW_IMPACT));
+  assert.ok(positionOf(out, NEW_IMPACT) < positionOf(out, "Suggested next step"));
+  assert.ok(positionOf(out, "Suggested next step") < positionOf(out, NEW_RECOMMENDATION));
+});
+
+test("whatever commentary is kept is still labelled as AI-written", () => {
+  /*
+   * THE LABEL IS NOT PART OF THE EXPLANATION. It heads the box, so removing a
+   * repeated explanation must not take the reader's only notice that the rest
+   * was written by a model. Each part is tried as the single survivor.
+   */
+  const survivors = [
+    { explanation: NEW_EXPLANATION, businessImpact: EVIDENCE, recommendation: REMEDIATION },
+    { explanation: EVIDENCE, businessImpact: NEW_IMPACT, recommendation: REMEDIATION },
+    { explanation: EVIDENCE, businessImpact: REMEDIATION, recommendation: NEW_RECOMMENDATION },
+  ];
+
+  for (const commentary of survivors) {
+    const out = cardWith(commentary);
+
+    assert.equal(countOf(out, 'class="commentary"'), 1, "the box is drawn");
+    assert.equal(countOf(out, "AI explanation"), 1, "and it carries the AI label, once");
+    assert.ok(positionOf(out, "What to do") < positionOf(out, "AI explanation"), "after the measured parts");
+  }
+});
+
+test("commentary that only repeats the measured text draws no box at all", () => {
+  // An empty tinted panel under a label would read as something gone missing.
+  const out = cardWith({ explanation: EVIDENCE, businessImpact: REMEDIATION, recommendation: REMEDIATION });
+
+  assert.ok(!out.includes('class="commentary"'));
+  assert.ok(!out.includes("AI explanation"));
+  assert.ok(!out.includes("Why it matters"));
+  assert.ok(!out.includes("Suggested next step"));
+  assert.equal(countOf(out, EVIDENCE), 1, "and the finding itself is complete");
+  assert.equal(countOf(out, REMEDIATION), 1);
+});
+
+test("a card with no commentary still draws no box", () => {
+  // The same card as above with the commentary taken away, so the only thing
+  // that differs from the tests around it is the absence.
+  const out = cardWith(null);
+
+  assert.ok(!out.includes('class="commentary"'));
+  assert.ok(!out.includes("AI explanation"));
+  assert.equal(countOf(out, EVIDENCE), 1);
+  assert.equal(countOf(out, REMEDIATION), 1);
+});
+
+test("wording that is close to the measured text but different is kept", () => {
+  /*
+   * THE TEST THAT CATCHES AN EAGER MATCHER. A sentence that adds or changes a
+   * word is a different sentence. A comparison loosened to "similar enough"
+   * would start deleting things the model really wrote, and this is where that
+   * would show.
+   */
+  const closeExplanation = "No meta description tag was found on this page.";
+  const closeRecommendation = "Write a description of about 150 characters.";
+  const out = cardWith({
+    explanation: closeExplanation,
+    businessImpact: NEW_IMPACT,
+    recommendation: closeRecommendation,
+  });
+
+  assert.ok(out.includes(closeExplanation));
+  assert.ok(out.includes(closeRecommendation));
+  assert.ok(out.includes("Suggested next step"), "with its sub-label");
+  assert.ok(positionOf(out, EVIDENCE) < positionOf(out, closeExplanation), "after the measured evidence");
+});
+
+// ---------------------------------------------------------------------------
 // Severity carries its word, never colour alone
 // ---------------------------------------------------------------------------
 

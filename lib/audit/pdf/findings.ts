@@ -96,21 +96,52 @@ function affected(finding: PdfFinding, pages: readonly PdfAffectedPage[]): strin
  * PLAIN TEXT, ALWAYS. The words originated with a model that was shown text
  * taken off somebody else's website. They are escaped like every other value
  * here, no markup in them is interpreted, and no link is built from them.
+ *
+ * NOTHING IS PRINTED TWICE. A model often answers "what was found" with the
+ * evidence sentence itself and "what to do" with the remediation itself. Both
+ * are already on the card directly above, as measured text, so a part that only
+ * repeats one of them is left out and the parts that add something are kept.
+ * This is a choice about layout and never about content: the measured evidence
+ * and remediation are untouched, and no word of the model's is altered.
+ *
+ * THE AI LABEL STAYS WHENEVER ANY AI TEXT DOES. It heads the box, so whichever
+ * parts remain are still marked as written by AI. With nothing left to show,
+ * the box is not drawn at all, exactly as for a finding with no commentary.
  */
 function commentary(finding: PdfFinding, labels: PdfLabels): string {
   const written = finding.commentary;
   if (written === null) return "";
 
-  return (
-    `<div class="commentary">` +
-    html`<p class="ai-label">${labels.aiExplanation}</p>` +
-    html`<p>${written.explanation}</p>` +
-    html`<p class="ai-sub">${labels.aiImpact}</p>` +
-    html`<p>${written.businessImpact}</p>` +
-    html`<p class="ai-sub">${labels.aiRecommendation}</p>` +
-    html`<p>${written.recommendation}</p>` +
-    `</div>`
-  );
+  const alreadyShown = [finding.evidence, finding.remediation].map(comparable);
+  const adds = (text: string): boolean => {
+    const key = comparable(text);
+    return key !== "" && !alreadyShown.includes(key);
+  };
+
+  const parts =
+    (adds(written.explanation) ? html`<p>${written.explanation}</p>` : "") +
+    (adds(written.businessImpact)
+      ? html`<p class="ai-sub">${labels.aiImpact}</p>` + html`<p>${written.businessImpact}</p>`
+      : "") +
+    (adds(written.recommendation)
+      ? html`<p class="ai-sub">${labels.aiRecommendation}</p>` + html`<p>${written.recommendation}</p>`
+      : "");
+
+  if (parts === "") return "";
+
+  return `<div class="commentary">` + html`<p class="ai-label">${labels.aiExplanation}</p>` + parts + `</div>`;
+}
+
+/**
+ * A text reduced to what makes two texts "the same sentence" for a reader.
+ *
+ * DELIBERATELY STRICT. Only differences nobody would notice are ignored: the
+ * spacing, the capitals and a closing full stop. A reworded sentence is a
+ * different sentence and is kept, because dropping something the model really
+ * did add would be worse than printing a near-repeat.
+ */
+function comparable(text: string): string {
+  return text.replace(/\s+/g, " ").trim().replace(/\.$/, "").toLowerCase();
 }
 
 /** One finding, as a card. 7A §17 keeps cards for exactly this. */

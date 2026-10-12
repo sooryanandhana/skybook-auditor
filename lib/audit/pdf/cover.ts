@@ -18,13 +18,18 @@
  * notice immediately, and being wrong on the cover is the worst place to be
  * wrong.
  *
- * THE LAYOUT IS A CORPORATE SPLIT. A white panel on the left carries the mark,
- * the client, the report title and the signature; a navy panel on the right
- * carries a large ring built from CSS shapes (never an image or an <svg>, so
- * the document stays self-contained and the accessibility tree stays clean).
- * The split lives inside the printable content box rather than bleeding to the
- * paper edge, because the renderer draws the running head and foot in the page
- * margins on every page and a full bleed would sit under them.
+ * THE LAYOUT IS A CORPORATE SPLIT, taken from the approved cover artwork. A
+ * white panel on the left carries the mark, the client, the report title, the
+ * audit date and the signature. The right is a navy ground, with a blue strip
+ * standing on the boundary from the top of the sheet to the bottom and one
+ * circular figure centred on it: a broad blue ring, a dark outline, and a white
+ * disc the title runs out onto. The figure is built from CSS shapes (never an
+ * image or an <svg>, so the document stays self-contained and the accessibility
+ * tree stays clean).
+ *
+ * IT RUNS TO THE PAPER EDGE. The stylesheet lifts the page margins for the first
+ * page only. The renderer still draws its running head and foot on every page,
+ * this one included, so they sit over the cover in small type.
  *
  * THE MARK IS THE REAL ARTWORK. 7A §27 forbids recreating it from what is on
  * screen. It is the supplied image, embedded and unaltered; see `logo.ts`. The
@@ -33,6 +38,75 @@
 import type { PdfCover } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
 import { LOGO_DATA_URI, SKYBOOK_NAME } from "./logo.ts";
+import { fitSans, fitSansLines, sansWidthMm } from "./textWidth.ts";
+
+/**
+ * How wide the column of text on the white panel is, in millimetres.
+ *
+ * The stylesheet sets the "prepared for" block to this width, and the addresses
+ * in it are fitted to this width, so the two are one number.
+ */
+export const COVER_COLUMN_MM = 66;
+
+/**
+ * How the audited address is set on the cover, and how many lines it may take.
+ *
+ * The stylesheet reads the size and spacing from here, so what is measured
+ * below is what is drawn.
+ */
+export const COVER_ADDRESS = { sizePt: 8, spacingEm: 0.17, lines: 2 } as const;
+
+/** The same, for the smaller note that names where a redirect started. */
+export const COVER_REDIRECT = { sizePt: 7, lines: 2 } as const;
+
+/**
+ * How much of the measured room a fitted address may use. The widths are read
+ * from the font file and agree with the browser to within half a percent; two
+ * percent is held back so that difference can never be what adds a line.
+ */
+const COVER_FILL = 0.98;
+
+/**
+ * The audited address, as the cover shows it: whole, or cut to its lines.
+ *
+ * THE COVER'S BLOCKS ARE PLACED, NOT STACKED. The title sits at a fixed height
+ * below this block, so an address allowed to run to as many lines as it likes
+ * ran straight through the title, and a long one made both unreadable. It gets
+ * two lines, which every ordinary address fits in with room to spare.
+ *
+ * MEASURED IN THE FACE IT IS SET IN, never counted in characters: two lines of
+ * wide letters hold far fewer than two lines of narrow ones. An address too
+ * long for its lines is cut and ends in an ellipsis, so it cannot be taken for
+ * the whole one. The full address is still in the document's title, and it is
+ * the address every finding in the report lists.
+ */
+function coverAddress(url: string): string {
+  return fitSansLines(
+    url,
+    COVER_ADDRESS.sizePt,
+    COVER_COLUMN_MM * COVER_FILL,
+    COVER_ADDRESS.lines,
+    COVER_ADDRESS.spacingEm,
+  );
+}
+
+/** The words around the address a redirect started from. */
+const REDIRECT_BEFORE = "Requested ";
+const REDIRECT_AFTER = ", which redirected here";
+
+/**
+ * The address a redirect started from, cut so the whole note keeps to its lines.
+ *
+ * The note is a sentence with an address inside it. The words wrap at spaces as
+ * words do, so the room left for the address is the note's lines, less the
+ * words, less one more word's width for the space a wrapped line can waste.
+ */
+function redirectAddress(url: string): string {
+  const size = COVER_REDIRECT.sizePt;
+  const words = sansWidthMm(REDIRECT_BEFORE + REDIRECT_AFTER, size) + sansWidthMm("redirected ", size);
+  const room = COVER_COLUMN_MM * COVER_REDIRECT.lines * COVER_FILL - words;
+  return fitSans(url, size, room);
+}
 
 /**
  * The Skybook mark.
@@ -78,14 +152,16 @@ function addressee(cover: PdfCover): string {
         (companyName === null ? "" : html`<p class="client cover-client">${companyName}</p>`) +
         (contactName === null ? "" : html`<p class="contact cover-contact">${contactName}</p>`);
 
-  const domain = html`<p class="url cover-domain">${cover.auditedUrl}</p>`;
+  const domain = html`<p class="url cover-domain">${coverAddress(cover.auditedUrl)}</p>`;
 
   const redirect =
     cover.requestedUrl === null
       ? ""
-      : html`<p class="note cover-redirect">Requested ${cover.requestedUrl}, which redirected here</p>`;
+      : `<p class="note cover-redirect">${REDIRECT_BEFORE}` +
+        html`<span class="cover-redirect-url">${redirectAddress(cover.requestedUrl)}</span>` +
+        `${REDIRECT_AFTER}</p>`;
 
-  return `<div class="cover-info-group">` + lead + domain + redirect + `</div>`;
+  return `<div class="cover-for">` + lead + domain + redirect + `</div>`;
 }
 
 /**
@@ -111,34 +187,26 @@ function auditInfo(cover: PdfCover): string {
 
   const status = html`<p class="cover-status">${cover.statusLine}</p>`;
 
-  return `<div class="cover-info-group">` + date + status + `</div>`;
-}
-
-/**
- * The one information block: who the report is for, the site, and when it was
- * measured, grouped together beneath the title rather than scattered down the
- * page. Two label-and-value groups, divided by a hairline, on a shared grid.
- */
-function infoBlock(cover: PdfCover): string {
-  return `<div class="cover-info">` + addressee(cover) + auditInfo(cover) + `</div>`;
+  return `<div class="cover-when">` + date + status + `</div>`;
 }
 
 /**
  * The signature, bottom-left of the white panel.
  *
- * THE BRAND IS ALWAYS NAMED, because Skybook is always who prepared the report.
- * The individual preparer is optional, from `preparedBy`, and its "Prepared by
- * …" wording is kept intact so the value reads as a whole rather than as a
- * relabelled fragment. With no individual named, only the brand shows.
+ * THE BRAND IS ALWAYS NAMED, because Skybook is always who prepared the report,
+ * and so the "Prepared by" label is always there to introduce it. The individual
+ * preparer is optional, from `preparedBy`, and is named on a line of their own
+ * above the brand. With no individual named, only the brand shows.
  */
 function signature(cover: PdfCover): string {
   const preparer =
     cover.client.preparedBy === null
       ? ""
-      : html`<p class="cover-sign-line">Prepared by ${cover.client.preparedBy}</p>`;
+      : html`<p class="cover-sign-line">${cover.client.preparedBy}</p>`;
 
   return (
     `<div class="cover-sign">` +
+    `<p class="eyebrow cover-eyebrow">Prepared by</p>` +
     preparer +
     `<p class="cover-sign-brand">Skybook</p>` +
     `</div>`
@@ -146,43 +214,48 @@ function signature(cover: PdfCover): string {
 }
 
 /**
- * The navy panel: a clean dark ground, and nothing drawn on it.
+ * The figure on the navy ground: the strip, the ring, the outline and the disc.
  *
- * The concentric ring motif that used to sit here has been removed for a plainer
- * composition; the panel is now just the navy gradient set in the stylesheet. It
- * carries no text and no shapes, so it adds nothing a screen reader would
- * announce, and it never reaches an image or an <svg>.
+ * DECORATION, AND MARKED AS SUCH. Four empty elements the stylesheet turns into
+ * shapes. They carry no text and no meaning, so they are hidden from a screen
+ * reader, and none of them is an image or an <svg>.
  */
-function navyPanel(): string {
-  return `<div class="cover-right"></div>`;
+function figure(): string {
+  return (
+    `<div class="cover-figure" aria-hidden="true">` +
+    `<span class="cover-strip"></span>` +
+    `<span class="cover-ring"></span>` +
+    `<span class="cover-outline"></span>` +
+    `<span class="cover-disc"></span>` +
+    `</div>`
+  );
 }
 
 /**
  * The cover, as one page.
  *
- * The white panel runs on a single grid: the mark at the top with room to
- * breathe, the dominant title in the lower middle with its accent, the grouped
- * information block beneath it, and the signature on the baseline. The navy
- * panel is a clean dark ground, and the seam is the thin brand strip on the
- * boundary between them.
+ * The figure is drawn first and the white panel over it, so the panel hides the
+ * left half of the circles. On the panel, top to bottom: the mark, the partial
+ * marker when the audit was partial, who the report is for, the title with its rule and the audit date beneath, and the
+ * signature low on the page.
  */
 export function coverHtml(cover: PdfCover): string {
   const partial = cover.partial ? `<p class="partial">Partial audit</p>` : "";
 
   return (
     `<div class="cover">` +
+    figure() +
     `<div class="cover-left">` +
     mark() +
-    `<div class="cover-titleblock">` +
     partial +
+    addressee(cover) +
+    `<div class="cover-titleblock">` +
     `<h1 class="cover-title">Website<br>Audit Report</h1>` +
     `<span class="cover-accent"></span>` +
+    auditInfo(cover) +
     `</div>` +
-    infoBlock(cover) +
     signature(cover) +
     `</div>` +
-    navyPanel() +
-    `<span class="cover-seam"></span>` +
     `</div>`
   );
 }

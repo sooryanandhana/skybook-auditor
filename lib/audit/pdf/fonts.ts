@@ -121,24 +121,20 @@ function faceCss(face: Face): string {
 export const FONT_FACE_CSS: string = FACES.map(faceCss).join("");
 
 /**
- * THE RUNNING HEAD AND FOOT CANNOT USE THESE FACES, and that was established
- * by trying rather than by reading.
+ * THE RUNNING HEAD AND FOOT USE THESE FACES TOO, and for a long time they could
+ * not.
  *
- * Chromium renders those two templates in their own context, which does not
- * inherit the page's stylesheet. Declaring the face inside the template, as a
- * `<style>` block carrying the same base64 the document uses, does not work
- * either: the face does not load there, and the text falls back to whatever
- * the machine running the renderer has installed. A file produced on this
- * Windows machine embedded Arial in the running head while the body was IBM
- * Plex throughout.
+ * They were Chromium's header and footer templates, which render in a context
+ * of their own that does not inherit the page's stylesheet. Declaring the face
+ * inside the template, as a `<style>` block carrying the same base64 the
+ * document uses, did not work either: the face did not load there, and the text
+ * fell back to whatever the machine running the renderer had installed. A file
+ * produced on a Windows machine embedded a system face in the running head
+ * while the body was IBM Plex throughout.
  *
- * IT IS LEFT AS A KNOWN LIMITATION rather than worked around, because the
- * available workaround costs more than it buys. Drawing the head and foot as
- * fixed-position elements inside the page would give them the embedded faces,
- * and would also lose "page n of m", which 7A §20 requires by name: Chromium
- * fills those in from the template and offers no page counter to CSS.
- *
- * See `runningHeadFoot.ts`, where the stack that is actually used is declared.
+ * They are page-margin boxes now, declared in the document's own stylesheet, so
+ * they are set in the embedded sans and "page n of m" comes from CSS's page
+ * counters. See `runningHeadFoot.ts`.
  */
 
 /**

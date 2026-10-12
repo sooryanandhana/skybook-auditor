@@ -14,7 +14,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { EMBEDDED_FACES, FONT_FACE_CSS, MONO, SANS, SERIF } from "./fonts.ts";
 import { STYLESHEET } from "./styles.ts";
-import { PAGE_FORMAT, PAGE_HEIGHT, PAGE_MARGIN } from "./settings.ts";
+import { COVER_ADDRESS, COVER_COLUMN_MM, COVER_REDIRECT } from "./cover.ts";
+import { PAGE_FORMAT, PAGE_HEIGHT, PAGE_WIDTH } from "./settings.ts";
 
 const FONT_DIR = path.join(import.meta.dirname, "assets", "fonts");
 
@@ -134,11 +135,29 @@ test("the leading is generous, as the specification asks", () => {
 });
 
 test("the measure is held near 65 to 75 characters", () => {
-  const measure = /main\s*\{[^}]*max-width:\s*(\d+)ch/.exec(STYLESHEET);
+  /*
+   * THE MEASURE IS A PROPERTY OF PROSE, so it is stated on the paragraph. Cards,
+   * tables and rows of figures run the full width of the page; a paragraph does
+   * not, and neither does a list item.
+   */
+  const measure = /(?:^|[\s}])p\s*\{[^}]*max-width:\s*(\d+)ch/.exec(STYLESHEET);
 
   assert.ok(measure, "the measure is stated in characters, not guessed from a width");
   const ch = Number(measure[1]);
   assert.ok(ch >= 65 && ch <= 75, `${ch}ch is inside 7A §16's range`);
+
+  const item = /(?:^|[\s}])li\s*\{[^}]*max-width:\s*(\d+)ch/.exec(STYLESHEET);
+  assert.ok(item, "a list item is prose too");
+  assert.equal(Number(item[1]), ch, "and is held to the same measure");
+});
+
+test("no running text is wider than the measure", () => {
+  // Every width stated in characters is the measure or narrower. A wider one
+  // would be a block of prose the rule above does not reach.
+  const widths = [...STYLESHEET.matchAll(/max-width:\s*(\d+)ch/g)].map((match) => Number(match[1]));
+
+  assert.ok(widths.length > 0);
+  for (const width of widths) assert.ok(width <= 75, `${width}ch is within the measure`);
 });
 
 test("figures are set with tabular numerals, so columns line up", () => {
@@ -176,17 +195,34 @@ test("the stylesheet declares no page margin, because the renderer sets it", () 
   assert.ok(!/@page\s*\{[^}]*margin/.test(STYLESHEET));
 });
 
-test("the cover is exactly one page tall, worked out from the page and its margins", () => {
-  assert.ok(
-    STYLESHEET.includes(`calc(${PAGE_HEIGHT} - ${PAGE_MARGIN.top} - ${PAGE_MARGIN.bottom})`),
-    "the height follows the margins rather than being written down separately",
-  );
+test("only the first page gives up its margins, so the cover can reach the paper edge", () => {
+  /*
+   * THE ONE EXCEPTION TO THE TEST ABOVE, AND IT IS NARROW. The cover's navy
+   * ground runs to the edge of the sheet, which it cannot do inside margins.
+   * Every other page still takes the renderer's margins, and with them the room
+   * for the running head and foot.
+   */
+  // A rule, not a mention: `@page`, an optional selector, then the braces.
+  const pageRules = [...STYLESHEET.matchAll(/@page([ \t:a-z-]*)\{([^}]*)\}/g)];
+
+  assert.equal(pageRules.length, 1, "there is exactly one page rule");
+  assert.equal(pageRules[0][1].trim(), ":first", "and it names the first page only");
+  assert.match(pageRules[0][2], /margin:\s*0\s*;/, "lifting that page's margins and nothing else");
 });
 
-test("the stated page height is the paper the renderer asks for", () => {
-  // Two constants that must agree, so a test says they do.
+test("the cover is exactly one sheet, taken from the paper size", () => {
+  const cover = /\.cover\s*\{([^}]*)\}/.exec(STYLESHEET)?.[1] ?? "";
+
+  assert.ok(cover.includes(`width: ${PAGE_WIDTH}`), "as wide as the paper");
+  assert.ok(cover.includes(`height: ${PAGE_HEIGHT}`), "and as tall");
+  assert.match(cover, /overflow:\s*hidden/, "clipping the shapes that run past its edges");
+});
+
+test("the stated page size is the paper the renderer asks for", () => {
+  // Constants that must agree, so a test says they do.
   assert.equal(PAGE_FORMAT, "a4");
   assert.equal(PAGE_HEIGHT, "297mm", "A4 is 297mm tall");
+  assert.equal(PAGE_WIDTH, "210mm", "and 210mm wide");
 });
 
 test("the cover takes its own page", () => {
@@ -205,4 +241,81 @@ test("only the deep blue is used for text", () => {
     .map((m) => m[1].toLowerCase());
 
   assert.ok(!textColours.includes("#05a2e4"), "the bright blue is never text");
+});
+
+// ---------------------------------------------------------------------------
+// The cover's text cannot outgrow its place
+// ---------------------------------------------------------------------------
+
+/** The declarations of every rule whose selector list names the given class. */
+function rulesFor(className: string): string {
+  // Comments first: one sitting before a selector would otherwise be read as part of it.
+  const rules = STYLESHEET.replace(/\/\*[\s\S]*?\*\//g, "");
+
+  return [...rules.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
+    .filter((rule) => rule[1].split(",").some((selector) => selector.trim() === className))
+    .map((rule) => rule[2])
+    .join(" ");
+}
+
+test("the address is drawn the way it is measured", () => {
+  /*
+   * THE FIT IN cover.ts COUNTS ON THREE THINGS, and each is a line of CSS: the
+   * column's width, the type's size and spacing, and a line that breaks between
+   * any two characters so every line is filled. If one of them drifted the
+   * address would be measured for a layout it is not drawn in.
+   */
+  assert.ok(rulesFor(".cover-for").includes(`width: ${COVER_COLUMN_MM}mm`), "the column is the measured width");
+
+  const address = rulesFor(".cover-domain");
+  assert.ok(address.includes(`font-size: ${COVER_ADDRESS.sizePt}pt`));
+  assert.ok(address.includes(`letter-spacing: ${COVER_ADDRESS.spacingEm}em`));
+  assert.match(address, /word-break:\s*break-all/);
+  assert.ok(address.includes('"Skybook Sans"'), "in the face the widths are read from");
+});
+
+test("every line of the cover's addressee block has a limit", () => {
+  // The title is placed at a fixed height below this block, so nothing in it
+  // may grow without bound.
+  const limits: Record<string, number> = {
+    ".cover-client": 2,
+    ".cover-contact": 1,
+    ".cover-domain": COVER_ADDRESS.lines,
+    ".cover-redirect": COVER_REDIRECT.lines,
+  };
+
+  for (const [selector, lines] of Object.entries(limits)) {
+    const rules = rulesFor(selector);
+    assert.ok(rules.includes(`-webkit-line-clamp: ${lines}`), `${selector} is held to ${lines} line(s)`);
+    assert.match(rules, /overflow:\s*hidden/, `${selector} cannot spill past them`);
+  }
+});
+
+test("the addressee block at its fullest still ends above the title", () => {
+  /*
+   * ADDED UP FROM THE STYLESHEET'S OWN NUMBERS. The label, two lines of name,
+   * one of contact, two of address and two of redirect note, each with the gap
+   * beneath it, must end before the title block begins.
+   */
+  const mm = (pattern: RegExp, what: string) => {
+    const found = pattern.exec(STYLESHEET);
+    assert.ok(found, `${what} is stated`);
+    return Number(found[1]);
+  };
+  const POINT = 25.4 / 72;
+
+  const blockTop = mm(/\.cover-for\s*\{[^}]*top:\s*([\d.]+)mm/, "where the block starts");
+  const titleTop = mm(/\.cover-titleblock\s*\{[^}]*top:\s*([\d.]+)mm/, "where the title block starts");
+  const labelGap = mm(/\.cover-eyebrow\s*\{[^}]*margin:\s*0 0 ([\d.]+)mm/, "the gap under the label");
+  const lineGap = mm(/\.cover-client, \.cover-contact, \.cover-domain\s*\{[^}]*margin:\s*0 0 ([\d.]+)mm/, "the gap under a line");
+
+  const label = 6.5 * 1.2 * POINT + labelGap;
+  const line = COVER_ADDRESS.sizePt * 1.2 * POINT;
+  const name = 2 * line + lineGap;
+  const contact = line + lineGap;
+  const address = COVER_ADDRESS.lines * line + lineGap;
+  const note = COVER_REDIRECT.lines * COVER_REDIRECT.sizePt * 1.5 * POINT;
+
+  const blockEnd = blockTop + label + name + contact + address + note;
+  assert.ok(blockEnd < titleTop, `the block ends at ${blockEnd.toFixed(1)}mm and the title starts at ${titleTop}mm`);
 });

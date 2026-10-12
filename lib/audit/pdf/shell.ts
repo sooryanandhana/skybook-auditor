@@ -30,12 +30,11 @@ import { COVERAGE_DETAIL_HEADING, MEASURED_HEADING, factSectionsHtml } from "./f
 import { findingsHtml } from "./findings.ts";
 import { skippedHtml } from "./skipped.ts";
 import { speedHtml } from "./speed.ts";
-import { scoreHtml } from "./score.ts";
-import { summaryHtml } from "./summary.ts";
 import { executiveSummaryHtml } from "./executiveSummary.ts";
 import { clientSummaryHtml } from "./clientSummary.ts";
 import { finalAssessmentHtml } from "./finalAssessment.ts";
 import { STYLESHEET } from "./styles.ts";
+import { runningHeadFootCss } from "./runningHeadFoot.ts";
 
 
 /**
@@ -59,16 +58,17 @@ export function documentHtml(document: PdfDocument): string {
    * anything, and a partial crawl presented as a whole-site audit is the single
    * most damaging thing this document could do (7A §6, §13).
    *
-   * THE OVERVIEW LEADS: the executive summary and the overall score open the
-   * document, and the AI summary sits directly beneath the score so a reader
-   * meets the plain-English account of the audit before the detailed measured
-   * sections. The AI summary is clearly labelled as the model's, and it invents
+   * THE OVERVIEW LEADS: the executive summary opens the document with the grade,
+   * the severity split and the four category scores on one page, and the AI
+   * summary follows it so a reader meets the plain-English account of the audit
+   * before the detailed measured sections. The AI summary is clearly labelled as
+   * the model's, and it invents
    * nothing — its overall summary, key findings and recommendations are the
    * validated explanations, and its "what we checked" and "next steps" are
    * derived from the measured findings.
    *
-   * MEASURED DETAIL FOLLOWS: the severity split, the coverage, the findings, the
-   * speed check and the measured facts come after it, each measured by this tool.
+   * MEASURED DETAIL FOLLOWS: the coverage, the findings, the speed check and the
+   * measured facts come after it, each measured by this tool.
    * The final assessment restates the measured grade, and the notes on the audit
    * itself close the document on their own page.
    *
@@ -93,13 +93,23 @@ export function documentHtml(document: PdfDocument): string {
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
     html`<title>${documentTitle(document)}</title>` +
-    `<style>${STYLESHEET}</style></head><body>` +
+    /*
+     * The running head and foot are page rules, and they are this document's
+     * own: the address and the date in them are its values, which is why they
+     * are written here and are not part of the fixed stylesheet.
+     */
+    `<style>${STYLESHEET}${runningHeadFootCss(headOf(document), footOf(document))}</style></head><body>` +
     coverHtml(cover) +
     `<main>` +
-    executiveSummaryHtml(document.score, document.coverage.headline) +
-    scoreHtml(document.score) +
+    executiveSummaryHtml({
+      score: document.score,
+      summary: document.summary,
+      coverage: document.coverage,
+      nextSteps: document.clientSummary.nextSteps,
+      siteFindings: document.siteFindings,
+      pageFindings: document.pageFindings,
+    }) +
     clientSummaryHtml(document.clientSummary, labels, aiNote) +
-    summaryHtml(document.summary) +
     coverageHtml(document.coverage) +
     findingsHtml(document.siteFindings, labels) +
     findingsHtml(document.pageFindings, labels) +

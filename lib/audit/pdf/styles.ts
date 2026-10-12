@@ -18,18 +18,9 @@
  * title, section heading, group heading, finding title, body, caption.
  */
 import { FONT_FACE_CSS, MONO, SANS, SERIF } from "./fonts.ts";
+import { COVER_ADDRESS, COVER_COLUMN_MM, COVER_REDIRECT } from "./cover.ts";
 import { LOGO_BOX } from "./logo.ts";
-import { PAGE_HEIGHT, PAGE_MARGIN } from "./settings.ts";
-
-/**
- * How tall a page's content box is, once the margins are taken off.
- *
- * The cover is given exactly this height so it fills its page and its foot
- * sits on the bottom rule rather than wherever the content happened to end.
- * Computed rather than written down, so changing a margin moves the cover with
- * it instead of leaving it half a centimetre out.
- */
-const CONTENT_HEIGHT = `calc(${PAGE_HEIGHT} - ${PAGE_MARGIN.top} - ${PAGE_MARGIN.bottom})`;
+import { PAGE_HEIGHT, PAGE_WIDTH } from "./settings.ts";
 
 /**
  * The brand, from 7A §15.
@@ -59,37 +50,48 @@ const INK_SOFT = "#4a5872";
  */
 const INK_FAINT = "#68758e";
 const RULE = "#d5dfec";
-const LINE_SOFT = "#e7edf6";
 
 /*
- * The dashboard's surface palette, brought to print. These are presentation
- * tokens only -- a card border, a card shadow, the dark cover ground, the
- * light-blue remediation panel and the AI tint -- and none is ever set on body
- * text, so the contrast rule in `accessibility.test.mts` (which measures every
- * TEXT_COLOURS entry against the paper) does not reach them. The dark-ground
- * text colours below are read on navy, not on paper, and are checked by eye
- * against that ground rather than against white.
+ * THE REPORT'S SURFACES, and there are only three besides white paper. None is
+ * ever set on body text, so the contrast rule in `accessibility.test.mts` (which
+ * measures every TEXT_COLOURS entry against the paper) does not reach them.
  */
-/** The card outline, matched to the dashboard's `--card-border`. */
-const CARD_BORDER = "#e6ebf2";
-/** A restrained lift under a card, so surfaces read as raised, not boxed. */
-const CARD_SHADOW = "0 1pt 3pt rgba(22, 33, 58, 0.06)";
-/** The signature dark ground: the dashboard's navy score card and sidebar. */
-const NAVY = "#16202e";
-/** A soft second navy, for the gradient that keeps the navy ground from reading flat. */
-const NAVY_DEEP = "#1c2c48";
-/** The light-blue recommendation panel, matched to the dashboard's WHAT TO DO. */
-const PANEL_BG = "#f1f6fd";
-const PANEL_BORDER = "#dce8f5";
-/** The AI tint: a paler blue surface so commentary is never mistaken for measured fact. */
-const AI_BG = "#f5f9fd";
+/** The thin outline of a card, and the rule under a table row. */
+const HAIRLINE = "#dde1e6";
+/** The flat pale ground of a panel: advice, and anything a model wrote. */
+const PANEL = "#f5f6f8";
+/** The one dark card on the executive summary. Its text is white, read on it. */
+const CHARCOAL = "#1b1e23";
+
 /*
- * The cover's cyan highlight. It only ever appears inside `background` gradients
- * on the cover ring, the seam strip and the title accent -- never as a text
- * colour -- so it is not held to 7A §24's 4.5:1 reading contrast, and the test
- * that keeps the brightest blue off text is not touched.
+ * THE COVER, MEASURED FROM THE APPROVED ARTWORK and scaled to A4. The navy is
+ * the artwork's own ground, and it is also the title's colour, read on white at
+ * about 17:1.
  */
-const CYAN = "#4cc4f0";
+const COVER_NAVY = "#0d1a33";
+/*
+ * The colour of the cover's small labels. The artwork sets them in the brand's
+ * bright blue, which is 2.88:1 on white and cannot be read at this size. This is
+ * the same hue taken darker until it can: 4.67:1, measured by the contrast test
+ * like every other colour set on text.
+ */
+const COVER_LABEL = "#047cae";
+/*
+ * Where the cover's figure sits, in millimetres. `boundary` is where the white
+ * panel ends and the navy begins, and it is also the centre of the circles, so
+ * the white panel hides their left halves. `centre` is how far down the sheet
+ * that centre is. The other three are radii: the blue ring's outer edge, the
+ * dark outline's outer edge, and the white disc.
+ */
+const COVER = { boundary: 92, centre: 150, ring: 103.7, outline: 83.8, disc: 75.6 } as const;
+/** A circle of the given radius about the figure's centre, as CSS. */
+const circleAt = (radius: number): string => {
+  const mm = (value: number) => `${Math.round(value * 10) / 10}mm`;
+  return (
+    `left: ${mm(COVER.boundary - radius)}; top: ${mm(COVER.centre - radius)}; ` +
+    `width: ${mm(radius * 2)}; height: ${mm(radius * 2)};`
+  );
+};
 
 /**
  * The four severities, as colours.
@@ -130,6 +132,7 @@ export const TEXT_COLOURS: Readonly<Record<string, string>> = {
   secondary: INK_SOFT,
   caption: INK_FAINT,
   mark: SKYBOOK_DEEP,
+  coverLabel: COVER_LABEL,
   critical: SEVERITY.critical,
   high: SEVERITY.high,
   medium: SEVERITY.medium,
@@ -157,26 +160,40 @@ export const STYLESHEET: string =
   body {
     margin: 0;
     font-family: ${SANS};
-    font-size: 10.5pt;
+    font-size: 10pt;
     line-height: 1.55;
     color: ${INK};
     font-variant-numeric: tabular-nums;
   }
 
-  /* The measure, held near 70 characters at this size and page width. */
-  main { max-width: 68ch; }
+  /*
+   * THE PAGE IS USED FULL WIDTH; THE READING IS NOT. Cards, tables and the rows
+   * of figures run from margin to margin, as an editorial report's do. Running
+   * prose is still held to a measure of about seventy characters, which is what
+   * 7A §16 asks for and what makes a paragraph comfortable to read.
+   *
+   * The sections are numbered by the page itself, in the order they are drawn,
+   * so a report with a section left out still counts one, two, three.
+   */
+  main { counter-reset: section; }
+  p { margin: 0 0 3mm; max-width: 72ch; }
 
   h1 { font-family: ${SERIF}; font-size: 30pt; font-weight: 600; line-height: 1.15; margin: 0; }
-  h2 { font-family: ${SERIF}; font-size: 16pt; font-weight: 600; line-height: 1.25; margin: 0 0 6pt; }
+  h2 { font-family: ${SERIF}; font-size: 22pt; font-weight: 600; line-height: 1.15; margin: 0 0 6mm; }
+  /* The small spaced label: a group of findings, a table, a list of notes. */
   h3 {
-    font-size: 9pt; font-weight: 600; line-height: 1.3;
-    letter-spacing: .08em; text-transform: uppercase; color: ${INK_FAINT};
-    margin: 0 0 5pt;
+    font-size: 7.5pt; font-weight: 600; line-height: 1.3;
+    letter-spacing: .16em; text-transform: uppercase; color: ${INK_FAINT};
+    margin: 0 0 2.5mm;
   }
-  .finding-title { font-family: ${SERIF}; font-size: 12pt; font-weight: 600; line-height: 1.3; }
+  /* A sub-heading inside a section, in the body's own face. */
+  h3.sub {
+    font-size: 11.5pt; letter-spacing: 0; text-transform: none; color: ${INK};
+    margin: 0 0 2.5mm;
+  }
+  .finding-title { font-family: ${SERIF}; font-size: 12.5pt; font-weight: 600; line-height: 1.3; }
 
-  p { margin: 0 0 8pt; }
-  .note { font-size: 8.5pt; line-height: 1.45; color: ${INK_SOFT}; }
+  .note { font-size: 8.5pt; line-height: 1.5; color: ${INK_SOFT}; }
 
   /*
    * Addresses break mid-string rather than pushing the page sideways, which
@@ -187,38 +204,88 @@ export const STYLESHEET: string =
   /* ---------- the cover ---------- */
 
   /*
-   * A corporate split: a white panel on the left and a navy panel on the right,
-   * with a thin brand seam on the boundary. It is exactly one page tall and
-   * clips its own overflow, so the ring on the right is cropped by the cover's
-   * edges rather than spilling onto page two. The split sits inside the content
-   * box -- the running head and foot occupy the page margins on every page, so
-   * the cover cannot bleed to the paper edge without colliding with them.
+   * THE COVER RUNS TO THE PAPER EDGE, AND ONLY THE COVER. Every other page keeps
+   * the margins the renderer sets, which are also what make room for the running
+   * head and foot. This rule lifts them for the first page alone, so the panels
+   * and the strip reach the edge of the sheet. It names the first page and
+   * nothing else: the general page margin is still the renderer's and is still
+   * not declared here.
+   */
+  @page :first { margin: 0; }
+
+  /*
+   * A white panel on the left, a navy ground on the right, a blue strip standing
+   * on the boundary from the top of the sheet to the bottom, and one circular
+   * figure centred on that same boundary. Every measurement below is taken from
+   * the approved cover artwork, scaled to A4. The cover is exactly one sheet and
+   * clips its own overflow.
    */
   .cover {
-    /* Its own page, per 7A §18, and exactly one page tall. */
+    /* Its own page, per 7A §18, and exactly one sheet tall. */
     break-after: page;
-    height: ${CONTENT_HEIGHT};
+    width: ${PAGE_WIDTH};
+    height: ${PAGE_HEIGHT};
     box-sizing: border-box;
     position: relative;
-    display: flex;
-    flex-direction: row;
     overflow: hidden;
+    background: ${COVER_NAVY};
   }
 
+  /*
+   * The figure. Four shapes, back to front: the strip, a broad blue ring, a navy
+   * disc that leaves the ring showing as a band, and a near-white disc inside
+   * that. All four are centred on the panel boundary, so the white panel drawn
+   * after them hides their left halves and the white disc reads as the panel
+   * swelling out to the right.
+   */
+  .cover-figure { position: absolute; inset: 0; }
+  .cover-figure span { position: absolute; display: block; }
+  /* Brightest where it meets the ring, deepening toward the top and bottom edge. */
+  .cover-strip {
+    left: ${COVER.boundary}mm; top: 0; width: 21.7mm; height: 100%;
+    background: linear-gradient(180deg, #0a5380 0%, #079bdf 15.5%, #079bdf 84.5%, #0a5380 100%);
+  }
+  /*
+   * The ring's colour has two parts, layered. Underneath, the blue runs across
+   * the ring from bright where it meets the strip to a deep blue at the far
+   * right, where it melts into the navy ground and has no hard edge. Over that
+   * it darkens toward its outer rim. Only the right half is ever seen, so the
+   * gradient starts at the middle.
+   *
+   * PLAIN LINEAR AND RADIAL GRADIENTS ONLY. A conic gradient drew the same ring
+   * and produced a file Chromium's own PDF viewer could not open.
+   */
+  .cover-ring {
+    ${circleAt(COVER.ring)} border-radius: 50%;
+    background:
+      radial-gradient(circle closest-side, rgba(13, 26, 51, 0) 81%, rgba(13, 26, 51, .54) 100%),
+      linear-gradient(90deg,
+        #0695d5 51.5%, #1172b6 71%, #18569e 79.6%, #16407c 86%, #15305e 92%, ${COVER_NAVY} 100%);
+  }
+  /* The dark outline round the white disc: the navy ground showing through. */
+  .cover-outline {
+    ${circleAt(COVER.outline)} border-radius: 50%;
+    background: ${COVER_NAVY};
+  }
+  /* White where it joins the panel, shading very slightly toward its right rim. */
+  .cover-disc {
+    ${circleAt(COVER.disc)} border-radius: 50%;
+    background: linear-gradient(90deg, ${PAPER} 50%, #edf0f4 100%);
+  }
+
+  /*
+   * The white panel, and on it everything a reader reads. The blocks are placed
+   * from the top of the sheet at the heights the artwork gives them. The panel
+   * does not clip, because the title is wider than the panel and runs on over
+   * the white disc, exactly as drawn.
+   */
   .cover-left {
-    flex: 0 0 45%;
+    position: absolute; left: 0; top: 0;
+    width: ${COVER.boundary}mm; height: 100%;
     box-sizing: border-box;
-    display: flex;
-    flex-direction: column;
     background: ${PAPER};
-    padding: 10mm 16mm 10mm 5mm;
   }
-  .cover-right {
-    flex: 0 0 55%;
-    position: relative;
-    overflow: hidden;
-    background: linear-gradient(160deg, ${NAVY_DEEP} 0%, ${NAVY} 55%, #10161f 100%);
-  }
+  .cover-left > * { position: absolute; left: 22.2mm; }
 
   /*
    * The mark. The box is exactly the artwork's ink, with the artwork scaled
@@ -227,11 +294,11 @@ export const STYLESHEET: string =
    * and nothing is ever stretched.
    */
   .logo {
-    position: relative;
     width: ${LOGO_BOX.width}mm;
     height: ${LOGO_BOX.height}mm;
     overflow: hidden;
   }
+  .cover-left > .logo { left: 21.7mm; top: 24.3mm; }
   .logo img {
     position: absolute;
     left: -${LOGO_BOX.offsetLeft}mm;
@@ -251,16 +318,47 @@ export const STYLESHEET: string =
     letter-spacing: .08em; text-transform: uppercase; color: ${INK_FAINT};
     margin: 0 0 5pt;
   }
-  /* On the cover, the labels take the brand's mid blue rather than the caption grey. */
-  .cover-eyebrow { color: ${SKYBOOK_MID}; margin: 0 0 3pt; }
-
-  .cover-client {
-    font-size: 15pt; font-weight: 700; line-height: 1.2; color: ${INK};
-    text-transform: uppercase; letter-spacing: .02em; margin: 0 0 1pt;
+  /* On the cover the labels are small, widely spaced, and in the brand's blue. */
+  .cover-eyebrow {
+    font-size: 6.5pt; letter-spacing: .2em; line-height: 1.2;
+    color: ${COVER_LABEL}; margin: 0 0 3.6mm;
   }
-  .cover-contact { font-size: 11pt; color: ${INK_SOFT}; margin: 1pt 0 0; }
-  .cover-domain { font-size: 8.5pt; color: ${SKYBOOK_MID}; margin: 3pt 0 0; }
-  .cover-redirect { font-size: 8pt; color: ${INK_FAINT}; margin: 3pt 0 0; }
+
+  /* Who the report is for: name, then address, as two quiet spaced lines. */
+  .cover-for { top: 83.9mm; width: ${COVER_COLUMN_MM}mm; }
+  .cover-client, .cover-contact, .cover-domain {
+    font-family: ${SANS}; font-size: ${COVER_ADDRESS.sizePt}pt; font-weight: 400; line-height: 1.2;
+    letter-spacing: ${COVER_ADDRESS.spacingEm}em; color: ${INK}; margin: 0 0 2.4mm;
+  }
+  .cover-client, .cover-contact { text-transform: uppercase; }
+  /*
+   * EVERY LINE IN THIS BLOCK HAS A LIMIT, because the title is placed at a fixed
+   * height beneath it and anything that grew past its lines would run into the
+   * title. Two lines for the name, one for the contact, two for the address and
+   * two for the redirect note come to less than the room there is.
+   *
+   * The two addresses are already cut to their lines, by measuring, before they
+   * reach the page; see cover.ts. The clamp here is the same limit stated to
+   * the browser, so a line the measurement did not foresee is still cut and
+   * marked, and it is the only limit on the name and the contact, which are
+   * typed by a person and are ordinarily short.
+   */
+  .cover-client, .cover-contact, .cover-domain, .cover-redirect {
+    display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .cover-client { -webkit-line-clamp: 2; }
+  .cover-contact { -webkit-line-clamp: 1; }
+  /*
+   * An address is shown as it is: never re-cased. It has no spaces to break at,
+   * so it breaks between any two characters, which fills each line and is what
+   * the measuring in cover.ts counts on.
+   */
+  .cover-domain { word-break: break-all; -webkit-line-clamp: ${COVER_ADDRESS.lines}; }
+  .cover-redirect {
+    font-size: ${COVER_REDIRECT.sizePt}pt; color: ${INK_FAINT}; margin: 0;
+    -webkit-line-clamp: ${COVER_REDIRECT.lines};
+  }
+  .cover-redirect-url { word-break: break-all; }
 
   /*
    * The partial marker. Words carry it, not the colour: 7A §24 requires the
@@ -277,115 +375,115 @@ export const STYLESHEET: string =
     font-weight: 600;
     letter-spacing: .04em;
     text-transform: uppercase;
-    margin: 0 0 8pt;
+    margin: 0;
   }
+  /* Beneath the mark, in the clear space the artwork leaves there. */
+  .cover-left > .partial { top: 66mm; white-space: nowrap; }
 
   /*
-   * The report title, the strongest element on the page. A bold uppercase sans
-   * in dark navy, in two lines, pushed to the lower middle by the auto margin so
-   * the mark sits alone at the top and the information block reads beneath it.
+   * The report title, the strongest element on the page: bold uppercase sans in
+   * the cover's navy, on two lines, with the short blue rule beneath it. It is
+   * wider than the white panel and is meant to be.
    */
-  .cover-titleblock { margin-top: auto; }
+  .cover-titleblock { top: 125.2mm; width: 132mm; }
   .cover-title {
     font-family: ${SANS};
-    font-size: 33pt; font-weight: 700; line-height: 1.03;
-    text-transform: uppercase; letter-spacing: .005em;
-    color: ${INK}; margin: 0;
+    font-size: 37.5pt; font-weight: 600; line-height: 1.125;
+    text-transform: uppercase; letter-spacing: .012em; white-space: nowrap;
+    color: ${COVER_NAVY}; margin: 0;
   }
-  /* The short accent under the title, a cyan-to-blue bar. */
   .cover-accent {
-    display: block; width: 36mm; height: 1.8mm; margin-top: 7mm;
-    border-radius: 1mm;
-    background: linear-gradient(90deg, ${CYAN} 0%, ${SKYBOOK_MID} 100%);
+    display: block; width: 18.5mm; height: 1.6mm; margin-top: 8mm;
+    background: ${SKYBOOK_BRIGHT};
   }
 
-  /*
-   * The one information block, grouped beneath the title: who the report is for
-   * and the site, then when it was measured, the two divided by a hairline so
-   * they read as one considered block rather than three stray lines.
-   */
-  .cover-info { margin-top: 9mm; }
-  .cover-info-group + .cover-info-group {
-    margin-top: 6mm;
-    padding-top: 6mm;
-    border-top: .75pt solid ${RULE};
+  /* When it was measured: the label, then the date large and quiet. */
+  .cover-when { margin-top: 9.4mm; }
+  .cover-date {
+    font-size: 16pt; font-weight: 400; line-height: 1.25; letter-spacing: .02em;
+    color: ${INK_FAINT}; margin: .6mm 0 0; font-variant-numeric: tabular-nums;
   }
-  .cover-date { font-size: 10pt; color: ${INK_SOFT}; margin: 0; font-variant-numeric: tabular-nums; }
-  .cover-status { font-size: 8pt; color: ${INK_FAINT}; margin: 3pt 0 0; }
+  .cover-status { font-size: 7.5pt; color: ${INK_FAINT}; margin: 1.5mm 0 0; }
 
-  /* The signature, pinned to the baseline of the white panel by the auto margin. */
-  .cover-sign { margin-top: auto; padding-top: 9mm; }
-  .cover-sign-line { font-size: 9pt; color: ${INK_SOFT}; margin: 0 0 1pt; }
+  /* The signature, low on the panel: the label, then who prepared the report. */
+  .cover-sign { top: 265mm; width: 66mm; }
+  .cover-sign-line { font-size: 8.5pt; color: ${INK_SOFT}; margin: -1.6mm 0 1.2mm; }
   .cover-sign-brand {
-    font-family: ${SANS}; font-size: 13pt; font-weight: 700;
-    color: ${SKYBOOK_DEEP}; letter-spacing: .02em; margin: 0;
-  }
-
-  /*
-   * The navy panel is a clean dark ground with nothing drawn on it: the
-   * concentric ring motif that used to sit here was removed for a plainer
-   * composition. Its gradient is set on the .cover-right rule above.
-   */
-
-  /* The seam: a thin cyan-to-navy strip standing on the white/navy boundary. */
-  .cover-seam {
-    position: absolute;
-    top: 0; bottom: 0;
-    left: 45%;
-    width: 3mm;
-    transform: translateX(-50%);
-    background: linear-gradient(180deg, ${CYAN} 0%, ${SKYBOOK_MID} 45%, ${SKYBOOK_DEEP} 100%);
+    font-family: ${SANS}; font-size: 10.5pt; font-weight: 600;
+    color: ${INK}; letter-spacing: .02em; margin: 0;
   }
 
   /* ---------- sections ---------- */
 
-  section { margin: 0 0 10pt; }
   /*
-   * SECTION RHYTHM. A more generous gap between the narrative sections, so the
-   * report reads as a sequence of distinct, unhurried parts rather than a dense
-   * column — the biggest single lever on whether it feels premium or cramped.
-   * Whitespace only; nothing measured changes. The two reference-table sections
-   * (the measured facts and the crawl detail) keep the tighter gap: they begin
-   * on their own page and their pagination is deliberately left exactly as it was.
+   * ONE SYSTEM, FROM THE EXECUTIVE SUMMARY TO THE LAST PAGE. Every section opens
+   * the same way: a small spaced label carrying its number, the title in the
+   * serif, and a short blue rule. Inside, there are only four kinds of surface:
+   * a thin-bordered card, a card with a coloured rule along its top, a flat pale
+   * panel, and a ruled table. No shadows, no gradients and no rounded corners,
+   * so the colour that remains always means something.
    */
-  section:not(.measured):not(.coverage-detail) { margin-bottom: 15pt; }
-  .lead { max-width: 68ch; }
-  h2 { margin-top: 0; }
-  .group + .group { margin-top: 12pt; }
+  section { margin: 0 0 11mm; }
+  section > h2 { counter-increment: section; }
+  /* The numbered label above a section's title. Drawn by the page, not written. */
+  section > h2::before {
+    content: "Section " counter(section, decimal-leading-zero);
+    display: block;
+    font-family: ${SANS};
+    font-size: 7.5pt; font-weight: 400; line-height: 1.3;
+    letter-spacing: .28em; text-transform: uppercase;
+    color: ${SKYBOOK_DEEP};
+    margin: 0 0 2.5mm;
+  }
+  /* The short rule under the title. */
+  section > h2::after {
+    content: "";
+    display: block;
+    width: 16mm; height: .8mm;
+    margin: 4.5mm 0 0;
+    background: ${SKYBOOK_DEEP};
+  }
+  .lead { font-size: 10.5pt; color: ${INK_SOFT}; max-width: 72ch; }
+  .group + .group { margin-top: 6mm; }
   .group h3 { margin-top: 0; }
 
-  /* ---------- the severity split ---------- */
+  ul, ol { margin: 0 0 3mm; padding-left: 5mm; }
+  li { margin: 0 0 1.2mm; max-width: 72ch; }
+  li::marker { color: ${INK_FAINT}; }
+  strong { font-weight: 600; color: ${INK}; }
 
-  .tiles { display: flex; gap: 8pt; margin: 0 0 12pt; }
+  /* ---------- figures: the tiles ---------- */
+
   /*
-   * The dashboard's compact summary cards: a white surface with a subtle
-   * outline and lift, and the severity's colour carried on a left accent and
-   * the count. The word is still there, so the colour is never the only cue.
+   * A figure and what it counts: a large number in the serif over a small spaced
+   * label, in a thin-bordered card. A tile that stands for a severity carries
+   * that severity's colour as a rule along its top, and the word beneath, so the
+   * colour is never the only carrier. 7A §24.
    */
+  .tiles { display: flex; gap: 3mm; margin: 0 0 3mm; }
   .tile {
     flex: 1;
     background: ${PAPER};
-    border: .75pt solid ${CARD_BORDER};
-    border-left: 3pt solid currentColor;
-    border-radius: 6pt;
-    padding: 8pt 10pt;
-    box-shadow: ${CARD_SHADOW};
+    border: .25mm solid ${HAIRLINE};
+    border-top: 1mm solid currentColor;
+    padding: 3.2mm 4.5mm;
   }
-  /* The count takes the severity's colour by inheriting the tile's currentColor. */
   .tile-count {
     display: block;
-    font-size: 20pt;
+    font-family: ${SERIF};
+    font-size: 21pt;
     font-weight: 600;
-    line-height: 1.1;
+    line-height: 1;
+    color: ${INK};
   }
   /* The word, always, so the colour is never the only carrier. 7A §24. */
   .tile-label {
     display: block;
-    font-size: 8pt;
+    font-size: 7pt;
     font-weight: 600;
-    letter-spacing: .06em;
+    letter-spacing: .16em;
     text-transform: uppercase;
-    margin-top: 2pt;
+    margin-top: 2.5mm;
     color: ${INK_FAINT};
   }
   .tile-critical { color: ${SEVERITY.critical}; }
@@ -393,133 +491,157 @@ export const STYLESHEET: string =
   .tile-medium { color: ${SEVERITY.medium}; }
   .tile-good { color: ${SEVERITY.good}; }
 
-  /* ---------- the overall score ----------
-     The grade's colour comes from the reused .tile-* class, so no colour is set
-     on the base rules here; the letter and band word carry the meaning in words
-     and the tint is only an accent. 7A §24. */
+  /* ---------- executive summary ---------- */
 
-  .score-grade {
-    display: flex; gap: 14pt; align-items: center; margin: 0 0 10pt;
+  /*
+   * The measured verdict on one page. The grade leads in the one dark card on
+   * the page, the figures it rests on stand beside it, and the severity split
+   * and the four areas follow as rows of the same cards. Below them the page
+   * divides: what the figures mean on the left, what to do first in a pale
+   * panel on the right.
+   */
+  .metrics { display: flex; gap: 3mm; margin: 5mm 0 3mm; }
+  .metric {
+    flex: 1;
     background: ${PAPER};
-    border: .75pt solid ${CARD_BORDER};
-    border-radius: 9pt;
-    padding: 13pt 16pt;
-    box-shadow: ${CARD_SHADOW};
+    border: .25mm solid ${HAIRLINE};
+    padding: 3.2mm 4.5mm;
   }
-  .score-letter { flex-shrink: 0; font-size: 34pt; font-weight: 600; line-height: 1; }
-  .score-letter-none { font-size: 13pt; color: ${INK_SOFT}; }
-  .score-lines p { margin: 0 0 1pt; }
-  .score-band { font-size: 11pt; font-weight: 600; color: ${INK}; }
-  .score-health { font-size: 10pt; color: ${INK}; font-variant-numeric: tabular-nums; }
-  .score-coverage { font-size: 8.5pt; color: ${INK_SOFT}; font-variant-numeric: tabular-nums; }
-  .score-status { font-size: 9pt; color: ${INK}; max-width: 68ch; margin: 0 0 6pt; }
-  .score-caveat { font-size: 8.5pt; color: ${INK_SOFT}; max-width: 68ch; margin: 0 0 6pt; }
+  .metric-num {
+    display: block;
+    font-family: ${SERIF}; font-size: 21pt; font-weight: 600; line-height: 1; color: ${INK};
+  }
+  /* The unit after a figure: smaller, and quieter than the figure itself. */
+  .metric-of { font-family: ${SANS}; font-size: 9pt; font-weight: 400; color: ${INK_FAINT}; margin-left: 1mm; }
+  /* A figure that is words, where there is no number to show. */
+  .metric-text { font-size: 13pt; line-height: 1.2; padding-top: 2mm; }
+  .metric-label {
+    display: block;
+    font-size: 7pt; font-weight: 600; letter-spacing: .16em; text-transform: uppercase;
+    color: ${INK_FAINT}; margin-top: 2.5mm;
+  }
+  /* The one dark card. White on charcoal, read against the card and not the paper. */
+  .metric-lead { flex: 1.25; background: ${CHARCOAL}; border-color: ${CHARCOAL}; }
+  .metric-lead .metric-num { color: #ffffff; font-size: 26pt; }
+  .metric-lead .metric-label { color: #aab4c3; }
 
-  .score-cats { display: flex; gap: 8pt; margin: 10pt 0 0; }
+  /* The four areas, each a card: its name, its grade, and how much was assessed. */
+  .score-cats { display: flex; gap: 3mm; margin: 0 0 3mm; }
   .score-cat {
     flex: 1;
     background: ${PAPER};
-    border: .75pt solid ${CARD_BORDER};
-    border-radius: 7pt;
-    padding: 7pt 9pt;
-    box-shadow: ${CARD_SHADOW};
+    border: .25mm solid ${HAIRLINE};
+    padding: 3.2mm 4.5mm;
   }
   .score-cat-label {
-    display: block; font-size: 8pt; font-weight: 600; letter-spacing: .05em;
-    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 2pt;
+    display: block; font-size: 7pt; font-weight: 600; letter-spacing: .16em;
+    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 2mm;
   }
   .score-cat-value { display: block; }
-  .score-cat-grade { font-size: 13pt; font-weight: 600; }
-  .score-cat-rate { font-size: 11pt; color: ${INK}; margin-left: 4pt; font-variant-numeric: tabular-nums; }
-  .score-cat-cover { display: block; font-size: 7.5pt; color: ${INK_SOFT}; margin-top: 1pt; }
+  .score-cat-grade { font-family: ${SERIF}; font-size: 15pt; font-weight: 600; line-height: 1; }
+  .score-cat-rate { font-size: 10.5pt; color: ${INK}; margin-left: 2mm; font-variant-numeric: tabular-nums; }
+  .score-cat-cover { display: block; font-size: 7.5pt; color: ${INK_SOFT}; margin-top: 1.5mm; }
   /* Not a zero: a pillar no rule could run for is stated in words. */
   .score-cat-na { font-size: 9pt; font-weight: 600; color: ${INK_SOFT}; }
 
-  .score-gate { border-left: 2pt solid ${RULE}; padding-left: 8pt; margin: 8pt 0 0; }
-  .score-gate-heading {
-    font-size: 8pt; font-weight: 600; letter-spacing: .06em;
-    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 3pt;
+  .exec-grid {
+    display: grid; grid-template-columns: 1.15fr 1fr; gap: 7mm;
+    align-items: start; margin: 6mm 0 0;
   }
-  .score-gate-list { margin: 0 0 4pt; padding-left: 14pt; }
-  .score-gate-list li { margin: 0 0 1pt; }
-  .score-gate-note { font-size: 8pt; color: ${INK_FAINT}; max-width: 68ch; margin: 0; }
+  .exec-condition > p { font-size: 9.5pt; }
+  .exec-areas { margin-top: 6mm; }
+  .exec-areas ol { font-size: 9.5pt; }
+
+  .score-gate { margin: 3mm 0 0; }
+  .score-gate-heading {
+    font-size: 7pt; font-weight: 600; letter-spacing: .16em;
+    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 1.5mm;
+  }
+  .score-gate-list { margin: 0 0 1.5mm; font-size: 9.5pt; }
+  .score-gate-note { font-size: 8.5pt; color: ${INK_SOFT}; margin: 0; }
+
+  /*
+   * The flat pale panel: the one place a list of things to do is set apart from
+   * the reading around it. Its label is the brand's deep blue.
+   */
+  .panel { background: ${PANEL}; padding: 4mm 5mm; }
+  .panel-label {
+    font-size: 7pt; font-weight: 600; letter-spacing: .18em; text-transform: uppercase;
+    color: ${SKYBOOK_DEEP}; margin: 0 0 3mm;
+  }
+  .panel ol, .panel ul { margin-bottom: 0; font-size: 9pt; }
+  .panel li:last-child { margin-bottom: 0; }
 
   /* ---------- AI text, always subordinate ---------- */
 
   /*
-   * AI text sits on a pale blue surface with a brand-blue accent, so a reader
-   * can tell commentary from measured fact at a glance -- and it is still
+   * AI text sits on the pale panel with a blue rule down its left edge, so a
+   * reader can tell commentary from measured fact at a glance -- and it is still
    * labelled in words, so the distinction survives greyscale. It stays visually
-   * subordinate: lighter ground, smaller type, never a card lift of its own.
+   * subordinate: flat ground, smaller type, never a card of its own.
    */
   .ai {
-    background: ${AI_BG};
-    border: .75pt solid ${PANEL_BORDER};
-    border-left: 3pt solid ${SKYBOOK_MID};
-    border-radius: 7pt;
-    padding: 9pt 11pt;
-    margin: 0 0 10pt;
+    background: ${PANEL};
+    border-left: .8mm solid ${SKYBOOK_DEEP};
+    padding: 4mm 5mm;
+    margin: 0 0 4mm;
   }
-  .ai-summary { max-width: 68ch; }
+  .ai-summary { max-width: 72ch; }
   .ai-label {
-    font-size: 8pt; font-weight: 600; letter-spacing: .07em;
-    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 3pt;
+    font-size: 7pt; font-weight: 600; letter-spacing: .18em;
+    text-transform: uppercase; color: ${SKYBOOK_DEEP}; margin: 0 0 2mm;
   }
   .ai-sub {
-    font-size: 8.5pt; font-weight: 600; color: ${INK_SOFT}; margin: 6pt 0 2pt;
+    font-size: 8.5pt; font-weight: 600; color: ${INK}; margin: 2.5mm 0 .8mm;
   }
-  .ai-note { font-size: 8pt; color: ${INK_FAINT}; max-width: 68ch; margin: 6pt 0 0; }
+  .ai-note { font-size: 8pt; color: ${INK_FAINT}; max-width: 72ch; margin: 3mm 0 0; }
 
   /* ---------- the client-facing AI summary ----------
      One panel, five plain-English parts. It is allowed to break across pages,
-     because it can be long, while each key-finding and recommendation card is
-     kept whole. Same blue AI ground and provenance label as the commentary, so
-     a reader still reads it as written-from-measured. */
+     because it can be long, while each key-finding and recommendation item is
+     kept whole. Same ground and provenance label as the commentary, so a reader
+     still reads it as written-from-measured. */
   .client-ai {
-    background: ${AI_BG};
-    border: .75pt solid ${PANEL_BORDER};
-    border-left: 3pt solid ${SKYBOOK_MID};
-    border-radius: 7pt;
-    padding: 9pt 11pt;
-    margin: 0 0 10pt;
+    background: ${PANEL};
+    border-left: .8mm solid ${SKYBOOK_DEEP};
+    padding: 5mm 6mm;
+    margin: 0 0 4mm;
   }
-  .client-ai-summary { font-size: 9.5pt; line-height: 1.5; color: ${INK}; max-width: 68ch; margin: 4pt 0 0; }
+  .client-ai-summary { font-size: 10pt; line-height: 1.55; color: ${INK}; max-width: 72ch; margin: 1mm 0 0; }
   .client-ai-subhead {
-    font-size: 8.5pt; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
-    color: ${SKYBOOK_DEEP}; margin: 10pt 0 4pt;
+    font-size: 7pt; font-weight: 600; letter-spacing: .18em; text-transform: uppercase;
+    color: ${SKYBOOK_DEEP}; margin: 5mm 0 2mm;
   }
-  .client-ai-list { margin: 0 0 4pt; padding-left: 14pt; max-width: 68ch; }
-  .client-ai-list li { font-size: 9pt; line-height: 1.45; color: ${INK_SOFT}; margin: 0 0 2pt; }
-  .client-ai-item { break-inside: avoid; margin: 0 0 6pt; max-width: 68ch; }
-  .client-ai-item-title { font-size: 9.5pt; font-weight: 600; color: ${INK}; margin: 0 0 1pt; }
-  .client-ai-item-text { font-size: 9pt; line-height: 1.45; color: ${INK_SOFT}; margin: 0 0 1pt; }
-  .client-ai-item-impact { font-size: 8.5pt; line-height: 1.45; color: ${INK_FAINT}; margin: 0; }
-  .client-ai-steps { margin: 0 0 4pt; padding-left: 14pt; max-width: 68ch; }
-  .client-ai-steps li { font-size: 9pt; line-height: 1.45; color: ${INK}; margin: 0 0 2pt; }
+  .client-ai-list { margin: 0 0 1.5mm; padding-left: 5mm; max-width: 72ch; }
+  .client-ai-list li { font-size: 9pt; line-height: 1.5; color: ${INK_SOFT}; margin: 0 0 .8mm; }
+  .client-ai-item { break-inside: avoid; margin: 0 0 2.5mm; max-width: 72ch; }
+  .client-ai-item-title { font-size: 9.5pt; font-weight: 600; color: ${INK}; margin: 0 0 .4mm; }
+  .client-ai-item-text { font-size: 9pt; line-height: 1.5; color: ${INK_SOFT}; margin: 0 0 .4mm; }
+  .client-ai-item-impact { font-size: 8.5pt; line-height: 1.5; color: ${INK_FAINT}; margin: 0; }
+  .client-ai-steps { margin: 0 0 1.5mm; padding-left: 5mm; max-width: 72ch; }
+  .client-ai-steps li { font-size: 9pt; line-height: 1.5; color: ${INK}; margin: 0 0 .8mm; }
 
   /* ---------- a finding ---------- */
 
+  /*
+   * One finding, one card: a thin border all round and the severity's colour as
+   * a rule down the left. The word in the chip still carries the severity, so
+   * the rule is emphasis, never the message -- a greyscale print keeps every
+   * rule as the same grey and loses nothing. 7A §24.
+   */
   .finding {
     display: block;
     background: ${PAPER};
-    border: .75pt solid ${CARD_BORDER};
-    border-left: 3pt solid ${RULE};
-    border-radius: 8pt;
-    padding: 11pt 13pt;
-    margin: 0 0 8pt;
-    box-shadow: ${CARD_SHADOW};
+    border: .25mm solid ${HAIRLINE};
+    border-left: 1mm solid ${RULE};
+    padding: 5mm 6mm;
+    margin: 0 0 4mm;
   }
-  /*
-   * The severity's colour as a restrained left accent, echoing the chip. The
-   * word in the chip still carries the severity, so this is emphasis, never the
-   * message -- a greyscale print keeps every accent as the same grey and loses
-   * nothing. 7A §24.
-   */
   .finding-critical { border-left-color: ${SEVERITY.critical}; }
   .finding-high { border-left-color: ${SEVERITY.high}; }
   .finding-medium { border-left-color: ${SEVERITY.medium}; }
   .finding-good { border-left-color: ${SEVERITY.good}; }
-  .finding-head { display: flex; gap: 6pt; align-items: baseline; }
+  .finding-head { display: flex; gap: 3mm; align-items: center; }
   .finding-title { margin: 0; }
 
   /*
@@ -528,12 +650,13 @@ export const STYLESHEET: string =
    */
   .chip {
     flex-shrink: 0;
-    border: .75pt solid currentColor;
-    border-radius: 2pt;
-    padding: 1pt 4pt;
-    font-size: 7.5pt;
+    border: .25mm solid currentColor;
+    border-radius: 1.2mm;
+    padding: .9mm 2.3mm .8mm;
+    font-size: 6.8pt;
     font-weight: 600;
-    letter-spacing: .05em;
+    letter-spacing: .14em;
+    line-height: 1.2;
     text-transform: uppercase;
     white-space: nowrap;
   }
@@ -542,39 +665,38 @@ export const STYLESHEET: string =
   .chip-medium { color: ${SEVERITY.medium}; }
   .chip-good { color: ${SEVERITY.good}; }
 
-  .finding-meta { font-size: 8.5pt; color: ${INK_SOFT}; margin: 3pt 0 5pt; }
+  .finding-meta { font-size: 8.5pt; color: ${INK_SOFT}; margin: 1.8mm 0 3mm; max-width: none; }
   .finding-meta .reach::before { content: " · "; }
   /* The "Measured" label above the evidence, in the same key as the remediation
      and AI labels so a finding reads as three named parts. */
   .finding-eyebrow {
-    font-size: 8pt; font-weight: 600; letter-spacing: .06em;
-    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 2pt;
+    font-size: 6.8pt; font-weight: 600; letter-spacing: .16em;
+    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 .8mm;
   }
-  .evidence { max-width: 68ch; margin: 0 0 6pt; }
+  .evidence { max-width: 72ch; margin: 0 0 3mm; }
 
   /*
-   * WHAT TO DO: the soft light-blue panel from the dashboard. A tinted surface
-   * and a label set the advice apart from the measured evidence above it, so a
-   * reader never mistakes what to do for what was found. 7A §17.
+   * WHAT TO DO: the pale panel with a blue rule. A tinted surface and a label
+   * set the advice apart from the measured evidence above it, so a reader never
+   * mistakes what to do for what was found. 7A §17.
    */
   .remediation {
-    background: ${PANEL_BG};
-    border: .75pt solid ${PANEL_BORDER};
-    border-radius: 6pt;
-    padding: 7pt 9pt;
-    margin: 6pt 0;
+    background: ${PANEL};
+    border-left: .8mm solid ${SKYBOOK_DEEP};
+    padding: 3mm 4mm;
+    margin: 3mm 0;
   }
   .remediation-label {
-    font-size: 8pt; font-weight: 600; letter-spacing: .06em;
-    text-transform: uppercase; color: ${SKYBOOK_DEEP}; margin: 0 0 2pt;
+    font-size: 6.8pt; font-weight: 600; letter-spacing: .16em;
+    text-transform: uppercase; color: ${SKYBOOK_DEEP}; margin: 0 0 .8mm;
   }
-  .remediation p:last-child { margin: 0; max-width: 68ch; }
+  .remediation p:last-child { margin: 0; max-width: 72ch; }
 
   /*
    * The affected pages, run together rather than stacked. Fifty addresses on
    * one line each, across two dozen findings, would be most of the document.
    */
-  .affected { margin: 0 0 6pt; }
+  .affected { margin: 0 0 3mm; }
   .affected-list {
     list-style: none;
     margin: 0;
@@ -584,59 +706,57 @@ export const STYLESHEET: string =
     line-height: 1.5;
     color: ${INK_SOFT};
   }
-  .affected-list li { display: inline; overflow-wrap: anywhere; }
+  .affected-list li { display: inline; overflow-wrap: anywhere; max-width: none; }
   .affected-list li + li::before { content: "  ·  "; color: ${INK_FAINT}; }
-  .affected .note { margin: 3pt 0 0; }
+  .affected .note { margin: 1.5mm 0 0; }
 
-  /* One finding's AI note: the same pale blue surface as the summary panel, so
-     commentary reads as commentary wherever it appears. Subordinate by ground
-     and by type, labelled in words. */
+  /* One finding's AI note: no ground of its own, only a hairline above it and
+     its label, so it reads as a quieter fourth part of the card. Subordinate by
+     type and by position, labelled in words. */
   .commentary {
-    background: ${AI_BG};
-    border: .75pt solid ${PANEL_BORDER};
-    border-left: 3pt solid ${SKYBOOK_MID};
-    border-radius: 6pt;
-    padding: 8pt 10pt;
-    margin: 6pt 0 0;
+    border-top: .25mm solid ${HAIRLINE};
+    padding: 3mm 0 0;
+    margin: 3mm 0 0;
+    font-size: 9.5pt;
+    color: ${INK_SOFT};
   }
   .commentary p:last-child { margin-bottom: 0; }
-  .commentary p { max-width: 68ch; }
+  .commentary p { max-width: 72ch; }
 
   /* ---------- fact tables ---------- */
 
-  .facts { width: 100%; border-collapse: collapse; margin: 0 0 8pt; }
-  .facts th, .facts td { text-align: left; vertical-align: top; padding: 4pt 8pt 4pt 0; }
+  /*
+   * A ruled table and nothing else: a dark rule under the column headings and a
+   * hairline under every row. No card round it, because the rules already hold
+   * it together.
+   */
+  .facts { width: 100%; border-collapse: collapse; margin: 0 0 5mm; font-size: 9.5pt; }
+  .facts th, .facts td { text-align: left; vertical-align: top; padding: 2.2mm 3mm 2.2mm 0; }
   .facts thead th {
-    font-size: 7.5pt; font-weight: 600; letter-spacing: .07em;
+    font-size: 6.8pt; font-weight: 600; letter-spacing: .14em;
     text-transform: uppercase; color: ${INK_FAINT};
-    border-bottom: .75pt solid ${RULE};
+    border-bottom: .4mm solid ${INK};
+    padding-top: 0;
   }
   .facts tbody th { font-weight: 400; color: ${INK_SOFT}; width: 40%; }
   .facts tbody td { color: ${INK}; }
-  .facts tbody tr + tr th, .facts tbody tr + tr td { border-top: .5pt solid ${LINE_SOFT}; }
+  .facts tbody th, .facts tbody td { border-bottom: .25mm solid ${HAIRLINE}; }
   .fact-note { display: block; font-size: 8pt; color: ${INK_FAINT}; }
 
   /* ---------- speed ---------- */
 
-  .speed-block {
-    background: ${PAPER};
-    border: .75pt solid ${CARD_BORDER};
-    border-radius: 7pt;
-    padding: 9pt 12pt;
-    margin: 0 0 8pt;
-    box-shadow: ${CARD_SHADOW};
-  }
+  .speed-block { margin: 0 0 6mm; }
   .speed-block h3 { margin-top: 0; }
   .speed-block .facts { margin-bottom: 0; }
   .speed-score {
     font-family: ${SERIF};
-    font-size: 22pt;
+    font-size: 21pt;
     font-weight: 600;
-    line-height: 1.1;
-    margin: 2pt 0 5pt;
+    line-height: 1;
+    margin: 1mm 0 3mm;
   }
-  .speed-score-of { font-family: ${SANS}; font-size: 10pt; font-weight: 400; color: ${INK_FAINT}; }
-  .speed-limits { margin: 0 0 8pt; }
+  .speed-score-of { font-family: ${SANS}; font-size: 9pt; font-weight: 400; color: ${INK_FAINT}; }
+  .speed-limits { margin: 0 0 4mm; }
 
   /* ---------- checks that did not run ---------- */
 
@@ -645,122 +765,44 @@ export const STYLESHEET: string =
    * finding, and giving it the visual language of one would turn our own gap
    * into an accusation about the client's website.
    */
-  .skipped-group { margin: 0 0 8pt; }
+  .skipped-group { margin: 0 0 3.5mm; }
   .skipped-checks { list-style: none; margin: 0; padding: 0; }
-  .skipped-checks li { display: inline; }
+  .skipped-checks li { display: inline; max-width: none; }
   .skipped-checks li + li::before { content: ", "; }
-  .skipped-group .note { margin: 1pt 0 0; }
+  .skipped-group .note { margin: .6mm 0 0; }
 
   /* ---------- caveats, and about this report ---------- */
 
-  .caveat { margin: 0 0 10pt; }
+  .caveat { margin: 0 0 5mm; }
   .caveat-label {
-    font-size: 8pt; font-weight: 600; letter-spacing: .06em;
-    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 3pt;
+    font-size: 7pt; font-weight: 600; letter-spacing: .16em;
+    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 1.5mm;
   }
-  .caveat-list { margin: 0; padding-left: 12pt; max-width: 68ch; }
-  .caveat-list li { margin: 0 0 3pt; }
+  .caveat-list { margin: 0; padding-left: 5mm; max-width: 72ch; }
+  .caveat-list li { margin: 0 0 1.2mm; }
 
-  /*
-   * Reference tables in a compact information card, so a reader turning to
-   * check a number meets a clean labelled surface rather than a bare grid. The
-   * card holds together on the page (see the break rules below); a group longer
-   * than a page is the one case Chromium splits anyway, and its table header
-   * repeats when it does.
-   */
-  .fact-group {
-    background: ${PAPER};
-    border: .75pt solid ${CARD_BORDER};
-    border-radius: 7pt;
-    padding: 9pt 12pt;
-    margin: 0 0 8pt;
-    box-shadow: ${CARD_SHADOW};
-  }
+  /* A group of facts: its small label, then its ruled table. */
+  .fact-group { margin: 0 0 7mm; }
   .fact-group h3 { margin-top: 0; }
   .fact-group .facts { margin-bottom: 0; }
-
-  /* ---------- the editorial section header ----------
-     A short cyan-to-blue rule above every section title, the cover's accent
-     carried through the report so each section opens the same considered way.
-     It is decorative and sits outside the heading text, so the outline a screen
-     reader follows is untouched. */
-  section > h2::before {
-    content: "";
-    display: block;
-    width: 22pt;
-    height: 2pt;
-    margin: 0 0 5pt;
-    border-radius: 1pt;
-    background: linear-gradient(90deg, ${CYAN} 0%, ${SKYBOOK_MID} 100%);
-  }
-
-  /* ---------- executive summary ----------
-     A navy hero that echoes the cover: the grade in white, the band in cyan, the
-     measured stats beside it. Word before colour -- the grade's letter and band
-     carry the meaning, so the dark ground costs a greyscale reader nothing. */
-  .exec-panel {
-    display: flex;
-    gap: 18pt;
-    align-items: center;
-    flex-wrap: wrap;
-    background: linear-gradient(150deg, ${NAVY_DEEP} 0%, ${NAVY} 55%, #121a27 100%);
-    border-radius: 9pt;
-    padding: 14pt 18pt;
-    margin: 0 0 8pt;
-  }
-  .exec-grade-col { display: flex; align-items: baseline; gap: 8pt; flex-shrink: 0; }
-  .exec-grade { font-family: ${SERIF}; font-size: 40pt; font-weight: 600; line-height: 1; color: #ffffff; }
-  .exec-grade-none { font-family: ${SANS}; font-size: 15pt; font-weight: 600; color: #c4cedd; }
-  .exec-band { font-size: 13pt; font-weight: 600; color: ${CYAN}; }
-  .exec-stats { display: flex; flex-wrap: wrap; gap: 8pt 20pt; }
-  .exec-stat { display: flex; flex-direction: column; }
-  .exec-stat-label {
-    font-size: 7.5pt; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
-    color: #93a6c2; margin: 0 0 1pt;
-  }
-  .exec-stat-value { font-size: 11pt; font-weight: 600; color: #ffffff; font-variant-numeric: tabular-nums; }
-  .exec-note { font-size: 8.5pt; color: ${INK_SOFT}; max-width: 68ch; margin: 4pt 0 0; }
-
-  /* ---------- recommended actions ----------
-     The findings' own remediations, gathered as a checklist. A card each: the
-     severity chip, the finding it addresses, the measured action, then the
-     model's suggested step on the same pale blue ground the commentary uses. */
-  .recommend-list { list-style: none; margin: 0; padding: 0; }
-  .recommend-item {
-    background: ${PAPER};
-    border: .75pt solid ${CARD_BORDER};
-    border-radius: 8pt;
-    padding: 9pt 12pt;
-    margin: 0 0 7pt;
-    box-shadow: ${CARD_SHADOW};
-  }
-  .recommend-head { display: flex; gap: 6pt; align-items: baseline; margin: 0 0 4pt; }
-  .recommend-title { font-family: ${SERIF}; font-size: 11pt; font-weight: 600; color: ${INK}; line-height: 1.3; }
-  .recommend-action { font-size: 9.5pt; line-height: 1.5; color: ${INK}; margin: 0; max-width: 68ch; }
-  .recommend-ai {
-    font-size: 8.5pt; line-height: 1.5; color: ${INK_SOFT};
-    margin: 5pt 0 0; padding: 6pt 8pt; max-width: 68ch;
-    background: ${AI_BG}; border: .75pt solid ${PANEL_BORDER};
-    border-left: 3pt solid ${SKYBOOK_MID}; border-radius: 5pt;
-  }
-  .recommend-ai-label {
-    font-size: 7.5pt; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
-    color: ${INK_FAINT}; margin-right: 4pt;
-  }
 
   /* ---------- final assessment ----------
      A closing recap of the measured grade and the findings the gate named as
      holding it back. Restated, never re-decided. */
-  .final-head { display: flex; gap: 12pt; align-items: center; margin: 0 0 6pt; }
+  .final-head { display: flex; gap: 5mm; align-items: center; margin: 0 0 3mm; }
   .final-grade { font-family: ${SERIF}; font-size: 30pt; font-weight: 600; line-height: 1; color: ${INK}; flex-shrink: 0; }
   .final-grade-none { font-family: ${SANS}; font-size: 13pt; font-weight: 600; color: ${INK_SOFT}; }
-  .final-lines p { margin: 0 0 1pt; }
+  .final-lines p { margin: 0 0 .4mm; }
   .final-band { font-size: 12pt; font-weight: 600; color: ${INK}; }
   .final-health { font-size: 9.5pt; color: ${INK_SOFT}; font-variant-numeric: tabular-nums; }
-  .final-note { font-size: 9pt; color: ${INK_SOFT}; max-width: 68ch; margin: 0 0 5pt; }
-  .final-priorities { margin: 6pt 0 0; }
-  .final-list { margin: 3pt 0 4pt; padding-left: 14pt; max-width: 68ch; }
-  .final-list li { margin: 0 0 1pt; }
+  .final-note { font-size: 9pt; color: ${INK_SOFT}; max-width: 72ch; margin: 0 0 2mm; }
+  .final-priorities { margin: 3mm 0 0; }
+  .final-label {
+    font-size: 7pt; font-weight: 600; letter-spacing: .16em;
+    text-transform: uppercase; color: ${INK_FAINT}; margin: 0 0 1.5mm;
+  }
+  .final-list { margin: 0 0 2mm; padding-left: 5mm; max-width: 72ch; }
+  .final-list li { margin: 0 0 .6mm; }
 
   /* ---------- page breaks, 7A §18 ---------- */
 
@@ -781,13 +823,15 @@ export const STYLESHEET: string =
   .caveat,
   .fact-group,
   .tile,
-  .score-grade,
+  .tiles,
+  .metric,
+  .metrics,
   .score-cats,
   .score-cat,
   .score-gate,
   .remediation,
-  .exec-panel,
-  .recommend-item,
+  .exec-grid,
+  .panel,
   .final-head,
   .ai { break-inside: avoid; }
 
@@ -808,9 +852,10 @@ export const STYLESHEET: string =
    */
   .coverage { break-inside: avoid; }
   /*
-   * A SECTION HEADING KEEPS ITS ACCENT BAR. The bar is the heading's own ::before
-   * block, stacked above the text, so without this a page break can fall between
-   * the two and strand the bar at the foot of a page with the heading on the next.
+   * A SECTION HEADING KEEPS ITS LABEL AND ITS RULE. Both are the heading's own
+   * generated blocks, stacked above and below the text, so without this a page
+   * break can fall between them and strand the label at the foot of a page with
+   * the title on the next.
    */
   section > h2 { break-inside: avoid; }
 
@@ -819,7 +864,8 @@ export const STYLESHEET: string =
    * moves the heading down with the content it introduces rather than leaving
    * it stranded as the last line on a page.
    */
-  h1, h2, h3, .finding-title, .ai-label, .caveat-label, .remediation-label, .finding-eyebrow, .client-ai-subhead {
+  h1, h2, h3, .finding-title, .ai-label, .caveat-label, .remediation-label, .finding-eyebrow, .client-ai-subhead,
+  .panel-label, .score-gate-heading, .final-label, .lead {
     break-after: avoid;
   }
 
@@ -849,8 +895,11 @@ export const STYLESHEET: string =
    * begin on a fresh page: they are the tables a reader turns to rather than
    * reads through, and starting them clean keeps a long measurement table from
    * beginning three rows above a page break, which is exactly the split §18 asks
-   * to avoid for content that reads as one thing. Every other section flows.
+   * to avoid for content that reads as one thing. The AI summary starts a page
+   * too: it is the one long passage a model wrote, and it reads as a part of its
+   * own after the measured summary before it. Every other section flows.
    */
+  .ai-section,
   .measured,
   .about { break-before: page; }
 `;

@@ -31,16 +31,17 @@ export const PAGE_FORMAT = "a4";
  */
 export const PAGE_HEIGHT = "297mm";
 
+/** A4 is 210mm wide. Beside the height, for the one page that fills the sheet. */
+export const PAGE_WIDTH = "210mm";
+
 /**
  * TEMPORARY, and measured rather than guessed.
  *
  * The top and bottom margins are what reserve room for the running head and
- * foot. Chromium draws those templates whether or not the margin leaves space
- * for them -- verified on Chrome 152, where a 5mm margin still produced the
- * same header and footer text, overlapping the body instead of dropping it. So
- * a margin that is too small does not lose the running head; it collides with
- * the content, which is worse, because it looks like a layout bug rather than
- * a missing feature.
+ * foot, which are drawn inside them; see `runningHeadFoot.ts`. They were
+ * measured for the header and footer templates this report used to have, which
+ * Chromium drew whether or not the margin left space for them, and they are
+ * kept because the head and foot still sit at the same heights.
  */
 export const PAGE_MARGIN = {
   top: "24mm",

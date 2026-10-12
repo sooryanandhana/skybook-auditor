@@ -27,7 +27,7 @@ function priorities(score: PdfScore): string {
 
   return (
     `<div class="final-priorities">` +
-    `<p class="eyebrow cover-eyebrow">Priorities</p>` +
+    `<p class="final-label">Priorities</p>` +
     `<ul class="final-list">${items}</ul>` +
     note +
     `</div>`

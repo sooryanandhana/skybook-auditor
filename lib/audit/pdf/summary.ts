@@ -1,11 +1,13 @@
 /**
- * The summary: how many problems, how serious, and the AI's account of them.
+ * The severity split: how many problems, and how serious.
  *
- * TWO THINGS THAT MUST NOT BE CONFUSED, on one page. The severity split is
- * measured: four numbers our own rules produced. The executive summary is
- * written: prose about those numbers. 7A §9 requires the second to be labelled
- * as AI-written and to sit visually subordinate to the first, so a reader can
- * always tell which is which.
+ * MEASURED, AND KEPT APART FROM WHAT IS WRITTEN. These are numbers our own rules
+ * produced. Prose about them, where a model wrote any, is a separate section
+ * with its own label; 7A §9 requires the two never to be confused.
+ *
+ * PART OF THE EXECUTIVE SUMMARY, NOT A SECTION OF ITS OWN. The sentence and the
+ * tiles are drawn there, on the report's first page, beside the grade they
+ * explain. This file still decides what one of them looks like.
  *
  * FOUR NUMBERS, NOT A CHART. 7A §17 settled this: a severity split reads better
  * as four numbers than as a pie, and there are no charts in the first version.
@@ -16,9 +18,6 @@
  */
 import type { PdfSeverityCount, PdfSummary } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
-
-/** The section's title. See the note in `coverage.ts` on why it lives here. */
-const SUMMARY_HEADING = "Summary";
 
 /**
  * One severity, as a number and a word.
@@ -52,19 +51,17 @@ function severityTile(count: PdfSeverityCount): string {
  * different sentences, and only one of them is good news.
  */
 export function summaryHtml(summary: PdfSummary): string {
-  const state =
-    summary.stateSentence === "" ? "" : html`<p class="lead">${summary.stateSentence}</p>`;
+  return summaryLeadHtml(summary) + severityTilesHtml(summary);
+}
 
-  const tiles =
-    summary.severityCounts.length === 0
-      ? ""
-      : `<div class="tiles">` + summary.severityCounts.map(severityTile).join("") + `</div>`;
+/** The state sentence the report layer chose, or nothing when it chose none. */
+export function summaryLeadHtml(summary: PdfSummary): string {
+  return summary.stateSentence === "" ? "" : html`<p class="lead">${summary.stateSentence}</p>`;
+}
 
-  return (
-    `<section class="summary">` +
-    `<h2>${SUMMARY_HEADING}</h2>` +
-    state +
-    tiles +
-    `</section>`
-  );
+/** The severity tiles in a row, or nothing at all when there are no counts. */
+export function severityTilesHtml(summary: PdfSummary): string {
+  return summary.severityCounts.length === 0
+    ? ""
+    : `<div class="tiles">` + summary.severityCounts.map(severityTile).join("") + `</div>`;
 }

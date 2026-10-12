@@ -23,6 +23,7 @@ import puppeteer, { type Browser, type Page } from "puppeteer";
 import { PDF_RENDER_MESSAGES, PdfRenderError, configurePage, renderPdf } from "./render.ts";
 import { PAGE_MARGIN } from "./settings.ts";
 import { EMBEDDED_FACES } from "./fonts.ts";
+import { extractText } from "./pdfText.fixture.mts";
 import { testDocument } from "./testDocument.fixture.mts";
 
 /** A loopback server that counts what reached it. */
@@ -217,22 +218,14 @@ test("every face is embedded in the produced PDF, not left to the reader's machi
   );
 
   /*
-   * ONE FACE COMES FROM THE MACHINE, AND ONLY ONE. Chromium's running head and
-   * foot render in a context that will not load a face, not even from a data
-   * URI, so those two lines are set in whatever the render machine has. That
-   * is a known limitation recorded in `fonts.ts`, and the reason it is
-   * tolerated is that the alternative loses "page n of m", which 7A §20
-   * requires.
-   *
-   * The number is pinned at one so the limitation cannot quietly spread into
-   * the body of the document, which is the part a client reads.
+   * NO FACE COMES FROM THE MACHINE. The running head and foot used to: they
+   * were Chromium's own templates, which could not load an embedded face. They
+   * are page rules now and use the embedded sans like everything else, so the
+   * file no longer depends on what the render machine has installed.
    */
   const fromMachine = declared.filter((name) => !name.startsWith("IBMPlex"));
 
-  assert.ok(
-    fromMachine.length <= 1,
-    `only the running head and foot may fall back, but found ${fromMachine.join(", ")}`,
-  );
+  assert.equal(fromMachine.length, 0, `every face is embedded, but found ${fromMachine.join(", ")}`);
 });
 
 test("the Skybook mark is in the produced PDF, not merely in the markup", async () => {
@@ -320,24 +313,29 @@ test("a table spanning a page break repeats its header row", async () => {
   assert.ok(pageCount(longPdf) > pageCount(smallPdf), "the long table really does span more pages");
 
   /*
-   * Each new page the table reaches redraws its header, so the marginal glyphs
-   * PER ROW over a long, many-page span exceed those over a short one. Measured
-   * as a rate difference from the same 8-row start, so every fixed cost — the
-   * cover, every section above the table, the table's own heading — cancels and
-   * cannot tip it; only the repeated header is left. If the header stopped
-   * repeating the two rates would match and this would fail.
+   * THE HEADER ITSELF, COUNTED. The column heading is set in capitals and every
+   * row's value is not, so "RESULT" in the file's text is a drawn header row and
+   * nothing else. The same table on one page draws it some fixed number of
+   * times, for this table and the others in the document; forced across more
+   * pages it must draw it again on each page it reaches.
    *
-   * A rate rather than the old `> 14×` total: that total divided by the small
-   * table's glyphs, which carry a fixed heading overhead the multiplier then
-   * amplified, so an unrelated section added above the table could break it
-   * although the header still repeated exactly as it should.
+   * This replaces a rate of drawn glyphs per row, which was the strongest check
+   * available before the file's text could be read back. That rate moved with
+   * anything that changed the page count -- an extra page draws a running head
+   * and foot of its own -- so it could fail with the header repeating exactly as
+   * it should, and pass without it.
    */
-  const perRow = (fromOps: number, toOps: number, fromRows: number, toRows: number) =>
-    (toOps - fromOps) / (toRows - fromRows);
-  const shortRate = perRow(drawOps(smallPdf), drawOps(midPdf), 8, 20);
-  const longRate = perRow(drawOps(smallPdf), drawOps(longPdf), 8, 120);
+  const headerRows = (pdf: Buffer) => extractText(pdf).split("RESULT").length - 1;
+  const small = headerRows(smallPdf);
+  const mid = headerRows(midPdf);
+  const long = headerRows(longPdf);
 
-  assert.ok(longRate > shortRate * 1.05, "the longer table draws more per row — the repeated header");
+  assert.ok(small >= 1, "the table has a header row at all");
+  assert.equal(mid, small, "a table still on one page draws its header once");
+  assert.ok(long >= small + 2, `a table across several pages redraws it on each: ${long} against ${small}`);
+
+  // The glyph count still has to rise with the rows, or the rows are not there.
+  assert.ok(drawOps(longPdf) > drawOps(midPdf) && drawOps(midPdf) > drawOps(smallPdf));
 });
 
 test("a finding taller than a page breaks rather than being clipped", async () => {
@@ -610,8 +608,8 @@ test("enabling the running head and foot changes what is drawn on the page", asy
    * Chromium writes text as glyph indices against a subset font, so the words
    * cannot be read back out without a font-aware extractor. That extractor is
    * a later step's dependency. What can be measured now, with nothing added, is
-   * the number of text-drawing operations: turning the templates on must
-   * increase it, and by more than one page's worth.
+   * the number of text-drawing operations: the head and foot rules must
+   * increase it.
    */
   const { default: zlib } = await import("node:zlib");
 
@@ -637,23 +635,27 @@ test("enabling the running head and foot changes what is drawn on the page", asy
   };
 
   const document = testDocument();
-  const withTemplates = await renderPdf(document);
+  const withRules = await renderPdf(document);
 
   const browser = await puppeteer.launch({ headless: true });
   let without: Buffer;
   try {
     const page = await browser.newPage();
     await configurePage(page);
-    const { documentHtml } = await import("./shell.ts");
-    await page.setContent(documentHtml(document), { waitUntil: "load" });
-    without = Buffer.from(await page.pdf({ format: "a4", margin: { ...PAGE_MARGIN } }));
+    const { documentHtml, footOf, headOf } = await import("./shell.ts");
+    const { runningHeadFootCss } = await import("./runningHeadFoot.ts");
+    const rules = runningHeadFootCss(headOf(document), footOf(document));
+    const bare = documentHtml(document).replace(rules, "");
+    assert.ok(bare.length < documentHtml(document).length, "the rules were there to take out");
+    await page.setContent(bare, { waitUntil: "load" });
+    without = Buffer.from(await page.pdf({ format: "a4", margin: { ...PAGE_MARGIN }, printBackground: true }));
   } finally {
     await browser.close();
   }
 
   assert.ok(
-    drawOps(withTemplates) > drawOps(without),
-    "the head and foot are drawn on every page",
+    drawOps(withRules) > drawOps(without),
+    "the head and foot are drawn",
   );
 });
 

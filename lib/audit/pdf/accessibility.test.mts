@@ -16,8 +16,7 @@ import test from "node:test";
 import zlib from "node:zlib";
 import puppeteer from "puppeteer";
 import { renderPdf } from "./render.ts";
-import { documentHtml, footOf, headOf } from "./shell.ts";
-import { footerTemplate, headerTemplate } from "./runningHeadFoot.ts";
+import { documentHtml } from "./shell.ts";
 import { PAGE_FORMAT, PAGE_MARGIN } from "./settings.ts";
 import { PAPER, TEXT_COLOURS } from "./styles.ts";
 import { testDocument } from "./testDocument.fixture.mts";
@@ -111,9 +110,7 @@ test("turning tagging off loses all of it, so the tests above mean something", a
           format: PAGE_FORMAT,
           printBackground: true,
           margin: { ...PAGE_MARGIN },
-          displayHeaderFooter: true,
-          headerTemplate: headerTemplate(headOf(document)),
-          footerTemplate: footerTemplate(footOf(document)),
+          displayHeaderFooter: false,
           tagged: false,
         }),
       ),
@@ -180,7 +177,7 @@ test("the outline starts at the document title", () => {
 test("every section that a reader would navigate to is a second-level heading", () => {
   const levels = outline(documentHtml(testDocument()));
 
-  for (const section of ["What we checked", "Summary", "Speed", "About this report"]) {
+  for (const section of ["Executive summary", "What we checked", "Speed", "About this report"]) {
     const heading = levels.find((one) => one.text === section);
     assert.ok(heading, `${section} is a heading`);
     assert.equal(heading.level, 2, `${section} is a section`);

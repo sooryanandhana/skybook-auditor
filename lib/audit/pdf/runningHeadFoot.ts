@@ -3,55 +3,53 @@
  *
  * 7A §20 fixes what these carry. The head is the Skybook mark, the audited
  * site, and "Partial audit" when the crawl was incomplete -- repeated on every
- * page, so a page read on its own cannot be mistaken for a whole-site result.
- * The foot is the audit date and "page n of m". The audit date, not the
- * generation date: what matters is when the site was measured.
+ * page after the cover, so a page read on its own cannot be mistaken for a
+ * whole-site result. The foot is the audit date and "page n of m". The audit
+ * date, not the generation date: what matters is when the site was measured.
  *
- * THREE THINGS ABOUT CHROMIUM'S TEMPLATES, all verified on Chrome 152 rather
- * than taken from documentation:
+ * THEY ARE PART OF THE DOCUMENT, DRAWN IN THE PAGE MARGINS BY CSS. Each of the
+ * four is a page-margin box: `@top-left`, `@top-right`, `@bottom-left` and
+ * `@bottom-right` inside an `@page` rule. The page number comes from CSS's own
+ * `counter(page)` and `counter(pages)`, so there is still no counting on our
+ * side. Chrome has drawn margin boxes since version 131; this was verified on
+ * the Chrome 152 that Puppeteer 25 installs.
  *
- *   1. They render in their own context and inherit nothing from the page --
- *      not the stylesheet, not the fonts, not even a sensible default size.
- *      Every rule they need is inline, which is why this file is full of style
- *      attributes and the shell is not.
+ * WHY NOT CHROMIUM'S HEADER AND FOOTER TEMPLATES, which this file used to
+ * build. Two reasons, both measured rather than read:
  *
- *   2. `pageNumber` and `totalPages` are filled in by the browser from spans
- *      carrying those class names. There is no second layout pass and no
- *      counting on our side.
+ *   1. A template is drawn on every page and nothing can switch it off for
+ *      one. The cover runs to the paper edge, and it carried the mark, the
+ *      address, the date and "Page 1 of n" printed across its artwork. A page
+ *      rule can name the first page, so a margin box can simply be empty there.
  *
- *   3. They are drawn whether or not the page margin leaves room. A margin set
- *      too small produces overlap, not omission. See `PAGE_MARGIN`.
+ *   2. A template renders in a context of its own and cannot reach the
+ *      document's embedded faces, so those two lines were the one part of the
+ *      file whose typeface depended on the machine that produced it. A margin
+ *      box belongs to the document and uses the embedded sans like everything
+ *      else.
  *
- * THE MARK IS TYPESET, NOT DRAWN. The dark-text vector logo sits on the cover,
- * where it has room to be read. Here the mark is a word, because 8pt of
- * artwork in a page margin is a smudge.
+ * THE COVER HAS NONE OF IT, deliberately. Its own page already carries the
+ * mark, the audited address, the audit date and, when it applies, the partial
+ * marker, in larger type than a margin could hold. 7A §20's purpose -- that no
+ * page can be mistaken for a whole-site result -- is met there by the cover
+ * itself.
  *
- * ---------------------------------------------------------------------------
- * KNOWN ACCESSIBILITY LIMITATION, AND IT IS NOT FIXABLE FROM HERE
- * ---------------------------------------------------------------------------
+ * THE MARGINS THEMSELVES ARE STILL THE RENDERER'S. This file declares what is
+ * drawn in the margins and never how large they are; see `PAGE_MARGIN`. The one
+ * margin the stylesheet does set is the cover's, to nothing.
  *
- * These two lines are not marked as artifacts. A tagged PDF is supposed to
- * mark repeated page furniture -- a running head, a page number -- as
- * artifacts, so a screen reader skips them instead of announcing the mark, the
- * address and the page number between every section. Measured on Chrome 152,
- * the produced file contains no artifact marks at all.
+ * THE MARK IS TYPESET, NOT DRAWN. The artwork sits on the cover, where it has
+ * room to be read. Here the mark is a word, because 8pt of artwork in a page
+ * margin is a smudge.
  *
- * It cannot be corrected in this file. Chromium draws these templates itself,
- * outside the page, and nothing the page contains can reach them. The only
- * alternative is to stop using them and draw the head and foot inside the page
- * instead, where they could be marked -- and that loses "page n of m", because
- * Chromium fills those numbers in from the template and offers CSS no page
- * counter. 7A §20 requires the page number by name.
- *
- * So the trade is: skippable furniture, or knowing which page you are on. The
- * page number wins, and this note exists so the decision is visible rather
- * than looking like an oversight. It is also the reason this project claims a
- * tagged, navigable document and does NOT claim PDF/UA conformance.
- *
- * The same context is why these two lines use a system font while every other
- * glyph in the document is embedded. See the note in `fonts.ts`.
+ * NOT A CONFORMANCE CLAIM. Whether these lines are marked as artifacts, so a
+ * screen reader skips them between sections, has not been established. This
+ * project still claims a tagged, navigable document and does NOT claim PDF/UA
+ * conformance.
  */
-import { escapeHtml } from "./escape.ts";
+import { SANS } from "./fonts.ts";
+import { PAGE_MARGIN, PAGE_WIDTH } from "./settings.ts";
+import { fitSans, sansWidthMm } from "./textWidth.ts";
 
 /** What the head repeats on every page. */
 export interface RunningHead {
@@ -72,73 +70,135 @@ export interface RunningFoot {
   readonly auditDate: string | null;
 }
 
+/**
+ * A value from the document, as a CSS string.
+ *
+ * THE ADDRESS CAME FROM SOMEBODY ELSE'S WEBSITE, and this puts it inside a
+ * stylesheet inside a page. Two things could go wrong there. A quote or a
+ * backslash could end the string and start a declaration of its own; and the
+ * letters `</style>` could end the stylesheet and start markup, because the
+ * HTML parser reads a style element's text before CSS ever sees it.
+ *
+ * So nothing but plain letters and digits is written as itself. Every other
+ * character is written as a CSS escape: a backslash and its code point in six
+ * hexadecimal digits, which is the length that needs nothing after it to end
+ * it. A space is escaped too, because CSS swallows one space after an escape
+ * and a real space following one would vanish. A reader sees the same
+ * characters; neither parser sees anything it could act on. This is the
+ * counterpart, for CSS, of `escapeHtml`.
+ */
+export function cssString(value: string): string {
+  let out = "";
+  for (const character of value) {
+    out += /^[A-Za-z0-9]$/.test(character)
+      ? character
+      : `\\${character.codePointAt(0)!.toString(16).padStart(6, "0")}`;
+  }
+  return `"${out}"`;
+}
+
 /*
- * Shared inline styling. Chromium's own default for these templates is around
- * 8px, which is unreadably small, so a size is always stated.
+ * Shared styling for all four boxes. The size is stated because a margin box
+ * would otherwise take the root's, and these are captions, not body text.
  */
-/**
- * A SYSTEM STACK, AND IT HAS TO BE. The document's own faces are unreachable
- * here: the templates render in their own context, and a `@font-face` declared
- * inside one does not load, so the only thing this stack can name is something
- * the render machine already has. Written out rather than left to the browser
- * so the choice is at least visible and stable in its order.
- *
- * THE CONSEQUENCE, STATED PLAINLY. These two lines are the one part of the
- * document whose typeface depends on where it was produced. Everything a
- * reader actually reads is embedded; the mark, the address, the date and the
- * page number in the margins are not. Fixing it would cost "page n of m",
- * which 7A §20 requires. See the note in `fonts.ts`.
- */
-const RUNNING_STACK = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+const SIZE_PT = 8;
+const BOX = [`font-family:${SANS}`, `font-size:${SIZE_PT}pt`, "line-height:1.3", "color:#4a5872", "white-space:nowrap"].join(";");
 
-const BAR = [
-  "width:100%",
-  "box-sizing:border-box",
-  "padding:0 18mm",
-  `font-family:${RUNNING_STACK}`,
-  "font-size:8pt",
-  "line-height:1.3",
-  "color:#4a5872",
-  "display:flex",
-  "justify-content:space-between",
-].join(";");
+/*
+ * WHERE THE LINES SIT. The head hangs just below the top of the sheet and the
+ * foot stands just above the bottom, each clear of the text by most of its
+ * margin. These are the heights the lines have always had.
+ */
+const HEAD = `${BOX};vertical-align:top;padding-top:5.3mm`;
+const FOOT = `${BOX};vertical-align:bottom;padding-bottom:4.9mm`;
+
+/** The mark, in spaced capitals, as every section label in the report is set. */
+const MARK = "SKYBOOK";
+const MARK_SPACING_EM = 0.22;
+
+/** What follows the address when the crawl did not finish. */
+const PARTIAL_MARKER = " · Partial audit";
+
+/** The clear space kept between the mark and whatever stands to its right. */
+const HEAD_GAP_MM = 6;
 
 /**
- * The head. Mark on the left, site on the right, partial marker beside it.
+ * How much of the measured room the address may use.
  *
- * The marker is words rather than a colour, because 7A §24 requires every
- * state to survive greyscale printing, and because a coloured bar at the top
- * of a page tells a reader nothing they can act on.
+ * The width of a line is read from the font file, and that agrees with what the
+ * browser lays out to within half a percent at this size. Two percent is held
+ * back so the difference can never be what makes a line touch.
  */
-export function headerTemplate(head: RunningHead): string {
-  const right = head.partial
-    ? `${escapeHtml(head.auditedUrl)} &middot; Partial audit`
-    : escapeHtml(head.auditedUrl);
+const HEAD_FILL = 0.98;
 
-  return (
-    `<div style="${BAR}">` +
-    /*
-     * COLOUR AND SPACING, NOT WEIGHT. A bold mark would pull a second face
-     * from the render machine, and every one of those is a way the file can
-     * differ depending on where it was produced. One is unavoidable here; two
-     * was a choice, and not a choice worth making for a line of 8pt text.
-     */
-    `<span style="color:#264a9a;letter-spacing:.06em;">Skybook</span>` +
-    `<span>${right}</span>` +
-    `</div>`
-  );
+/**
+ * How wide the head is: the sheet, less the left and right margins.
+ *
+ * Taken from the same constants the renderer prints with, so a change to the
+ * paper or a margin moves this with it.
+ */
+export const HEAD_WIDTH_MM =
+  Number.parseFloat(PAGE_WIDTH) - Number.parseFloat(PAGE_MARGIN.left) - Number.parseFloat(PAGE_MARGIN.right);
+
+/**
+ * The room the address has, in millimetres, on a partial or a complete audit.
+ *
+ * WHAT IS LEFT AFTER EVERYTHING THAT MUST BE THERE. The mark is always on the
+ * left and the partial marker, when it applies, is always on the right, because
+ * 7A §20 requires both on every page. The address gets the space between, less
+ * a gap.
+ */
+export function headAddressRoomMm(partial: boolean): number {
+  const mark = sansWidthMm(MARK, SIZE_PT, MARK_SPACING_EM);
+  const marker = partial ? sansWidthMm(PARTIAL_MARKER, SIZE_PT) : 0;
+  return (HEAD_WIDTH_MM - mark - HEAD_GAP_MM - marker) * HEAD_FILL;
 }
 
 /**
- * The foot. Audit date on the left, page number on the right.
+ * The address as the head shows it: whole, or cut short and saying so.
  *
- * "n of m" rather than a bare number, so a missing page is noticeable.
+ * THE HEAD IS ONE LINE, AND IT HAS TO STAY ONE. A margin box has no room to
+ * wrap: an address too wide for it ran across the mark on its left and off the
+ * edge of the sheet, taking "Partial audit" with it.
+ *
+ * FITTED BY WIDTH, NOT BY COUNTING. Eighty characters of "i" and eighty of "W"
+ * differ by a factor of more than three, so a limit in characters either cuts
+ * ordinary addresses that would have fitted or lets wide ones through. The
+ * address is measured in the face it is set in and kept as long as it fits.
+ *
+ * NEVER SILENTLY. A shortened address ends in an ellipsis, so it cannot be
+ * taken for the whole one. The full address is on the cover and in the
+ * document's title; the head only has to say which site this page is about.
  */
-export function footerTemplate(foot: RunningFoot): string {
+function headAddress(url: string, partial: boolean): string {
+  return fitSans(url, SIZE_PT, headAddressRoomMm(partial));
+}
+
+/**
+ * The rules that draw the head and foot, for one document.
+ *
+ * TWO RULES. The first puts the four lines on every page. The second names the
+ * first page -- the cover -- and empties all four, so the cover carries nothing
+ * in its margins. Neither sets a margin: the renderer's still apply to every
+ * page, and the cover's is lifted by the stylesheet.
+ *
+ * COLOUR AND SPACING, NOT WEIGHT, set the mark apart: the brand's deep blue, in
+ * the same spaced capitals as the label above every section title.
+ */
+export function runningHeadFootCss(head: RunningHead, foot: RunningFoot): string {
+  const address = headAddress(head.auditedUrl, head.partial);
+  const site = head.partial ? `${address}${PARTIAL_MARKER}` : address;
+  const date = foot.auditDate === null ? "none" : cssString(foot.auditDate);
+
   return (
-    `<div style="${BAR}">` +
-    `<span>${foot.auditDate === null ? "" : escapeHtml(foot.auditDate)}</span>` +
-    `<span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>` +
-    `</div>`
+    `@page{` +
+    `@top-left{content:"${MARK}";${HEAD};color:#264a9a;letter-spacing:${MARK_SPACING_EM}em}` +
+    `@top-right{content:${cssString(site)};${HEAD}}` +
+    `@bottom-left{content:${date};${FOOT}}` +
+    `@bottom-right{content:"Page " counter(page) " of " counter(pages);${FOOT}}` +
+    `}` +
+    `@page :first{` +
+    `@top-left{content:none}@top-right{content:none}@bottom-left{content:none}@bottom-right{content:none}` +
+    `}`
   );
 }

@@ -11,7 +11,8 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import fs from "node:fs";
 import { documentHtml, footOf, headOf } from "./shell.ts";
-import { footerTemplate, headerTemplate } from "./runningHeadFoot.ts";
+import { HEAD_WIDTH_MM, cssString, headAddressRoomMm, runningHeadFootCss } from "./runningHeadFoot.ts";
+import { sansWidthMm } from "./textWidth.ts";
 import { HOSTILE, SENTINEL, testDocument } from "./testDocument.fixture.mts";
 
 // ---------------------------------------------------------------------------
@@ -125,38 +126,195 @@ test("the whole shell contains no element the shell did not write", () => {
 // The running head and foot
 // ---------------------------------------------------------------------------
 
-test("the head carries the mark and the audited site on every page", () => {
-  const head = headerTemplate({ auditedUrl: "https://example.com/", partial: false });
+/*
+ * THE HEAD AND FOOT ARE PAGE RULES, so a value in them is a CSS string and is
+ * written as escapes. These tests read it back the way CSS would, rather than
+ * looking for the raw characters, which are deliberately not there.
+ */
 
-  assert.ok(head.includes("Skybook"));
-  assert.ok(head.includes("https://example.com/"));
+/** The text a CSS string literal stands for: each six-digit escape, as its character. */
+function cssText(literal: string): string {
+  return literal
+    .slice(1, -1)
+    .split(String.fromCharCode(92))
+    .map((part, index) => (index === 0 ? part : String.fromCodePoint(Number.parseInt(part.slice(0, 6), 16)) + part.slice(6)))
+    .join("");
+}
+
+/** The `content` of one margin box, in the rule for every page. */
+function boxContent(css: string, box: string): string {
+  const everyPage = css.slice(0, css.indexOf("@page :first"));
+  const start = everyPage.indexOf(`@${box}{content:`) + `@${box}{content:`.length;
+  return everyPage.slice(start, everyPage.indexOf(";", start));
+}
+
+const HEAD = { auditedUrl: "https://example.com/", partial: false };
+const FOOT = { auditDate: "8 September 2026 at 10:00 UTC" };
+
+test("the head carries the mark and the audited site on every page", () => {
+  const css = runningHeadFootCss(HEAD, FOOT);
+
+  assert.equal(boxContent(css, "top-left"), '"SKYBOOK"');
+  assert.equal(cssText(boxContent(css, "top-right")), "https://example.com/");
 });
 
 test("a partial audit says so in the head, in words", () => {
   // 7A §20: a page read on its own must not be mistaken for a whole-site
   // result, and 7A §24 forbids carrying that state by colour alone.
-  const head = headerTemplate({ auditedUrl: "https://example.com/", partial: true });
+  const css = runningHeadFootCss({ ...HEAD, partial: true }, FOOT);
 
-  assert.ok(head.includes("Partial audit"));
+  assert.ok(cssText(boxContent(css, "top-right")).endsWith("Partial audit"));
 });
 
 test("a complete audit says nothing about being partial", () => {
-  assert.ok(!headerTemplate({ auditedUrl: "https://example.com/", partial: false }).includes("Partial"));
+  assert.ok(!cssText(boxContent(runningHeadFootCss(HEAD, FOOT), "top-right")).includes("Partial"));
 });
 
-test("a hostile address cannot inject markup into the head", () => {
-  const head = headerTemplate({ auditedUrl: '"><script>steal()</script>', partial: false });
+test("a very long address is cut short in the head, and says so", () => {
+  /*
+   * THE HEAD IS ONE LINE. Left whole, a long address ran over the mark and off
+   * the sheet, and took the partial marker with it. Shortened, it ends in an
+   * ellipsis so it cannot be taken for the whole address, and the marker that
+   * 7A §20 requires on every page is still there after it.
+   */
+  const long = "https://example.com/" + "segment/".repeat(60);
+  const shown = cssText(boxContent(runningHeadFootCss({ auditedUrl: long, partial: true }, FOOT), "top-right"));
 
-  assert.ok(!head.includes("<script>"));
-  assert.ok(head.includes("&lt;script&gt;"));
+  assert.ok(shown.startsWith("https://example.com/segment/"), "it still begins as the address does");
+  assert.ok(shown.endsWith("… · Partial audit"), "the cut is marked, and the partial marker survives it");
+  assert.ok(long.startsWith(shown.slice(0, shown.indexOf("…"))), "and what is kept is the address's own beginning");
 });
 
-test("the foot carries the audit date and the page number spans", () => {
-  const foot = footerTemplate({ auditDate: "2026-09-08T10:00:00.000Z" });
+test("an address that fits is shown whole", () => {
+  const exact = "https://example.com/" + "a".repeat(60);
+  const shown = cssText(boxContent(runningHeadFootCss({ auditedUrl: exact, partial: false }, FOOT), "top-right"));
 
-  assert.ok(foot.includes("2026-09-08T10:00:00.000Z"));
-  assert.ok(foot.includes('class="pageNumber"'), "Chromium fills this in");
-  assert.ok(foot.includes('class="totalPages"'), "so a missing page is noticeable");
+  assert.equal(shown, exact);
+  assert.ok(!shown.includes("…"));
+});
+
+/** The widest the whole head can be: mark, gap and everything in the right box, in millimetres. */
+function headWidthMm(head: { auditedUrl: string; partial: boolean }): number {
+  const right = cssText(boxContent(runningHeadFootCss(head, FOOT), "top-right"));
+  return sansWidthMm("SKYBOOK", 8, 0.22) + sansWidthMm(right, 8);
+}
+
+test("the head fits its line whatever the address is made of", () => {
+  /*
+   * THE CASE A CHARACTER COUNT GOT WRONG. Eighty capital W's are more than three
+   * times as wide as eighty i's, and a limit of eighty characters let them run
+   * across the mark and off the sheet. Each of these is measured in the face the
+   * head is set in, and the mark, the address and the partial marker must all
+   * fit side by side with clear space left between the mark and the rest.
+   */
+  const addresses = {
+    ordinary: "https://www.ademstravel.com/",
+    long: "https://www.example.com/" + "a-long-path-segment/".repeat(30),
+    "unusually wide": "https://www.example.com/" + "WWWWMMMM".repeat(40),
+    "unusually narrow": "https://www.example.com/" + "il.i/".repeat(120),
+    "not in the embedded face": "https://www.example.com/" + "漢字".repeat(80),
+  };
+
+  for (const [kind, auditedUrl] of Object.entries(addresses)) {
+    for (const partial of [true, false]) {
+      const used = headWidthMm({ auditedUrl, partial });
+      assert.ok(
+        used <= HEAD_WIDTH_MM - 5,
+        `${kind}, ${partial ? "partial" : "complete"}: the head needs ${used.toFixed(1)}mm of ${HEAD_WIDTH_MM}mm`,
+      );
+    }
+  }
+});
+
+test("a wide address is cut shorter than a narrow one, because it is measured", () => {
+  const shownOf = (auditedUrl: string) =>
+    cssText(boxContent(runningHeadFootCss({ auditedUrl, partial: true }, FOOT), "top-right")).replace(" · Partial audit", "");
+
+  const wide = shownOf("W".repeat(400));
+  const narrow = shownOf("i".repeat(400));
+
+  assert.ok(wide.endsWith("…") && narrow.endsWith("…"), "both are too long, and both say so");
+  assert.ok([...narrow].length > [...wide].length * 3, "the narrow letters get more than three times as many");
+});
+
+test("a wide address keeps the partial marker, which is what the head is for", () => {
+  // 7A §20: the marker is on every page. It is given its room before the address is.
+  const shown = cssText(
+    boxContent(runningHeadFootCss({ auditedUrl: "https://www.example.com/" + "WWWWMMMM".repeat(40), partial: true }, FOOT), "top-right"),
+  );
+
+  assert.ok(shown.endsWith("… · Partial audit"));
+  assert.ok(shown.startsWith("https://www.example.com/WWWW"), "and it still says which site");
+});
+
+test("an address has more room when there is no partial marker to make way for", () => {
+  assert.ok(headAddressRoomMm(false) > headAddressRoomMm(true));
+  assert.ok(headAddressRoomMm(true) > 100, "and plenty either way, for an ordinary address");
+});
+
+test("a value is written so that neither CSS nor HTML can act on it", () => {
+  /*
+   * THE ADDRESS COMES FROM THE AUDITED SITE and lands inside a stylesheet inside
+   * a page. A quote could end the string; "</style>" could end the stylesheet.
+   * Written as escapes it can do neither, and it still reads back unchanged.
+   */
+  const hostile = 'a"b' + String.fromCharCode(92) + "c</style><script>steal()</script>" + String.fromCharCode(10) + "d;}e";
+  const literal = cssString(hostile);
+
+  assert.ok(/^"[A-Za-z0-9\\]*"$/.test(literal), "nothing but letters, digits and escapes between the quotes");
+  assert.equal(cssText(literal), hostile, "and it stands for exactly the text it was given");
+});
+
+test("a hostile address cannot break out of the head", () => {
+  const css = runningHeadFootCss({ auditedUrl: '"></style><script>steal()</script>', partial: false }, FOOT);
+
+  assert.ok(!css.includes("<"), "no markup can start");
+  assert.ok(!css.includes("script>"));
+  assert.equal(cssText(boxContent(css, "top-right")), '"></style><script>steal()</script>', "and the reader still sees it as text");
+  assert.equal((css.match(/@page/g) ?? []).length, 2, "the rules are the same two, whatever the address says");
+});
+
+test("a hostile address does not reach the page as markup either", () => {
+  const document = testDocument();
+  const out = documentHtml({
+    ...document,
+    cover: { ...document.cover, auditedUrl: "</style><script>steal()</script>" },
+  });
+
+  assert.ok(!out.includes("<script>"));
+  assert.equal((out.match(/<\/style>/g) ?? []).length, 1, "the one stylesheet ends once, where it should");
+});
+
+test("the foot carries the audit date and the page number", () => {
+  const css = runningHeadFootCss(HEAD, { auditDate: "2026-09-08T10:00:00.000Z" });
+
+  assert.equal(cssText(boxContent(css, "bottom-left")), "2026-09-08T10:00:00.000Z");
+  assert.equal(
+    boxContent(css, "bottom-right"),
+    '"Page " counter(page) " of " counter(pages)',
+    "CSS counts the pages, so a missing page is noticeable",
+  );
+});
+
+test("the cover carries no head and no foot", () => {
+  /*
+   * THE REASON THESE ARE PAGE RULES. The cover runs to the paper edge and has
+   * the mark, the address, the date and the partial marker in its own design.
+   * Every one of the four boxes is emptied for the first page, and only there.
+   */
+  const css = runningHeadFootCss({ ...HEAD, partial: true }, FOOT);
+  const first = css.slice(css.indexOf("@page :first"));
+
+  for (const box of ["top-left", "top-right", "bottom-left", "bottom-right"]) {
+    assert.ok(first.includes(`@${box}{content:none}`), `${box} is empty on the cover`);
+  }
+  assert.ok(!first.includes("margin"), "and the cover's margin is not this rule's to set");
+});
+
+test("the document carries its own head and foot rules", () => {
+  const document = testDocument();
+
+  assert.ok(documentHtml(document).includes(runningHeadFootCss(headOf(document), footOf(document))));
 });
 
 test("the foot takes the audit date, never a generation date", () => {
@@ -166,10 +324,11 @@ test("the foot takes the audit date, never a generation date", () => {
 });
 
 test("the foot carries the page number alone when there is no audit date", () => {
-  const foot = footerTemplate({ auditDate: null });
+  const css = runningHeadFootCss(HEAD, { auditDate: null });
 
-  assert.ok(foot.includes('class="pageNumber"'), "the page number still appears");
-  assert.ok(!foot.includes("null"), "and nothing stands in for the missing date");
+  assert.equal(boxContent(css, "bottom-left"), "none", "nothing stands in for the missing date");
+  assert.ok(boxContent(css, "bottom-right").includes("counter(page)"), "the page number still appears");
+  assert.ok(!css.includes("null"));
 });
 
 // ---------------------------------------------------------------------------
@@ -226,15 +385,14 @@ test("the head is built from the cover, not from anywhere else", () => {
   });
 });
 
-test("the templates carry their own styling, because Chromium gives them none", () => {
-  // Verified on Chrome 152: header and footer templates inherit nothing from
-  // the page, and default to a size too small to read.
-  for (const template of [
-    headerTemplate({ auditedUrl: "https://example.com/", partial: false }),
-    footerTemplate({ auditDate: "2026-09-08" }),
-  ]) {
-    assert.ok(template.includes("font-size:"), "a size is always stated");
-    assert.ok(template.includes("font-family:"), "and a face");
+test("every margin box states its own size and face", () => {
+  // A margin box would otherwise take the root's size, and these are captions.
+  const everyPage = runningHeadFootCss(HEAD, FOOT).split("@page :first")[0];
+
+  for (const box of ["top-left", "top-right", "bottom-left", "bottom-right"]) {
+    const rule = everyPage.slice(everyPage.indexOf(`@${box}{`)).split("}")[0];
+    assert.ok(rule.includes("font-size:8pt"), `${box} states a size`);
+    assert.ok(rule.includes('font-family:"Skybook Sans"'), `${box} uses the embedded sans`);
   }
 });
 

@@ -30,10 +30,9 @@
  */
 import puppeteer, { type Browser, type Page } from "puppeteer";
 import type { PdfDocument } from "../pdfDocument.ts";
-import { documentHtml, documentTitle, footOf, headOf } from "./shell.ts";
+import { documentHtml, documentTitle } from "./shell.ts";
 import { SKYBOOK_NAME } from "./logo.ts";
 import { withMetadata } from "./metadata.ts";
-import { footerTemplate, headerTemplate } from "./runningHeadFoot.ts";
 import { PAGE_FORMAT, PAGE_MARGIN, PDF_RENDER_BUDGET_MS } from "./settings.ts";
 
 /**
@@ -192,9 +191,14 @@ export async function renderPdf(
           format: PAGE_FORMAT,
           printBackground: true,
           margin: { ...PAGE_MARGIN },
-          displayHeaderFooter: true,
-          headerTemplate: headerTemplate(headOf(document)),
-          footerTemplate: footerTemplate(footOf(document)),
+          /*
+           * OFF, AND THE HEAD AND FOOT ARE STILL THERE. They are drawn by the
+           * document's own page rules now; see `runningHeadFoot.ts`. Chromium's
+           * templates are drawn on every page and cannot be left off one, and
+           * the cover has to be left clear. The margins above still reserve the
+           * room the head and foot are drawn in.
+           */
+          displayHeaderFooter: false,
           /*
            * STATED, NOT INHERITED. Puppeteer 25 already defaults this to true,
            * and a file rendered without it is byte-identical to one rendered

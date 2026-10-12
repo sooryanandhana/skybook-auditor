@@ -1,23 +1,22 @@
 /**
- * The overall score: the audit's headline verdict, on the page.
+ * The score's parts: the four category scores, and what holds the grade back.
  *
- * ONE GRADE, FOUR CATEGORY SCORES, AND THE HONESTY AROUND THEM. Every value
- * here was read from `result.score`, the deterministic score our own code
- * computed from the verified findings; this section grades nothing and
- * recalculates nothing. It is the same verdict the dashboard shows, worded by
- * the same report layer, so the screen and the document cannot disagree.
+ * EVERY VALUE HERE WAS READ FROM `result.score`, the deterministic score our
+ * own code computed from the verified findings; nothing here grades or
+ * recalculates. It is the same verdict the dashboard shows, worded by the same
+ * report layer, so the screen and the document cannot disagree.
+ *
+ * PART OF THE EXECUTIVE SUMMARY, NOT A SECTION OF ITS OWN. The grade itself is
+ * drawn there, once, at the head of the report; these are the two pieces that
+ * sit beneath it.
  *
  * WORD BEFORE COLOUR, like every other verdict in this document. A grade is a
- * letter and a band word first; the tint is an accent on a meaning that is
- * already in words, so a greyscale print or a reader who cannot use the hue
- * loses nothing. A withheld grade says so in words and shows no number, and a
- * Not Assessed category reads "Not assessed" rather than a zero.
+ * letter first; the tint is an accent on a meaning that is already in words, so
+ * a greyscale print or a reader who cannot use the hue loses nothing. A Not
+ * Assessed category reads "Not assessed" rather than a zero.
  */
 import type { PdfScore, PdfScoreCategory } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
-
-/** The section's title. Kept here with the section, as the others are. */
-const SCORE_HEADING = "Overall score";
 
 /** One pillar's line: a grade and pass rate, or a plain "not assessed". */
 function categoryRow(category: PdfScoreCategory): string {
@@ -37,7 +36,7 @@ function categoryRow(category: PdfScoreCategory): string {
 }
 
 /** The findings that held the grade down, when a gate applied. */
-function gatePanel(score: PdfScore): string {
+export function gateHtml(score: PdfScore): string {
   if (score.gateReasons.length === 0) return "";
 
   const items = score.gateReasons.map((title) => html`<li>${title}</li>`).join("");
@@ -52,44 +51,9 @@ function gatePanel(score: PdfScore): string {
   );
 }
 
-/**
- * The whole section.
- *
- * The grade block leads: either a letter with its band word and the pass rate
- * behind it, or a plain "Not graded" with the score's own reason when the audit
- * assessed too little to grade honestly. The caveats — a partial grade, a gate
- * holding the grade below its pass rate — are said out loud, never hidden.
- */
-export function scoreHtml(score: PdfScore): string {
-  const gradeBlock = score.grade !== null
-    ? html`<span class="score-letter ${score.gradeClass}">${score.grade}</span>` +
-      `<div class="score-lines">` +
-      (score.bandLabel === null ? "" : html`<p class="score-band">${score.bandLabel}</p>`) +
-      (score.passRate === null
-        ? ""
-        : html`<p class="score-health">${score.passRate} / 100 · weighted checks passed</p>`) +
-      html`<p class="score-coverage">${score.coveragePercent}% of applicable checks assessed</p>` +
-      `</div>`
-    : `<span class="score-letter score-letter-none">Not graded</span>` +
-      `<div class="score-lines">` +
-      html`<p class="score-coverage">${score.coveragePercent}% of applicable checks assessed</p>` +
-      `</div>`;
+/** The four category scores, one card each, in the order the score gave them. */
+export function scoreCategoriesHtml(score: PdfScore): string {
+  if (score.categories.length === 0) return "";
 
-  const status = score.statusMessage === null ? "" : html`<p class="score-status">${score.statusMessage}</p>`;
-  const partial = score.partialNote === null ? "" : html`<p class="score-caveat">${score.partialNote}</p>`;
-  const cap = score.capNote === null ? "" : html`<p class="score-caveat">${score.capNote}</p>`;
-
-  return (
-    `<section class="score">` +
-    `<h2>${SCORE_HEADING}</h2>` +
-    `<div class="score-grade">${gradeBlock}</div>` +
-    status +
-    partial +
-    cap +
-    `<div class="score-cats">` +
-    score.categories.map(categoryRow).join("") +
-    `</div>` +
-    gatePanel(score) +
-    `</section>`
-  );
+  return `<div class="score-cats">` + score.categories.map(categoryRow).join("") + `</div>`;
 }

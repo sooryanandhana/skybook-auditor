@@ -26,7 +26,8 @@ import { auditJobs, type AuditJobStore } from "../jobs/auditJobs.ts";
 import { JOB_NOT_FOUND, NO_JOB_ID, NOT_READY, UNKNOWN_FAILURE } from "../jobs/jobResponses.ts";
 import { buildPdfDocument } from "../audit/pdfDocument.ts";
 import { renderPdf, PDF_RENDER_MESSAGES, PdfRenderError } from "../audit/pdf/render.ts";
-import { exportFilename, type PdfExportFields } from "./pdfExportRoute.ts";
+import { commentaryAt, exportFilename, renderFailureReason, type PdfExportFields } from "./pdfExportRoute.ts";
+import { logOutcome } from "../log/reliabilityLog.ts";
 import { requireSession, UNAUTHORISED, type GuardOptions } from "../auth/guard.ts";
 import {
   contentFingerprint,
@@ -230,6 +231,9 @@ export async function sendReportRoute(
     return { ok: false, status: 409, error: NO_RESULT };
   }
 
+  // Read here, straight after the document was built. See `commentaryAt`.
+  const commentary = commentaryAt(outcome.document, store, sent.jobId);
+
   /*
    * 7. THE CONFIRMATION, RECOMPUTED HERE RATHER THAN BELIEVED.
    *
@@ -256,9 +260,27 @@ export async function sendReportRoute(
 
   // 8. The same renderer the download button uses, and no retry on failure.
   let pdf: Buffer;
+  const rendering = { op: "pdf.render", job: sent.jobId, via: "email" } as const;
+  const renderedAt = Date.now();
   try {
     pdf = await render(outcome.document);
+    logOutcome({
+      ...rendering,
+      outcome: "succeeded",
+      ms: Date.now() - renderedAt,
+      bytes: Buffer.isBuffer(pdf) ? pdf.length : undefined,
+      ...commentary,
+    });
   } catch (error) {
+    // The category only. The error is not handed to the log at all.
+    logOutcome({
+      ...rendering,
+      outcome: "failed",
+      reason: renderFailureReason(error),
+      ms: Date.now() - renderedAt,
+      ...commentary,
+    });
+
     const message =
       error instanceof PdfRenderError ? error.message : PDF_RENDER_MESSAGES["internal-error"];
     return { ok: false, status: 500, error: message };
@@ -281,7 +303,23 @@ export async function sendReportRoute(
   };
 
   // 9. One send. No loop, nothing calls this again, and the seam offers no retry.
+  const sentAt = Date.now();
   const delivery = await provider.send(email);
+
+  /*
+   * WHETHER THE EMAIL SERVICE TOOK THE REQUEST, and nothing about the message:
+   * not who it was for, not who it was from, not its subject, and not the
+   * receipt the service handed back. "Accepted" is all that is known here --
+   * whether it arrived is the service's to say.
+   */
+  logOutcome({
+    op: "email.send",
+    job: sent.jobId,
+    outcome: delivery.ok ? "accepted" : "not-accepted",
+    reason: delivery.ok ? undefined : delivery.failure,
+    ms: Date.now() - sentAt,
+  });
+
   if (!delivery.ok) {
     /*
      * 502 for the service's problems and 429 for its limit. Never the

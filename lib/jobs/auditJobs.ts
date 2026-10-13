@@ -15,6 +15,7 @@ import {
 import { isCertificateFailureAudit } from "../report/siteFindingsView.ts";
 import type { AuditResult, SpeedResult } from "../types";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
+import { describeError } from "../log/reliabilityLog.ts";
 
 /**
  * One store for the whole server process.
@@ -217,11 +218,15 @@ export function startAudit(
       if (error instanceof EntryPageUnavailableError) {
         store.fail(job.id, error.reason);
       } else {
-        // Logged for whoever has to fix it; never sent to the client.
-        console.warn(
-          `Audit job ${job.id} failed unexpectedly.`,
-          error instanceof Error ? (error.stack ?? error.message) : error,
-        );
+        /*
+         * Logged for whoever has to fix it; never sent to the client.
+         *
+         * WHAT KIND OF ERROR, never what it said. An unexpected error's
+         * message was written by whatever threw it and can hold the address
+         * being audited, so neither it nor the stack that begins with it is
+         * printed -- only the error's class name.
+         */
+        console.warn(`Audit job ${job.id.slice(0, 8)} failed unexpectedly.`, describeError(error));
         store.fail(job.id, UNEXPECTED_FAILURE);
       }
     }

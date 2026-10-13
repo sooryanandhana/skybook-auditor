@@ -30,6 +30,38 @@ import { isCertificateFailureAudit } from "../report/siteFindingsView.ts";
 import { buildAIReportInput } from "../ai/buildReportInput.ts";
 import { explainAudit, type ExplainOptions, type ExplainResult } from "../ai/gemini/explain.ts";
 import type { AuditJobStore } from "../jobs/auditJobs.ts";
+import { logOutcome, logOutcomeOnce, type ReliabilityEvent } from "../log/reliabilityLog.ts";
+
+/**
+ * How asking ended, for the reliability log.
+ *
+ * THE ADAPTER'S OWN REASON CODE, AND NEVER ITS SENTENCE. A refusal's sentence
+ * is the validator's, and can quote a word the model chose; the code cannot.
+ * Counts say how much of an answer was kept without saying what any of it was.
+ */
+function explanationEvent(jobId: string, result: ExplainResult, ms: number): ReliabilityEvent {
+  if (result.state === "explained") {
+    return {
+      op: "ai.explain",
+      job: jobId,
+      outcome: "succeeded",
+      ms,
+      accepted: result.explanations.explanations.length,
+      rejected: result.rejected.length,
+    };
+  }
+
+  const outcome =
+    result.reason === "timeout"
+      ? "timed-out"
+      : result.reason === "refused"
+        ? "rejected"
+        : result.reason === "no-api-key"
+          ? "not-started"
+          : "failed";
+
+  return { op: "ai.explain", job: jobId, outcome, reason: result.reason, ms };
+}
 
 /**
  * What asking on behalf of a job produced.
@@ -126,6 +158,16 @@ export async function explainJob(
    * measured and graded ones, and they reach the report without commentary.
    */
   if (isCertificateFailureAudit(job.result)) {
+    /*
+     * Written once per audit however often it is asked for. Nothing above this
+     * line stops a second request arriving here, so the log keeps count itself.
+     */
+    logOutcomeOnce(`ai.explain:${jobId}`, {
+      op: "ai.explain",
+      job: jobId,
+      outcome: "not-started",
+      reason: "no-page-measurements",
+    });
     return { ok: false, reason: "no-page-measurements" };
   }
 
@@ -151,6 +193,7 @@ export async function explainJob(
   const input = buildAIReportInput(whole);
 
   const ask = deps.explain ?? explainAudit;
+  const askedAt = Date.now();
   const result = await ask(input, deps.options ?? {});
 
   /*
@@ -160,6 +203,12 @@ export async function explainJob(
    * way a second time.
    */
   store.setExplanation(jobId, result);
+
+  /*
+   * ONE LINE PER AUDIT, because this point is reached once per audit: the claim
+   * above was taken to get here, and a second ask returned long before it.
+   */
+  logOutcome(explanationEvent(jobId, result, Date.now() - askedAt));
 
   return { ok: true, stored: false, result };
 }

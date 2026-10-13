@@ -8,6 +8,7 @@
  * a pass.
  */
 import type { Finding, Severity } from "../types";
+import { describeError } from "../log/reliabilityLog.ts";
 import type {
   AuditFacts,
   CompiledRule,
@@ -157,11 +158,12 @@ export function runRules<F>(data: F, rules: readonly CompiledRule<F>[]): RuleRun
        * the fixed sentence below, never this one: an exception message can
        * carry a file path, a URL with a key in it, or any other detail the
        * thrower happened to include.
+       *
+       * FOR THE SAME REASON IT IS NOT LOGGED EITHER. What is logged is the
+       * rule's id and the error's class name, which say where to look and say
+       * nothing about the website being audited.
        */
-      console.warn(
-        `Rule "${rule.id}" threw while running and was skipped.`,
-        error instanceof Error ? error.stack ?? error.message : error,
-      );
+      console.warn(`Rule "${rule.id}" threw while running and was skipped.`, describeError(error));
 
       skipped.push({
         ruleId: rule.id,

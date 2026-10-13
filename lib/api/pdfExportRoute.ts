@@ -30,8 +30,56 @@
  */
 import { auditJobs, type AuditJobStore } from "../jobs/auditJobs.ts";
 import { JOB_NOT_FOUND, NO_JOB_ID, NOT_READY, UNKNOWN_FAILURE } from "../jobs/jobResponses.ts";
-import { buildPdfDocument, type PdfDocumentOptions } from "../audit/pdfDocument.ts";
+import { buildPdfDocument, type PdfDocument, type PdfDocumentOptions } from "../audit/pdfDocument.ts";
 import { renderPdf, PDF_RENDER_MESSAGES, PdfRenderError } from "../audit/pdf/render.ts";
+import { logOutcome, type ReliabilityEvent } from "../log/reliabilityLog.ts";
+
+/**
+ * Whether the document carries written commentary, and where the commentary
+ * stood when the document was built. For the reliability log.
+ *
+ * TWO FACTS, READ FROM TWO PLACES, SO NEITHER HAS TO BE GUESSED.
+ *
+ * `aiText` is read from the document itself. It says what the file that was
+ * rendered contains, and it cannot disagree with that file, because it is the
+ * same value the renderer draws the section from.
+ *
+ * `aiState` is read from the job, and says why: the commentary was written,
+ * was asked for and failed, is still being written, or was never asked for.
+ *
+ * CALL IT ON THE LINE AFTER THE DOCUMENT IS BUILT, WITH NOTHING AWAITED IN
+ * BETWEEN. Building the document and reading the job are then one uninterrupted
+ * step, and no answer can arrive between them. A job read earlier in a request
+ * may be out of date by the time the document is built, which is why this does
+ * not take one.
+ *
+ * A job that has gone by the time it is read is given no state, and is not
+ * given a made-up one.
+ */
+export function commentaryAt(
+  document: PdfDocument,
+  store: AuditJobStore,
+  jobId: string,
+): Pick<ReliabilityEvent, "aiText" | "aiState"> {
+  const aiText = document.summary.ai !== null ? "included" : "absent";
+
+  const job = store.get(jobId);
+  if (job === null) return { aiText };
+
+  const aiState =
+    job.explanation !== null
+      ? job.explanation.state
+      : job.explanationClaimed
+        ? "pending"
+        : "not-requested";
+
+  return { aiText, aiState };
+}
+
+/** The category of a failed render, and never the error itself. */
+export function renderFailureReason(error: unknown): string {
+  return error instanceof PdfRenderError ? error.failure : "internal-error";
+}
 
 /** Sent when a job finished but carried no result to describe. */
 export const NO_RESULT = "The audit finished but its result could not be read.";
@@ -169,10 +217,31 @@ export async function pdfExportRoute(
     return { ok: false, status: 409, error: NO_RESULT };
   }
 
+  // Read here, straight after the document was built. See `commentaryAt`.
+  const commentary = commentaryAt(outcome.document, store, jobId);
+  const renderedAt = Date.now();
+  const rendering = { op: "pdf.render", job: jobId, via: "download" } as const;
+
   try {
     const pdf = await render(outcome.document);
+    logOutcome({
+      ...rendering,
+      outcome: "succeeded",
+      ms: Date.now() - renderedAt,
+      bytes: Buffer.isBuffer(pdf) ? pdf.length : undefined,
+      ...commentary,
+    });
     return { ok: true, pdf, filename: exportFilename(outcome.document.cover.auditedUrl) };
   } catch (error) {
+    // The category only. The error is not handed to the log at all.
+    logOutcome({
+      ...rendering,
+      outcome: "failed",
+      reason: renderFailureReason(error),
+      ms: Date.now() - renderedAt,
+      ...commentary,
+    });
+
     /*
      * NO RETRY, per 7A §23: a second attempt at a deterministic render of the
      * same data fails the same way, and a retry would double a slow render's

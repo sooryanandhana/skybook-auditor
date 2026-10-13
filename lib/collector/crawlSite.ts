@@ -229,6 +229,27 @@ export interface CrawlOptions {
    * ends, and inventing one would be inventing a fact.
    */
   onProgress?: (progress: CrawlProgress) => void;
+  /**
+   * Called with each page as soon as it has been read, AFTER WHICH THE PAGE'S
+   * HTML IS LET GO.
+   *
+   * WHY. A crawl used to keep the full markup of every page it had read until
+   * the whole crawl ended, because the checks that read it ran afterwards. On
+   * a large site that is every page's HTML in memory at once, and it is what a
+   * small server ran out of. A caller that measures each page here needs the
+   * markup for the length of this call and no longer.
+   *
+   * THE PAGE STAYS IN THE RESULT; ONLY ITS MARKUP GOES. Its address, headers,
+   * redirects and everything else a caller reads afterwards are untouched, and
+   * `html` is left as an empty string. Links are followed before this is
+   * called, so nothing the crawl itself needs is lost.
+   *
+   * Omitted, the crawl keeps every page's HTML exactly as it always did.
+   *
+   * It should not throw. If it does, the markup is still released and the
+   * error ends the crawl, as any error inside it would.
+   */
+  measurePage?: (page: FetchedPage) => void;
 }
 
 /**
@@ -600,6 +621,19 @@ export async function crawlSite(options: CrawlOptions): Promise<CrawlResult> {
        * pass completes before any other worker can begin its own.
        */
       discoverLinks(result.page, url, seed.url, offerIfPermitted);
+
+      /*
+       * Measured now, and the markup released, when the caller asked for
+       * that. Synchronous, like discovery above, so no other worker runs
+       * between a page being measured and its markup being let go.
+       */
+      if (options.measurePage !== undefined) {
+        try {
+          options.measurePage(result.page);
+        } finally {
+          result.page.html = "";
+        }
+      }
       return;
     }
 

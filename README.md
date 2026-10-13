@@ -101,7 +101,7 @@ These are the values the code actually uses:
 | Audit budget | 30 s (site checks 10 s) |
 | PageSpeed budget | 95 s |
 | AI explanation budget | 45 s |
-| Concurrent audits | 2 |
+| Concurrent audits | 1 |
 | Job retention | 30 minutes |
 | Findings sent to the model | 20 at most |
 

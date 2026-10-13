@@ -155,7 +155,38 @@ export interface SiteAuditOptions {
   ) => Promise<SiteChecks>;
   deadline?: Deadline;
   /** Passed through to the crawler untouched. */
-  crawl?: Omit<Parameters<typeof crawlSite>[0], "requestedUrl" | "onProgress">;
+  crawl?: Omit<Parameters<typeof crawlSite>[0], "requestedUrl" | "onProgress" | "measurePage">;
+}
+
+/**
+ * What the two checks that read a page's markup found, or the error one threw.
+ *
+ * AN ERROR IS KEPT, NOT THROWN, because of where the measuring now happens.
+ * These checks used to run after the crawl; they run during it now, so the
+ * markup can be let go. An error thrown there would end the crawl from the
+ * inside. Kept here and thrown where the checks used to run, it ends the audit
+ * exactly as it always did.
+ */
+type PageMeasurement =
+  | { readonly ok: true; readonly seo: AuditData["seo"]; readonly security: AuditData["security"] }
+  | { readonly ok: false; readonly error: unknown };
+
+/** Runs the two checks that need a page's markup. The only readers of it. */
+function measurePage(page: FetchedPage): PageMeasurement {
+  try {
+    return {
+      ok: true,
+      seo: runSeoChecks(page.html, page.finalUrl),
+      security: runSecurityChecks(
+        page.headers,
+        page.html,
+        page.servedOverHttps,
+        page.setCookieHeaders,
+      ),
+    };
+  } catch (error) {
+    return { ok: false, error };
+  }
 }
 
 /**
@@ -190,11 +221,28 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<AuditResu
   const deadline = options.deadline ?? createDeadline(SITE_AUDIT_BUDGET_MS);
   const crawlImpl = options.crawlImpl ?? crawlSite;
 
+  /*
+   * EACH PAGE IS MEASURED AS IT ARRIVES, and the crawl then lets its markup go.
+   *
+   * The crawl used to hand back every page with its full HTML, and the checks
+   * below read it afterwards -- so a 150-page crawl held 150 pages of markup
+   * until it ended, and a small server ran out of memory doing it. What the
+   * checks produce is small and is what the audit keeps anyway; the markup is
+   * needed only long enough to produce it.
+   *
+   * Keyed by the page object itself, so a result can only ever be read back for
+   * the page it was measured from.
+   */
+  const measured = new WeakMap<FetchedPage, PageMeasurement>();
+
   const crawl: CrawlResult = await crawlImpl({
     ...options.crawl,
     requestedUrl: options.requestedUrl,
     outerDeadline: deadline,
     onProgress: options.onProgress,
+    measurePage: (page) => {
+      measured.set(page, measurePage(page));
+    },
   });
 
   /*
@@ -309,6 +357,15 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<AuditResu
       ? performancePending(page.finalUrl)
       : performanceNotRequested(page.finalUrl);
 
+    /*
+     * What was measured when the page was read. A crawl that did not measure
+     * as it went -- a substitute handed in by a test -- still has the markup,
+     * so it is measured here, as it always was. An error from either place is
+     * thrown here, where it always was.
+     */
+    const measurement = measured.get(page) ?? measurePage(page);
+    if (!measurement.ok) throw measurement.error;
+
     const facts: AuditData = {
       ...shared,
       fetch: {
@@ -321,13 +378,8 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<AuditResu
         contentType: page.contentType,
       },
       uptime: page.uptime,
-      seo: runSeoChecks(page.html, page.finalUrl),
-      security: runSecurityChecks(
-        page.headers,
-        page.html,
-        page.servedOverHttps,
-        page.setCookieHeaders,
-      ),
+      seo: measurement.seo,
+      security: measurement.security,
       performance,
       // Filled in immediately below, from the very same facts.
       findings: [],

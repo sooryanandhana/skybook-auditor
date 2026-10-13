@@ -51,7 +51,7 @@ export const PERFORMANCE_BUDGET_MS = 95_000;
  *
  * NOT the same thing as the crawler's own `concurrency`, which is how many
  * pages ONE audit fetches at once and stays at 3. This bounds how many audits
- * exist to have workers at all, so the outbound total is 2 x 3 = 6 rather than
+ * exist to have workers at all, so the outbound total is 1 x 3 = 3 rather than
  * whatever number of audits happened to be submitted.
  *
  * WHY IT IS NEEDED NOW. Before the job API, POST /api/audit did the whole
@@ -61,9 +61,17 @@ export const PERFORMANCE_BUDGET_MS = 95_000;
  * ten simultaneous crawls, thirty outbound workers, and ten sets of results in
  * memory. The request limit still does its own job; this does the other one.
  *
- * Two is a prototype figure for a tool one salesperson runs on one machine.
+ * ONE, BECAUSE MEMORY IS THE LIMIT THAT WAS ACTUALLY HIT. It was two, and the
+ * server it runs on ran out of JavaScript heap in the middle of an audit and
+ * was restarted, taking every audit in memory with it. Each running audit
+ * holds its own crawl, so two at once is twice the peak; on a small instance
+ * that is the difference between finishing and being killed. A second audit is
+ * not refused: it is given its id at once and waits its turn, exactly as a
+ * third one always did.
+ *
+ * Raise it only on a server with the memory for it, and measure first.
  */
-export const MAX_CONCURRENT_AUDITS = 2;
+export const MAX_CONCURRENT_AUDITS = 1;
 
 /**
  * How long the AI explanation request may take, start to finish.

@@ -5,6 +5,11 @@
  * This file demonstrates current behaviour and changes none of it. Nothing here
  * sets or proposes a new limit.
  *
+ * ONE CASE HERE HAS SINCE BEEN FIXED. H6 recorded that a crawl held every
+ * page's HTML until it ended; an audit now releases each page's markup as soon
+ * as it has been measured. The case is kept, in parts, to say which behaviour
+ * is which. See the note above H6a.
+ *
  * Yardsticks: the fetcher's documented 5 MB cap (MAX_BYTES, `total > maxBytes`),
  * the project rule that no raw HTML is kept in an audit result, and the
  * resource guidance for Node's fetch that a response body which will not be
@@ -24,8 +29,8 @@ import { safeFetch } from "../collector/safety.ts";
 import { fetcherFor } from "../audit/pdf/realAudit.fixture.mts";
 import {
   auditFixtureSite,
+  decision,
   correct,
-  defect,
   findingsOf,
   HTML,
   noSiteFiles,
@@ -150,23 +155,81 @@ correct("H5 three 300 KB pages of dense markup are audited with exact counts, an
   assert.equal(JSON.stringify(result).includes("Opening hours and prices."), false);
 });
 
-defect("H6 the crawl holds the full HTML of every page it has read until the whole crawl ends", {
-  // Collectors run after the crawl, so every page's markup stays in memory at
-  // once. With parsing that costs about 200 MB per MB of dense HTML, the review
-  // measured 1.5 GB of memory for three 4.7 MB pages. How to fix it — analyse
-  // as pages arrive, or cap the bytes a crawl may hold — is open, so no
-  // after-fix shape is asserted here.
-  now: async () => {
-    const crawl = await crawlSite({
-      requestedUrl: ROOT,
-      fetchImpl: fetcherFor(threeLargePages(250_000)),
-      useSitemaps: false,
-      sitemapFetchImpl: noSiteFiles,
-      sleepImpl: async () => {},
-    });
-    assert.equal(crawl.pages.length, 3);
-    for (const fetched of crawl.pages) assert.ok(fetched.html.length > 240_000, fetched.finalUrl);
-  },
+/*
+ * H6, IN TWO PARTS, because it stopped being one thing.
+ *
+ * WHAT IT WAS. The crawl held the full HTML of every page it had read until the
+ * whole crawl ended, because the collectors ran afterwards. Every page's markup
+ * was in memory at once, and a production server ran out of heap in the middle
+ * of an audit doing exactly that.
+ *
+ * WHAT CHANGED. An audit now measures each page as it arrives and the crawl
+ * lets that page's markup go (`measurePage`, in crawlSite.ts and siteAudit.ts).
+ * That is the path every real audit takes, and it is H6b.
+ *
+ * WHAT DID NOT. The crawler used on its own, with nobody measuring, still
+ * returns every page with its markup -- there is nothing else it could do with
+ * a page nobody has read yet. That is H6a: the same behaviour and the same
+ * assertions this case has always pinned, now described as what it is.
+ *
+ * STILL OPEN, and not addressed by either part: parsing costs far more memory
+ * than the markup itself -- the review measured about 200 MB per MB of dense
+ * HTML -- so ONE page near the 5 MB cap can exhaust a small server by itself,
+ * whatever is or is not retained. Nothing here sets or proposes a new limit.
+ */
+decision("H6a a crawl used on its own, with no measurer, returns every page it read with its full HTML", async () => {
+  // Deliberate, not an oversight: a caller that has not measured the pages
+  // needs their markup to do so. The audit does not use the crawl this way.
+  const crawl = await crawlSite({
+    requestedUrl: ROOT,
+    fetchImpl: fetcherFor(threeLargePages(250_000)),
+    useSitemaps: false,
+    sitemapFetchImpl: noSiteFiles,
+    sleepImpl: async () => {},
+  });
+  assert.equal(crawl.pages.length, 3);
+  for (const fetched of crawl.pages) assert.ok(fetched.html.length > 240_000, fetched.finalUrl);
+});
+
+correct("H6b a crawl that is given a measurer hands it each page whole, then holds none of their HTML", async () => {
+  // The audit's own path. Each page reaches the measurer with all of its
+  // markup, and by the time the next page arrives the last one's is gone -- so
+  // the crawl holds the markup of the page in hand, however many pages there are.
+  const measured: number[] = [];
+  const heldByEarlierPages: number[] = [];
+  const seen: { html: string }[] = [];
+
+  const crawl = await crawlSite({
+    requestedUrl: ROOT,
+    fetchImpl: fetcherFor(threeLargePages(250_000)),
+    useSitemaps: false,
+    sitemapFetchImpl: noSiteFiles,
+    sleepImpl: async () => {},
+    measurePage: (fetched) => {
+      heldByEarlierPages.push(seen.reduce((total, earlier) => total + earlier.html.length, 0));
+      measured.push(fetched.html.length);
+      seen.push(fetched);
+    },
+  });
+
+  assert.equal(crawl.pages.length, 3, "the same three pages are read");
+  assert.equal(measured.length, 3, "each was measured once");
+  for (const length of measured) assert.ok(length > 240_000, "with its whole markup");
+  assert.deepEqual(heldByEarlierPages, [0, 0, 0], "and no earlier page still held any");
+  for (const fetched of crawl.pages) assert.equal(fetched.html, "", fetched.finalUrl);
+});
+
+correct("H6c an audit of three large pages finds the same things as before and keeps none of their HTML", async () => {
+  // The end-to-end statement of H6b, through the production audit. The exact
+  // counts are H5's; what is added here is that the result is small.
+  const result = await auditFixtureSite(threeLargePages(250_000));
+
+  assert.equal(result.crawl.evaluated, 3);
+  assert.equal(findingsOf(result).get("seo.images.alt")?.affectedCount, 3);
+
+  const serialised = JSON.stringify(result);
+  assert.equal(serialised.includes("Opening hours and prices."), false);
+  assert.ok(serialised.length < 250_000, `the whole result is ${serialised.length} characters, less than one page`);
 });
 
 test(

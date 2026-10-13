@@ -115,7 +115,8 @@ export function queuedAuditCount(): number {
  * check-then-act race cannot occur, because nothing can run in between.
  *
  * Recursive only through the completion handler, so a queue of a hundred jobs
- * starts two, and starts the third when one of those two finishes.
+ * starts as many as the limit allows, and starts the next when one of those
+ * finishes.
  */
 function pump(store: AuditJobStore, limit: number): void {
   const state = scheduler();

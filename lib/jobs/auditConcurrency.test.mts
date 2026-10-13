@@ -10,6 +10,12 @@
  * The invariant defended below is one line: at no moment may more than
  * MAX_CONCURRENT_AUDITS audits be running. Not "at the end" — at no moment.
  *
+ * THAT LIMIT IS ONE. It was two until the server ran out of memory in the
+ * middle of an audit: each running audit holds its own crawl, so two at once
+ * is twice the peak. The last section below is about that default. The rest is
+ * about the scheduler, and asks for two slots by name so that it can be seen
+ * choosing between them.
+ *
  * Every audit here is a controlled promise the test releases by hand, so
  * nothing waits on real time and nothing reaches the network.
  */
@@ -113,6 +119,20 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const freshStore = (): JobStore<SiteAuditResult> => createJobStore<SiteAuditResult>();
 
 /**
+ * Two slots, asked for by name.
+ *
+ * THE SERVER RUNS ONE AUDIT AT A TIME; MOST OF THIS FILE IS NOT ABOUT THAT. It
+ * is about the scheduler: that a slot is reserved before anything is awaited,
+ * that the oldest waiting audit is the next to start, that every way an audit
+ * can end gives its slot back. Those are only visible with more than one slot,
+ * so these tests ask for two outright. They used to get two from the default,
+ * and would have gone on passing or failing with whatever the default became.
+ *
+ * What the server actually does by default has its own section at the end.
+ */
+const TWO = 2;
+
+/**
  * Drains the shared scheduler between tests.
  *
  * The scheduler is one object for the process, exactly as it is in the server,
@@ -156,20 +176,20 @@ async function finishAll(
 // The limit
 // ---------------------------------------------------------------------------
 
-test("the configured limit is two, and it is not the crawler's concurrency", () => {
-  assert.equal(MAX_CONCURRENT_AUDITS, 2);
+test("the configured limit is one, and it is not the crawler's concurrency", () => {
+  assert.equal(MAX_CONCURRENT_AUDITS, 1);
   // Different numbers for different things: this bounds AUDITS, while the
   // crawler's own concurrency bounds pages within one audit and is still 3.
   assert.equal(summary(true).limits.concurrency, 3);
 });
 
-test("the first two audits start immediately; the third waits", async () => {
+test("with two slots, the first two audits start immediately; the third waits", async () => {
   const store = freshStore();
   const audits = controlledAudits();
 
-  const a = startAudit("https://a.test/", { store, runImpl: audits.runImpl() });
-  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl() });
-  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl() });
+  const a = startAudit("https://a.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
+  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
+  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
 
   await settle();
 
@@ -190,7 +210,7 @@ test("a queued job still gets its id straight away", async () => {
   const audits = controlledAudits();
 
   const jobs = ["a", "b", "c", "d"].map((n) =>
-    startAudit(`https://${n}.test/`, { store, runImpl: audits.runImpl() }),
+    startAudit(`https://${n}.test/`, { store, runImpl: audits.runImpl(), maxConcurrent: TWO }),
   );
 
   // A full queue is not a reason to refuse a valid audit.
@@ -211,20 +231,20 @@ test("NEVER more than the limit run, at any instant", async () => {
 
   // Eight submitted at once, as eight near-simultaneous POSTs would be.
   const jobs = Array.from({ length: 8 }, (_, i) =>
-    startAudit(`https://s${i}.test/`, { store, runImpl: audits.runImpl() }),
+    startAudit(`https://s${i}.test/`, { store, runImpl: audits.runImpl(), maxConcurrent: TWO }),
   );
 
   for (let turn = 0; turn < 20; turn += 1) {
     await settle();
     assert.ok(
-      runningAuditCount() <= MAX_CONCURRENT_AUDITS,
+      runningAuditCount() <= TWO,
       `${runningAuditCount()} audits were running at once`,
     );
     audits.releaseAll();
   }
 
   await Promise.all(jobs.map((job) => job.finished));
-  assert.equal(audits.peak, MAX_CONCURRENT_AUDITS, "the limit was reached but never passed");
+  assert.equal(audits.peak, TWO, "the limit was reached but never passed");
   await drainScheduler(audits);
 });
 
@@ -239,13 +259,13 @@ test("submissions arriving in the same tick cannot both take the last slot", asy
   const audits = controlledAudits();
 
   const jobs = [
-    startAudit("https://one.test/", { store, runImpl: audits.runImpl() }),
-    startAudit("https://two.test/", { store, runImpl: audits.runImpl() }),
-    startAudit("https://three.test/", { store, runImpl: audits.runImpl() }),
-    startAudit("https://four.test/", { store, runImpl: audits.runImpl() }),
+    startAudit("https://one.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO }),
+    startAudit("https://two.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO }),
+    startAudit("https://three.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO }),
+    startAudit("https://four.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO }),
   ];
 
-  assert.equal(runningAuditCount(), MAX_CONCURRENT_AUDITS, "reserved synchronously");
+  assert.equal(runningAuditCount(), TWO, "reserved synchronously");
   assert.equal(queuedAuditCount(), 2);
 
   await finishAll(audits, jobs);
@@ -260,7 +280,7 @@ test("when a slot frees, the OLDEST queued audit starts", async () => {
   const audits = controlledAudits();
 
   const jobs = ["a", "b", "c", "d"].map((n) =>
-    startAudit(`https://${n}.test/`, { store, runImpl: audits.runImpl() }),
+    startAudit(`https://${n}.test/`, { store, runImpl: audits.runImpl(), maxConcurrent: TWO }),
   );
 
   await settle();
@@ -294,7 +314,7 @@ test("order is preserved across a longer queue", async () => {
   const audits = controlledAudits();
   const expected = Array.from({ length: 6 }, (_, i) => `https://q${i}.test/`);
 
-  const jobs = expected.map((url) => startAudit(url, { store, runImpl: audits.runImpl() }));
+  const jobs = expected.map((url) => startAudit(url, { store, runImpl: audits.runImpl(), maxConcurrent: TWO }));
 
   await finishAll(audits, jobs);
 
@@ -309,9 +329,9 @@ test("a completed audit releases its slot", async () => {
   const store = freshStore();
   const audits = controlledAudits();
 
-  const a = startAudit("https://a.test/", { store, runImpl: audits.runImpl() });
-  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl() });
-  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl() });
+  const a = startAudit("https://a.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
+  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
+  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
 
   await settle();
   audits.release("https://a.test/");
@@ -330,9 +350,10 @@ test("a PARTIAL audit releases its slot", async () => {
   const a = startAudit("https://a.test/", {
     store,
     runImpl: audits.runImpl(() => auditResult(false)),
+    maxConcurrent: TWO,
   });
-  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl() });
-  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl() });
+  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
+  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
 
   await settle();
   audits.release("https://a.test/");
@@ -353,9 +374,10 @@ test("a FAILED audit releases its slot", async () => {
     runImpl: audits.runImpl(
       () => new EntryPageUnavailableError("That address could not be found."),
     ),
+    maxConcurrent: TWO,
   });
-  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl() });
-  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl() });
+  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
+  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
 
   await settle();
   audits.release("https://a.test/");
@@ -375,9 +397,10 @@ test("an UNEXPECTED exception releases its slot too", async () => {
   const a = startAudit("https://a.test/", {
     store,
     runImpl: audits.runImpl(() => new Error("something nobody predicted")),
+    maxConcurrent: TWO,
   });
-  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl() });
-  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl() });
+  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
+  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
 
   await settle();
   audits.release("https://a.test/");
@@ -399,7 +422,7 @@ test("a queued job claims no progress it has not made", async () => {
   const audits = controlledAudits();
 
   const jobs = ["a", "b", "c"].map((n) =>
-    startAudit(`https://${n}.test/`, { store, runImpl: audits.runImpl() }),
+    startAudit(`https://${n}.test/`, { store, runImpl: audits.runImpl(), maxConcurrent: TWO }),
   );
 
   await settle();
@@ -423,7 +446,7 @@ test("a job is only marked running once it truly is", async () => {
   const audits = controlledAudits();
 
   const jobs = ["a", "b", "c"].map((n) =>
-    startAudit(`https://${n}.test/`, { store, runImpl: audits.runImpl() }),
+    startAudit(`https://${n}.test/`, { store, runImpl: audits.runImpl(), maxConcurrent: TWO }),
   );
 
   await settle();
@@ -448,9 +471,9 @@ test("a job that expired while queued takes no slot", async () => {
   const store = createJobStore<SiteAuditResult>({ ttlMs: 1_000, now: () => clock });
   const audits = controlledAudits();
 
-  const a = startAudit("https://a.test/", { store, runImpl: audits.runImpl() });
-  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl() });
-  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl() });
+  const a = startAudit("https://a.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
+  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
+  const c = startAudit("https://c.test/", { store, runImpl: audits.runImpl(), maxConcurrent: TWO });
 
   await settle();
   // C waits so long that it is swept away before a slot ever frees.
@@ -475,4 +498,107 @@ test("the limit can be raised or lowered for a run", async () => {
   assert.deepEqual(audits.started, ["https://a.test/"]);
 
   await finishAll(audits, jobs);
+});
+
+// ---------------------------------------------------------------------------
+// The default: one audit at a time
+//
+// No test below passes `maxConcurrent`. What they see is what the server does.
+// ---------------------------------------------------------------------------
+
+test("by default one audit runs and the second waits", async () => {
+  const store = freshStore();
+  const audits = controlledAudits();
+
+  const a = startAudit("https://a.test/", { store, runImpl: audits.runImpl() });
+  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl() });
+
+  await settle();
+
+  assert.equal(runningAuditCount(), 1);
+  assert.equal(queuedAuditCount(), 1);
+  assert.deepEqual(audits.started, ["https://a.test/"], "the second has not begun its crawl");
+  assert.equal(store.get(a.jobId)?.status, "running");
+  assert.equal(store.get(b.jobId)?.status, "queued");
+
+  await finishAll(audits, [a, b]);
+});
+
+test("by default a waiting audit is accepted at once, never refused", async () => {
+  const store = freshStore();
+  const audits = controlledAudits();
+
+  const jobs = ["a", "b", "c", "d"].map((n) => startAudit(`https://${n}.test/`, { store, runImpl: audits.runImpl() }));
+
+  for (const job of jobs) {
+    assert.ok(job.jobId.length > 0, "it has its id");
+    assert.notEqual(store.get(job.jobId), null, "and its job");
+  }
+  assert.equal(runningAuditCount(), 1, "one reserved synchronously");
+  assert.equal(queuedAuditCount(), 3, "and the rest wait");
+
+  await finishAll(audits, jobs);
+});
+
+test("by default NEVER more than one audit runs, at any instant", async () => {
+  const store = freshStore();
+  const audits = controlledAudits();
+
+  const jobs = Array.from({ length: 6 }, (_, i) => startAudit(`https://s${i}.test/`, { store, runImpl: audits.runImpl() }));
+
+  for (let turn = 0; turn < 20; turn += 1) {
+    await settle();
+    assert.ok(runningAuditCount() <= 1, `${runningAuditCount()} audits were running at once`);
+    audits.releaseAll();
+  }
+
+  await Promise.all(jobs.map((job) => job.finished));
+  assert.equal(audits.peak, 1, "two audits never overlapped");
+  assert.deepEqual(audits.started, jobs.map((_, i) => `https://s${i}.test/`), "and they ran in the order they arrived");
+  await drainScheduler(audits);
+});
+
+test("by default the waiting audit starts only when the running one has ended", async () => {
+  const store = freshStore();
+  const audits = controlledAudits();
+
+  const a = startAudit("https://a.test/", { store, runImpl: audits.runImpl() });
+  const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl() });
+
+  // However long the first takes, the second does not start beside it.
+  for (let turn = 0; turn < 5; turn += 1) {
+    await settle();
+    assert.deepEqual(audits.started, ["https://a.test/"]);
+    assert.equal(store.get(b.jobId)?.status, "queued");
+  }
+
+  audits.release("https://a.test/");
+  await a.finished;
+  await settle();
+
+  assert.equal(store.get(a.jobId)?.status, "completed");
+  assert.equal(store.get(b.jobId)?.status, "running", "now it is its turn");
+  assert.equal(runningAuditCount(), 1);
+
+  await finishAll(audits, [a, b]);
+});
+
+test("by default an audit that fails, expectedly or not, still lets the next one start", async () => {
+  for (const failure of [new EntryPageUnavailableError("That address could not be found."), new Error("something nobody predicted")]) {
+    const store = freshStore();
+    const audits = controlledAudits();
+
+    const a = startAudit("https://a.test/", { store, runImpl: audits.runImpl(() => failure) });
+    const b = startAudit("https://b.test/", { store, runImpl: audits.runImpl() });
+
+    await settle();
+    audits.release("https://a.test/");
+    await a.finished;
+    await settle();
+
+    assert.equal(store.get(a.jobId)?.status, "failed");
+    assert.ok(audits.started.includes("https://b.test/"), "the only slot came back");
+
+    await finishAll(audits, [a, b]);
+  }
 });

@@ -322,7 +322,7 @@ test("one line is written before each page is parsed, and one for a page too lar
     assert.equal(typeof line.size, "string");
   }
   assert.deepEqual(
-    lines.map((line) => line.order),
+    lines.filter((line) => line.outcome !== "measured").map((line) => line.order),
     [1, 2, 3, 4],
     "each page has its place in the crawl",
   );
@@ -340,7 +340,8 @@ test("the line is written before the page is parsed, not after", async () => {
   try {
     await audit(siteWithBigPage(10_000), {
       jobId: JOB,
-      onMeasure: () => seenAtMeasure.push(lines.filter((line) => line.includes('"op":"page.parse"')).length),
+      onMeasure: () =>
+        seenAtMeasure.push(lines.filter((line) => line.includes('"op":"page.parse"') && line.includes('"outcome":"parsing"')).length),
     });
   } finally {
     console.log = real;
@@ -370,7 +371,11 @@ test("without a job id, the line is still written, and simply has no job", async
   const captured = await captureLog(() => audit(siteWithBigPage(10_000)));
   const lines = linesFor(captured, "page.parse");
 
-  assert.equal(lines.length, 5, "home, about, contact, the (small) big page, and the page beyond it");
+  assert.equal(
+    lines.filter((line) => line.outcome === "parsing").length,
+    5,
+    "home, about, contact, the (small) big page, and the page beyond it",
+  );
   for (const line of lines) assert.ok(!("job" in line));
 });
 

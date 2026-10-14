@@ -82,4 +82,7 @@ export const APPROVED_FIELDS = [
   "aiState",
   "order",
   "size",
+  "waitMs",
+  "pages",
+  "stop",
 ] as const;

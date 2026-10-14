@@ -156,7 +156,7 @@ export interface SiteAuditOptions {
   ) => Promise<SiteChecks>;
   deadline?: Deadline;
   /** Passed through to the crawler untouched. */
-  crawl?: Omit<Parameters<typeof crawlSite>[0], "requestedUrl" | "onProgress" | "measurePage" | "onParse">;
+  crawl?: Omit<Parameters<typeof crawlSite>[0], "requestedUrl" | "onProgress" | "measurePage" | "onParse" | "onParsed">;
   /** The job this audit runs for. Only labels diagnostic log lines. */
   jobId?: string;
 }
@@ -259,6 +259,14 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<AuditResu
         order,
         size: sizeBand(bytes),
       });
+    },
+    /*
+     * AND ONE WHEN IT IS DONE, with how long the parsing and checking took. The
+     * gap between two "parsing" lines also holds downloads and waiting; this is
+     * the work itself, measured on the monotonic clock.
+     */
+    onParsed: ({ order, bytes, ms }) => {
+      logOutcome({ op: "page.parse", job: options.jobId, outcome: "measured", order, size: sizeBand(bytes), ms });
     },
     measurePage: (page) => {
       measured.set(page, measurePage(page));

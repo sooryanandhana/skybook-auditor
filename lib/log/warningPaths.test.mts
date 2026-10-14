@@ -28,6 +28,13 @@ const SECRETS = [
 
 const MESSAGE = `Could not parse ${SECRETS[0]} for Harbour Dental (contact ana@harbourdental.example, key sk_live_0123456789)`;
 
+/**
+ * The warnings among everything written. An audit also writes its own
+ * reliability lines (JSON); those are checked for secrets too, but they are
+ * not warnings.
+ */
+const warningsIn = (entries: readonly string[]) => entries.filter((entry) => !entry.startsWith("{"));
+
 function assertNoSecrets(entries: readonly string[]) {
   for (const entry of entries) {
     for (const secret of SECRETS) {
@@ -59,24 +66,25 @@ async function failingAudit(thrown: unknown) {
 test("an audit that fails unexpectedly is logged without the error's message", async () => {
   const { captured } = await failingAudit(new TypeError(MESSAGE));
 
-  assert.equal(captured.all.length, 1, "one warning");
+  assert.equal(warningsIn(captured.all).length, 1, "one warning");
   assertNoSecrets(captured.all);
 });
 
 test("the warning names the job by its first eight characters and the kind of error, and nothing else", async () => {
   const { captured, jobId } = await failingAudit(new TypeError(MESSAGE));
 
-  assert.match(captured.all[0], /^Audit job [A-Za-z0-9-]{8} failed unexpectedly\. TypeError$/);
-  assert.ok(captured.all[0].includes(jobId.slice(0, 8)));
-  assert.ok(!captured.all[0].includes(jobId), "and not by the whole id");
+  const [warning] = warningsIn(captured.all);
+  assert.match(warning, /^Audit job [A-Za-z0-9-]{8} failed unexpectedly\. TypeError$/);
+  assert.ok(warning.includes(jobId.slice(0, 8)));
+  assert.ok(!captured.all.some((entry) => entry.includes(jobId)), "and nothing written carries the whole id");
 });
 
 test("something thrown that is not an error is not printed either", async () => {
   const { captured } = await failingAudit(MESSAGE);
 
-  assert.equal(captured.all.length, 1);
+  assert.equal(warningsIn(captured.all).length, 1);
   assertNoSecrets(captured.all);
-  assert.match(captured.all[0], /^Audit job [A-Za-z0-9-]{8} failed unexpectedly\. Error$/);
+  assert.match(warningsIn(captured.all)[0], /^Audit job [A-Za-z0-9-]{8} failed unexpectedly\. Error$/);
 });
 
 test("the audit still fails with its fixed sentence", async () => {

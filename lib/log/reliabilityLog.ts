@@ -27,7 +27,7 @@
  */
 
 /** The operations that report how they ended. */
-export type ReliabilityOp = "ai.explain" | "pdf.render" | "email.send" | "page.parse";
+export type ReliabilityOp = "ai.explain" | "pdf.render" | "email.send" | "page.parse" | "audit.run";
 
 /**
  * What a caller may hand in.
@@ -58,6 +58,12 @@ export interface ReliabilityEvent {
   readonly order?: number;
   /** How large the page is, as a band from `sizeBand`, never an exact size. */
   readonly size?: string;
+  /** How long an audit waited in the queue before it started, in milliseconds. */
+  readonly waitMs?: number;
+  /** How many pages an audit read. */
+  readonly pages?: number;
+  /** Why the crawl stopped: one of the crawl's own stop-reason codes. */
+  readonly stop?: string;
 }
 
 /** Every outcome and reason an operation may report. Nothing else is written. */
@@ -98,10 +104,22 @@ const WORDS: Record<ReliabilityOp, { outcomes: readonly string[]; reasons: reado
      * before a crash names the size of the page being parsed when it happened.
      * "skipped" is a page too large to analyse, which is not parsed at all.
      */
-    outcomes: ["parsing", "skipped"],
+    outcomes: ["parsing", "skipped", "measured"],
     reasons: ["too-large"],
   },
+  "audit.run": {
+    /*
+     * "started" when an audit leaves the queue and begins, with how long it
+     * waited. Then one of the job's own end states: "completed", "partial" or
+     * "failed". A failure says which kind, never what the error said.
+     */
+    outcomes: ["started", "completed", "partial", "failed"],
+    reasons: ["entry-unavailable", "unexpected", "certificate-failure"],
+  },
 };
+
+/** The crawl's own stop-reason codes (CrawlStopReason), and nothing else. */
+const STOP: readonly string[] = ["completed", "max-pages", "max-duration", "max-queue", "deadline"];
 
 const VIA: readonly string[] = ["download", "email"];
 const AI_TEXT: readonly string[] = ["included", "absent"];
@@ -203,6 +221,9 @@ function lineFor(event: ReliabilityEvent, at: Date): string | null {
   put("aiState", oneOf(event.aiState, AI_STATE));
   put("order", count(event.order));
   put("size", oneOf(event.size, SIZE));
+  put("waitMs", count(event.waitMs));
+  put("pages", count(event.pages));
+  put("stop", oneOf(event.stop, STOP));
 
   return JSON.stringify(line);
 }
@@ -220,6 +241,16 @@ export function logOutcome(event: ReliabilityEvent): void {
   } catch {
     // Nothing to do, and nothing to tell: the caller's own work is unaffected.
   }
+}
+
+/**
+ * Milliseconds elapsed since `since` on the monotonic clock, as a whole
+ * number. For durations: unlike the wall clock, it cannot jump backwards or
+ * forwards when the system time is corrected, so a duration is never negative
+ * or invented.
+ */
+export function elapsedMs(since: number): number {
+  return Math.max(0, Math.round(performance.now() - since));
 }
 
 /** How many keys `logOutcomeOnce` remembers before it forgets the oldest. */

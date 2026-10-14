@@ -270,6 +270,14 @@ export interface CrawlOptions {
    * It must not throw; the audit's own handler cannot.
    */
   onParse?: (page: { readonly order: number; readonly bytes: number; readonly tooLarge: boolean }) => void;
+  /**
+   * Called after a page has been parsed and checked, with how long that took:
+   * from just before link discovery to just after `measurePage` returned,
+   * on the monotonic clock. Not called for a page too large to analyse, or
+   * when measuring it threw. Like `onParse`, it carries no address or markup,
+   * and it must not throw.
+   */
+  onParsed?: (page: { readonly order: number; readonly bytes: number; readonly ms: number }) => void;
 }
 
 /**
@@ -653,6 +661,7 @@ export async function crawlSite(options: CrawlOptions): Promise<CrawlResult> {
 
       // Immediately before the first parse of this page. See `onParse`.
       options.onParse?.({ order: pageOrder, bytes, tooLarge: false });
+      const parseStarted = performance.now();
 
       frontier.recordEvaluated(url);
       pages.push(result.page);
@@ -679,6 +688,9 @@ export async function crawlSite(options: CrawlOptions): Promise<CrawlResult> {
           result.page.html = "";
         }
       }
+
+      // How long this page's parsing and checking took. See `onParsed`.
+      options.onParsed?.({ order: pageOrder, bytes, ms: Math.max(0, Math.round(performance.now() - parseStarted)) });
       return;
     }
 

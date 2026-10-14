@@ -15,7 +15,22 @@ import {
 import { isCertificateFailureAudit } from "../report/siteFindingsView.ts";
 import type { AuditResult, SpeedResult } from "../types";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
-import { describeError } from "../log/reliabilityLog.ts";
+import { describeError, elapsedMs, logOutcome, type ReliabilityEvent } from "../log/reliabilityLog.ts";
+
+/**
+ * Writes one audit-lifecycle line, if it can.
+ *
+ * The event is BUILT inside the guard as well as written there: it reads the
+ * audit's result, and a result shaped unexpectedly must cost a missing line,
+ * never the audit. Nothing here can throw into the job.
+ */
+function noteAudit(build: () => ReliabilityEvent): void {
+  try {
+    logOutcome(build());
+  } catch {
+    // A line that could not be written is a line that is missing. Nothing more.
+  }
+}
 
 /**
  * One store for the whole server process.
@@ -173,6 +188,8 @@ export function startAudit(
   const limit = options.maxConcurrent ?? MAX_CONCURRENT_AUDITS;
 
   const job = store.create(requestedUrl);
+  /** When it joined the queue, on the monotonic clock, for how long it waited. */
+  const queuedAt = performance.now();
 
   /*
    * The job exists and its id is returned immediately, whether or not a slot
@@ -187,6 +204,8 @@ export function startAudit(
 
   const begin = async (): Promise<void> => {
     store.markRunning(job.id);
+    const startedAt = performance.now();
+    noteAudit(() => ({ op: "audit.run", job: job.id, outcome: "started", waitMs: Math.max(0, Math.round(startedAt - queuedAt)) }));
 
     try {
       const result = await run({
@@ -210,6 +229,25 @@ export function startAudit(
        */
       const partial = isCertificateFailureAudit(result) || !result.crawl.complete;
       store.finish(job.id, partial ? "partial" : "completed", result);
+
+      /*
+       * How it ended: the job's own status, how long it ran, how many pages were
+       * read and why the crawl stopped -- counts and codes only. An audit whose
+       * entry page failed its certificate check read no page and has no crawl
+       * to describe, and says so by its reason.
+       */
+      noteAudit(() =>
+        isCertificateFailureAudit(result)
+          ? { op: "audit.run", job: job.id, outcome: "partial", reason: "certificate-failure", ms: elapsedMs(startedAt), pages: 0 }
+          : {
+              op: "audit.run",
+              job: job.id,
+              outcome: partial ? "partial" : "completed",
+              ms: elapsedMs(startedAt),
+              pages: result.crawl.evaluated,
+              stop: result.crawl.stoppedBecause,
+            },
+      );
     } catch (error) {
       /*
        * The entry page being unreadable is the one failure we can describe in
@@ -217,6 +255,15 @@ export function startAudit(
        * the fixed sentence, because we do not know what an unexpected error
        * might have put in its message.
        */
+      // The kind of failure and how long it ran -- never the error's own words.
+      noteAudit(() => ({
+        op: "audit.run",
+        job: job.id,
+        outcome: "failed",
+        reason: error instanceof EntryPageUnavailableError ? "entry-unavailable" : "unexpected",
+        ms: elapsedMs(startedAt),
+      }));
+
       if (error instanceof EntryPageUnavailableError) {
         store.fail(job.id, error.reason);
       } else {

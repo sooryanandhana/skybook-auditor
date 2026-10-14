@@ -242,7 +242,12 @@ test(
     // machine's speed cancels out.
     const time = async (wrap: boolean) => {
       const started = performance.now();
-      await auditFixtureSite({ [ROOT]: { html: cardsPage("Big", 2_000_000, wrap), headers: PROTECTED_HEADERS } });
+      // The page is above the analysis limit, which would skip the very parse
+      // this case measures, so the limit is raised for this measurement only.
+      await auditFixtureSite(
+        { [ROOT]: { html: cardsPage("Big", 2_000_000, wrap), headers: PROTECTED_HEADERS } },
+        { crawl: { maxAnalysisBytes: 5_000_000 } },
+      );
       return performance.now() - started;
     };
     await time(true); // warm-up

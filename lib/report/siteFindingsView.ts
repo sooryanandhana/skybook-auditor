@@ -17,6 +17,7 @@
  */
 import type { SiteCrawlSummary } from "../collector/crawlSite";
 import { withoutCredentials } from "../collector/url.ts";
+import { TOO_LARGE_TO_ANALYSE } from "../collector/analysisLimit.ts";
 import { certificateProblemLabel } from "./measurementsView.ts";
 import type { AuditResult, CertificateFailureAudit, Finding, SiteFileStatus } from "../types";
 
@@ -211,7 +212,13 @@ export interface CrawlView {
  */
 export function crawlView(crawl: SiteCrawlSummary): CrawlView {
   const partial = !crawl.complete;
-  const unavailable = crawl.unavailable.length;
+  /*
+   * A page too large to analyse is kept with the pages that could not be read,
+   * so it is never graded or counted as clean -- but it WAS read, so it is
+   * named separately here rather than miscounted as unreadable.
+   */
+  const tooLarge = crawl.unavailable.filter((failure) => failure.reason === TOO_LARGE_TO_ANALYSE).length;
+  const unavailable = crawl.unavailable.length - tooLarge;
 
   const facts: Array<{ label: string; value: string }> = [
     { label: "Pages read", value: String(crawl.evaluated) },
@@ -222,6 +229,9 @@ export function crawlView(crawl: SiteCrawlSummary): CrawlView {
   // excluded by robots.txt" invites a question nobody asked.
   if (unavailable > 0) {
     facts.push({ label: `${pages(unavailable)} that could not be read`, value: String(unavailable) });
+  }
+  if (tooLarge > 0) {
+    facts.push({ label: `${pages(tooLarge)} too large to analyse`, value: String(tooLarge) });
   }
   if (crawl.skippedNonHtml > 0) {
     facts.push({ label: "Files that were not web pages", value: String(crawl.skippedNonHtml) });

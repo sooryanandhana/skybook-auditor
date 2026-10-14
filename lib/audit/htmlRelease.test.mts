@@ -464,6 +464,7 @@ test("a page's markup is read in exactly three places", () => {
 
   assert.equal(audit.split("page.html").length - 1, 2, "the two checks, in one function");
   assert.equal(crawler.split("extractLinks(page.html)").length - 1, 1, "link discovery");
-  assert.equal(crawler.split('result.page.html = ""').length - 1, 1, "and the one release");
-  assert.equal(crawler.split(".html").length - 1, 2, "nothing else in the crawler touches markup");
+  assert.equal(crawler.split("Buffer.byteLength(result.page.html").length - 1, 1, "measuring its size, which parses nothing");
+  assert.equal(crawler.split('result.page.html = ""').length - 1, 2, "and the two releases: after measuring, or at once when too large");
+  assert.equal(crawler.split(".html").length - 1, 4, "nothing else in the crawler touches markup");
 });

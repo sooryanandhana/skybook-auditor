@@ -56,6 +56,8 @@ import {
 import {
   createFrontier,
   DEFAULT_CRAWL_LIMITS,
+  MAX_ANALYSIS_BYTES,
+  TOO_LARGE_TO_ANALYSE,
   type CrawlLimits,
   type CrawlSummary,
   type UrlSource,
@@ -250,6 +252,24 @@ export interface CrawlOptions {
    * error ends the crawl, as any error inside it would.
    */
   measurePage?: (page: FetchedPage) => void;
+  /**
+   * The largest page, in bytes of UTF-8, that is parsed. Larger pages are
+   * recorded as too large to analyse. `MAX_ANALYSIS_BYTES` unless a test says
+   * otherwise; see analysisLimit.ts for why it exists.
+   */
+  maxAnalysisBytes?: number;
+  /**
+   * Called for each page that was downloaded, IMMEDIATELY BEFORE it is parsed --
+   * or, for a page too large to analyse, instead of parsing it.
+   *
+   * Carries the page's place in the crawl and its size, and nothing else: no
+   * address, no markup. The audit uses it to write a diagnostic line, so that
+   * if parsing a page ever exhausts memory, the last line says how large that
+   * page was. The crawler writes no log of its own.
+   *
+   * It must not throw; the audit's own handler cannot.
+   */
+  onParse?: (page: { readonly order: number; readonly bytes: number; readonly tooLarge: boolean }) => void;
 }
 
 /**
@@ -462,6 +482,9 @@ export async function crawlSite(options: CrawlOptions): Promise<CrawlResult> {
 
   const pages: FetchedPage[] = [];
   const attempts: CrawlPageOutcome[] = [];
+  const maxAnalysisBytes = options.maxAnalysisBytes ?? MAX_ANALYSIS_BYTES;
+  /** How many pages have been downloaded, so each diagnostic line can say which one it is. */
+  let pageOrder = 0;
 
   /*
    * Pages claimed from the queue that have not yet been recorded.
@@ -609,6 +632,28 @@ export async function crawlSite(options: CrawlOptions): Promise<CrawlResult> {
     );
 
     if (result.ok) {
+      pageOrder += 1;
+      const bytes = Buffer.byteLength(result.page.html, "utf8");
+
+      /*
+       * TOO LARGE TO ANALYSE: NOT PARSED, NOT FOLLOWED, NOT KEPT.
+       *
+       * Checked before anything parses the page -- link discovery included --
+       * because parsing is what exhausts memory. The page joins the ones that
+       * could not be read, with its own reason, so it is never graded and never
+       * counted as clean. Its markup is let go at once.
+       */
+      if (bytes > maxAnalysisBytes) {
+        result.page.html = "";
+        options.onParse?.({ order: pageOrder, bytes, tooLarge: true });
+        frontier.recordUnavailable(url, TOO_LARGE_TO_ANALYSE);
+        attempts.push({ url: address, outcome: "unavailable", reason: TOO_LARGE_TO_ANALYSE, serverResponded: true });
+        return;
+      }
+
+      // Immediately before the first parse of this page. See `onParse`.
+      options.onParse?.({ order: pageOrder, bytes, tooLarge: false });
+
       frontier.recordEvaluated(url);
       pages.push(result.page);
       attempts.push({ url: address, outcome: "evaluated", page: result.page });

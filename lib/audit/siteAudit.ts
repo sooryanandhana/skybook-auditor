@@ -25,6 +25,7 @@ import { crawlSite, type CrawlProgress, type CrawlResult } from "../collector/cr
 import { dedupKey, normalizeCrawlUrl } from "../collector/crawlUrl.ts";
 import { runSeoChecks } from "../collector/seoChecks.ts";
 import { runSecurityChecks } from "../collector/securityChecks.ts";
+import { logOutcome, sizeBand } from "../log/reliabilityLog.ts";
 import { runTechnicalChecks } from "../collector/technicalChecks.ts";
 import { measureResponseTime } from "../collector/responseTime.ts";
 import type { RobotsMeasurement } from "../collector/robots.ts";
@@ -155,7 +156,9 @@ export interface SiteAuditOptions {
   ) => Promise<SiteChecks>;
   deadline?: Deadline;
   /** Passed through to the crawler untouched. */
-  crawl?: Omit<Parameters<typeof crawlSite>[0], "requestedUrl" | "onProgress" | "measurePage">;
+  crawl?: Omit<Parameters<typeof crawlSite>[0], "requestedUrl" | "onProgress" | "measurePage" | "onParse">;
+  /** The job this audit runs for. Only labels diagnostic log lines. */
+  jobId?: string;
 }
 
 /**
@@ -240,6 +243,23 @@ export async function runSiteAudit(options: SiteAuditOptions): Promise<AuditResu
     requestedUrl: options.requestedUrl,
     outerDeadline: deadline,
     onProgress: options.onProgress,
+    /*
+     * ONE DIAGNOSTIC LINE PER PAGE, written immediately before it is parsed, so
+     * that if a page ever exhausts memory the last line says how large it was.
+     * The job's short id, the page's place in the crawl and a rounded size --
+     * never its address, and never anything on it. A page too large to analyse
+     * gets a line saying so instead.
+     */
+    onParse: ({ order, bytes, tooLarge }) => {
+      logOutcome({
+        op: "page.parse",
+        job: options.jobId,
+        outcome: tooLarge ? "skipped" : "parsing",
+        reason: tooLarge ? "too-large" : undefined,
+        order,
+        size: sizeBand(bytes),
+      });
+    },
     measurePage: (page) => {
       measured.set(page, measurePage(page));
     },

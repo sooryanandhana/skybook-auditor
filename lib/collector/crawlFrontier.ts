@@ -53,6 +53,12 @@ export interface CrawlLimits {
  * 200ms pause keeps us to a handful of requests per second against a single
  * stranger's server, which is polite rather than alarming.
  */
+/*
+ * The analysis limit, beside the crawl's other limits. Defined in its own
+ * import-free module so the report layer can read it in the browser too.
+ */
+export { MAX_ANALYSIS_BYTES, TOO_LARGE_TO_ANALYSE } from "./analysisLimit.ts";
+
 export const DEFAULT_CRAWL_LIMITS: CrawlLimits = {
   maxPages: 150,
   maxDurationMs: 300_000,

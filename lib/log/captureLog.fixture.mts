@@ -80,4 +80,6 @@ export const APPROVED_FIELDS = [
   "rejected",
   "aiText",
   "aiState",
+  "order",
+  "size",
 ] as const;

@@ -27,7 +27,7 @@
  */
 
 /** The operations that report how they ended. */
-export type ReliabilityOp = "ai.explain" | "pdf.render" | "email.send";
+export type ReliabilityOp = "ai.explain" | "pdf.render" | "email.send" | "page.parse";
 
 /**
  * What a caller may hand in.
@@ -54,6 +54,10 @@ export interface ReliabilityEvent {
   readonly aiText?: string;
   /** Where the commentary stood when the document was built. */
   readonly aiState?: string;
+  /** Which page of the crawl this is, counting from one. */
+  readonly order?: number;
+  /** How large the page is, as a band from `sizeBand`, never an exact size. */
+  readonly size?: string;
 }
 
 /** Every outcome and reason an operation may report. Nothing else is written. */
@@ -88,11 +92,47 @@ const WORDS: Record<ReliabilityOp, { outcomes: readonly string[]; reasons: reado
     outcomes: ["accepted", "not-accepted"],
     reasons: ["not-configured", "rejected", "rate-limited", "network", "provider-error"],
   },
+  "page.parse": {
+    /*
+     * "parsing" is written immediately before a page is parsed, so the last one
+     * before a crash names the size of the page being parsed when it happened.
+     * "skipped" is a page too large to analyse, which is not parsed at all.
+     */
+    outcomes: ["parsing", "skipped"],
+    reasons: ["too-large"],
+  },
 };
 
 const VIA: readonly string[] = ["download", "email"];
 const AI_TEXT: readonly string[] = ["included", "absent"];
 const AI_STATE: readonly string[] = ["explained", "not-explained", "pending", "not-requested"];
+
+/**
+ * The bands a page's size is reported in, each with its upper bound in bytes.
+ *
+ * ROUNDED ON PURPOSE. An exact byte count is close to a fingerprint of one
+ * page; a band says what memory needs to know -- small, large, or larger than
+ * the analysis limit -- and nothing about which page it was.
+ */
+const SIZE_BANDS: readonly (readonly [number, string])[] = [
+  [100_000, "under-100kb"],
+  [500_000, "100kb-500kb"],
+  [1_000_000, "500kb-1mb"],
+  [1_500_000, "1mb-1.5mb"],
+  [2_000_000, "1.5mb-2mb"],
+  [3_000_000, "2mb-3mb"],
+  [5_000_000, "3mb-5mb"],
+];
+const OVER_ALL_BANDS = "over-5mb";
+const SIZE: readonly string[] = [...SIZE_BANDS.map(([, band]) => band), OVER_ALL_BANDS];
+
+/** The band a size in bytes falls in. Each band includes its upper bound. */
+export function sizeBand(bytes: number): string {
+  for (const [upTo, band] of SIZE_BANDS) {
+    if (bytes <= upTo) return band;
+  }
+  return OVER_ALL_BANDS;
+}
 
 /** The outcomes and reasons `op` may report, for the tests that hold them to the application's lists. */
 export function reliabilityWords(op: ReliabilityOp): { outcomes: readonly string[]; reasons: readonly string[] } {
@@ -161,6 +201,8 @@ function lineFor(event: ReliabilityEvent, at: Date): string | null {
   put("rejected", count(event.rejected));
   put("aiText", oneOf(event.aiText, AI_TEXT));
   put("aiState", oneOf(event.aiState, AI_STATE));
+  put("order", count(event.order));
+  put("size", oneOf(event.size, SIZE));
 
   return JSON.stringify(line);
 }

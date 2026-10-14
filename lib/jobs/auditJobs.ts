@@ -192,6 +192,7 @@ export function startAudit(
       const result = await run({
         ...options.audit,
         requestedUrl,
+        jobId: job.id,
         onProgress: (progress) => store.setProgress(job.id, progress),
       });
 

@@ -774,7 +774,9 @@ test("sitemap discovery imports only existing modules", () => {
     (m) => m[1],
   );
 
-  assert.deepEqual(imports.sort(), ["./crawlUrl.ts", "./deadline.ts", "./safety.ts", "cheerio"]);
+  // Narrower than it was: the sitemap is now read without cheerio, by a scanner
+  // that builds no tree. Nothing may be added to this list without arguing it.
+  assert.deepEqual(imports.sort(), ["./crawlUrl.ts", "./deadline.ts", "./safety.ts"]);
 });
 
 test("no HTTP or XML dependency was introduced", () => {

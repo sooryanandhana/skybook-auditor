@@ -27,7 +27,6 @@
  * measures whether a sitemap EXISTS, which is the audit-facing question. This
  * file only asks it for addresses, and silence is a perfectly ordinary answer.
  */
-import * as cheerio from "cheerio";
 import { safeFetch } from "./safety.ts";
 import { capDeadline, type Deadline } from "./deadline.ts";
 import { dedupKey, isSameSite, normalizeCrawlUrl } from "./crawlUrl.ts";
@@ -79,6 +78,12 @@ export interface ParsedSitemap {
    * did not perform.
    */
   truncated: boolean;
+  /**
+   * True when the file named more further sitemaps than we were allowed to
+   * keep. Discovery then knows of sitemaps it will never read, so it is not
+   * complete -- the same claim `truncated` protects for pages.
+   */
+  sitemapsTruncated: boolean;
 }
 
 /** Why sitemap discovery stopped. Only one value means it read everything. */
@@ -162,35 +167,209 @@ export function parseSitemap(xml: string, limits: SitemapLimits): ParsedSitemap 
   const urls: string[] = [];
   const sitemaps: string[] = [];
   let truncated = false;
+  let sitemapsTruncated = false;
 
-  // xmlMode, because HTML parsing rules would restructure the document —
-  // and a sitemap is XML, where <loc> is not a known HTML element.
-  const $ = cheerio.load(xml, { xmlMode: true });
-
-  for (const node of $("*").toArray()) {
-    // Text, comments and the document node are not elements and have no name.
-    if (node.type !== "tag") continue;
-    if (localName(node.name) !== "loc") continue;
-
-    const address = $(node).text().trim();
-    if (address === "") continue;
-
-    // A <loc> at the top of the document has the document itself as its
-    // parent, which is not an element and names no container.
-    const parent = node.parent;
-    const container = parent !== null && parent.type === "tag" ? localName(parent.name) : "";
-
+  /*
+   * ONE PASS, AND NO TREE. This used to build the whole document as a tree of
+   * objects and then an array of every element in it. A sitemap may be up to
+   * 5 MB, and a tree of a dense one is many times that -- enough, on a small
+   * server, to run it out of memory before a single page was crawled. All this
+   * function needs is each <loc>'s text and the name of the element around it,
+   * so that is all it keeps: a short stack of open element names, and the text
+   * of the one <loc> being read. Memory is the input, the answer, and nothing
+   * that grows with the size of the document in between.
+   */
+  scanLocs(xml, (address, container) => {
     if (container === "sitemap") {
-      sitemaps.push(address);
+      // Bounded like the pages are. A file naming more sitemaps than this can
+      // only be partly read, and discovery is told so.
+      if (sitemaps.length < limits.maxUrls) sitemaps.push(address);
+      else sitemapsTruncated = true;
     } else if (container === "url") {
       if (urls.length < limits.maxUrls) urls.push(address);
       else truncated = true;
     }
     // A <loc> somewhere else is not something this format defines, so it is
     // ignored rather than guessed at.
+  });
+
+  return { urls, sitemaps, truncated, sitemapsTruncated };
+}
+
+/**
+ * The longest address a <loc> may hold.
+ *
+ * The sitemap protocol limits a URL to 2,048 characters. A longer one is not a
+ * valid entry, and reading it in full would let one element hold as much
+ * memory as the file allows, so it is skipped.
+ */
+export const MAX_LOC_LENGTH = 2_048;
+
+/**
+ * How much text is gathered for one <loc> before the rest is ignored: the
+ * longest address, with generous room for the whitespace around it.
+ */
+const MAX_LOC_TEXT = MAX_LOC_LENGTH * 4;
+
+/**
+ * How deeply elements may nest before scanning stops.
+ *
+ * A sitemap is three levels deep. A document nested hundreds of levels is not
+ * one, and stopping keeps the stack -- the one thing here that grows with the
+ * document's shape -- small. What was read before that point is kept.
+ */
+const MAX_DEPTH = 64;
+
+/**
+ * Calls `found` for every non-empty <loc>, with the trimmed address and the
+ * local name of the element directly containing it ("url", "sitemap", or
+ * anything else).
+ *
+ * WHAT IT UNDERSTANDS, as the parser it replaces did:
+ *
+ *   - elements, with or without a namespace prefix, in any letter case;
+ *   - the five XML entities and numeric character references, decoded;
+ *   - CDATA sections, whose text is taken exactly as written;
+ *   - comments, processing instructions and declarations, which are skipped;
+ *   - attributes, including quoted values that contain ">";
+ *   - text inside elements nested within a <loc>, which counts as its text.
+ *
+ * FORGIVING, NEVER THROWING. Markup that does not close, a closing tag with no
+ * opening one, or a document that is not XML at all simply yields whatever
+ * complete <loc> elements came before the problem. A <loc> still open when the
+ * input ends -- a file cut off part-way, as a dropped connection leaves it --
+ * is read as far as it goes, exactly as the parser this replaced read it: the
+ * project decided that half a sitemap is still a list of real pages.
+ */
+function scanLocs(xml: string, found: (address: string, container: string) => void): void {
+  /** Names of the open elements, lowercased, outermost first. */
+  const stack: string[] = [];
+
+  /** Where the <loc> being read sits in the stack, or -1 when none is open. */
+  let locAt = -1;
+  let container = "";
+  let text = "";
+
+  const gather = (piece: string) => {
+    if (locAt === -1 || text.length >= MAX_LOC_TEXT) return;
+    text += piece.slice(0, MAX_LOC_TEXT - text.length);
+  };
+
+  const finishLoc = () => {
+    const address = text.trim();
+    if (address !== "" && address.length <= MAX_LOC_LENGTH && text.length < MAX_LOC_TEXT) {
+      found(address, container);
+    }
+    locAt = -1;
+    container = "";
+    text = "";
+  };
+
+  let at = 0;
+  while (at < xml.length) {
+    const open = xml.indexOf("<", at);
+
+    // Text up to the next piece of markup, or to the end.
+    const textEnd = open === -1 ? xml.length : open;
+    // Only the text of a <loc> is wanted; everything else is passed over unread.
+    if (locAt !== -1 && textEnd > at) gather(decodeXmlText(xml.slice(at, Math.min(textEnd, at + MAX_LOC_TEXT))));
+    if (open === -1) break;
+
+    if (xml.startsWith("<!--", open)) {
+      const end = xml.indexOf("-->", open + 4);
+      if (end === -1) break;
+      at = end + 3;
+      continue;
+    }
+
+    if (xml.startsWith("<![CDATA[", open)) {
+      const end = xml.indexOf("]]>", open + 9);
+      if (end === -1) break;
+      gather(xml.slice(open + 9, Math.min(end, open + 9 + MAX_LOC_TEXT)));
+      at = end + 3;
+      continue;
+    }
+
+    if (xml[open + 1] === "?" || xml[open + 1] === "!") {
+      // A processing instruction or a declaration: nothing to read in it.
+      const end = xml.indexOf(">", open + 2);
+      if (end === -1) break;
+      at = end + 1;
+      continue;
+    }
+
+    const end = tagEnd(xml, open + 1);
+    if (end === -1) break;
+    const inside = xml.slice(open + 1, end);
+    at = end + 1;
+
+    const closing = inside.startsWith("/");
+    const name = /^\/?\s*([^\s/>]+)/.exec(inside)?.[1]?.toLowerCase();
+    if (name === undefined) continue;
+
+    if (closing) {
+      // Close the nearest open element of this name, and anything left open
+      // inside it. A closing tag with nothing to close is ignored.
+      const match = stack.lastIndexOf(name);
+      if (match === -1) continue;
+      stack.length = match;
+      if (locAt !== -1 && stack.length <= locAt) finishLoc();
+      continue;
+    }
+
+    const selfClosing = /\/\s*$/.test(inside);
+    if (selfClosing) continue; // <loc/> holds nothing; an empty element changes no nesting.
+
+    if (stack.length >= MAX_DEPTH) break;
+
+    if (locAt === -1 && localName(name) === "loc") {
+      locAt = stack.length;
+      container = stack.length === 0 ? "" : localName(stack[stack.length - 1]);
+    }
+    stack.push(name);
   }
 
-  return { urls, sitemaps, truncated };
+  // The input ended, normally or at markup that could not be read further.
+  if (locAt !== -1) finishLoc();
+}
+
+/**
+ * Where the tag beginning at `from` ends: the index of its ">", or -1.
+ *
+ * Quoted attribute values may contain ">", so they are stepped over whole.
+ */
+function tagEnd(xml: string, from: number): number {
+  let quote = "";
+  for (let index = from; index < xml.length; index += 1) {
+    const character = xml[index];
+    if (quote !== "") {
+      if (character === quote) quote = "";
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === ">") {
+      return index;
+    }
+  }
+  return -1;
+}
+
+const XML_ENTITIES: Readonly<Record<string, string>> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+
+/**
+ * XML text with its entities decoded: the five XML defines, and numeric
+ * references. Anything else is left exactly as written.
+ */
+function decodeXmlText(raw: string): string {
+  if (!raw.includes("&")) return raw;
+  return raw.replace(/&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|[a-zA-Z]+);/g, (whole, body: string) => {
+    if (body.startsWith("#")) {
+      const code = body[1] === "x" || body[1] === "X" ? Number.parseInt(body.slice(2), 16) : Number.parseInt(body.slice(1), 10);
+      return Number.isInteger(code) && code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+        ? String.fromCodePoint(code)
+        : whole;
+    }
+    return XML_ENTITIES[body] ?? whole;
+  });
 }
 
 /** `sitemap:loc` and `loc` are the same element; the prefix is decoration. */
@@ -533,6 +712,8 @@ export async function discoverSitemapUrls(
 
     // The file itself held more than we were allowed to keep.
     if (parsed.truncated) stoppedBecause = "max-urls";
+    // Or named more sitemaps than we kept, so some will never be read.
+    if (parsed.sitemapsTruncated) stoppedBecause = "max-files";
 
     for (const url of parsed.urls) {
       if (found.length >= limits.maxUrls) {

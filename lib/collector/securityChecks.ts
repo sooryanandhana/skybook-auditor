@@ -148,26 +148,35 @@ export function runSecurityChecks(
 ): SecurityData {
   const strictTransportSecurity = readHeader(headers, "strict-transport-security");
 
+  /*
+   * THE PAGE IS PARSED ONCE, HERE, and every check below that reads markup
+   * reads this one parse. Each used to parse the same HTML for itself -- four
+   * full parses of a page to answer four questions, three of them about a
+   * handful of <meta> and <form> tags. The checks only read the document, so
+   * sharing it changes nothing they find, or the order they find it in.
+   */
+  const $ = cheerio.load(html);
+
   return {
     servedOverHttps,
 
     strictTransportSecurity,
     contentSecurityPolicy: readHeader(headers, "content-security-policy"),
     contentSecurityPolicyReportOnly: readHeader(headers, "content-security-policy-report-only"),
-    contentSecurityPolicyMeta: hasMetaContentSecurityPolicy(html),
+    contentSecurityPolicyMeta: hasMetaContentSecurityPolicyIn($),
     xFrameOptions: readHeader(headers, "x-frame-options"),
     xContentTypeOptions: readHeader(headers, "x-content-type-options"),
     referrerPolicy: readHeader(headers, "referrer-policy"),
     permissionsPolicy: readHeader(headers, "permissions-policy"),
 
     hsts: parseHsts(strictTransportSecurity.value, servedOverHttps),
-    mixedContent: findMixedContent(
-      html,
+    mixedContent: mixedContentResult(
       servedOverHttps,
-      hasEnforcedUpgradeInsecureRequests(headers, html),
+      hasEnforcedUpgradeInsecureRequestsIn(headers, $),
+      () => collectInsecureResourcesIn($, 0),
     ),
     cookies: parseCookies(setCookieHeaders, now),
-    insecureFormActions: findInsecureFormActions(html),
+    insecureFormActions: findInsecureFormActionsIn($),
 
     serverHeader: readHeader(headers, "server"),
     poweredByHeader: readHeader(headers, "x-powered-by"),
@@ -391,6 +400,21 @@ export function findMixedContent(
    */
   upgradeInsecureRequests = false,
 ): MixedContentData {
+  // Parsed only when there is something to look for, exactly as before.
+  return mixedContentResult(servedOverHttps, upgradeInsecureRequests, () => collectInsecureResources(html, 0));
+}
+
+/**
+ * The mixed-content result, from a way of collecting the page's insecure
+ * resources. Shared by `findMixedContent`, which parses the HTML it is given,
+ * and `runSecurityChecks`, which hands over the page it has already parsed.
+ * `collect` is called only for a page served over HTTPS.
+ */
+function mixedContentResult(
+  servedOverHttps: boolean,
+  upgradeInsecureRequests: boolean,
+  collect: () => MixedContentItem[],
+): MixedContentData {
   if (!servedOverHttps) {
     return {
       applicable: false,
@@ -405,7 +429,7 @@ export function findMixedContent(
     };
   }
 
-  const found = collectInsecureResources(html, 0);
+  const found = collect();
 
   return {
     applicable: true,
@@ -423,7 +447,15 @@ const MAX_SRCDOC_DEPTH = 2;
 
 /** Walks one document's markup for insecure resources. */
 function collectInsecureResources(html: string, depth: number): MixedContentItem[] {
-  const $ = cheerio.load(html);
+  return collectInsecureResourcesIn(cheerio.load(html), depth);
+}
+
+/**
+ * The same walk, over a document that has already been parsed. Reads it and
+ * never changes it. Embedded `srcdoc` documents are separate documents, so
+ * each is still parsed on its own.
+ */
+function collectInsecureResourcesIn($: cheerio.CheerioAPI, depth: number): MixedContentItem[] {
   const found: MixedContentItem[] = [];
 
   // --- Elements with a plain resource attribute -----------------------------
@@ -682,7 +714,11 @@ function matchAllWithText(text: string, pattern: RegExp): Array<{ url: string; t
  * not a policy and does not count.
  */
 export function hasMetaContentSecurityPolicy(html: string): boolean {
-  const $ = cheerio.load(html);
+  return hasMetaContentSecurityPolicyIn(cheerio.load(html));
+}
+
+/** The same scan, over a document that has already been parsed. */
+function hasMetaContentSecurityPolicyIn($: cheerio.CheerioAPI): boolean {
   let found = false;
 
   $("meta[http-equiv]").each((_, element) => {
@@ -703,8 +739,7 @@ export function hasMetaContentSecurityPolicy(html: string): boolean {
  * carry a report-only policy (the specification forbids it), so anything found
  * here is enforcing.
  */
-function metaContentSecurityPolicies(html: string): string[] {
-  const $ = cheerio.load(html);
+function metaContentSecurityPoliciesIn($: cheerio.CheerioAPI): string[] {
   const policies: string[] = [];
 
   $("meta[http-equiv]").each((_, element) => {
@@ -752,16 +787,25 @@ export function hasEnforcedUpgradeInsecureRequests(
   headers: Record<string, string>,
   html: string,
 ): boolean {
+  return hasEnforcedUpgradeInsecureRequestsIn(headers, cheerio.load(html));
+}
+
+/** The same decision, over a document that has already been parsed. */
+function hasEnforcedUpgradeInsecureRequestsIn(headers: Record<string, string>, $: cheerio.CheerioAPI): boolean {
   const header = readHeader(headers, "content-security-policy");
   const policies = [
     ...(header.present && header.value ? [header.value] : []),
-    ...metaContentSecurityPolicies(html),
+    ...metaContentSecurityPoliciesIn($),
   ];
   return policies.some((policy) => policyHasDirective(policy, "upgrade-insecure-requests"));
 }
 
 export function findInsecureFormActions(html: string): string[] {
-  const $ = cheerio.load(html);
+  return findInsecureFormActionsIn(cheerio.load(html));
+}
+
+/** The same scan, over a document that has already been parsed. */
+function findInsecureFormActionsIn($: cheerio.CheerioAPI): string[] {
   const actions: string[] = [];
 
   $("form[action]").each((_, element) => {

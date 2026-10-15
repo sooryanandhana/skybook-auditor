@@ -7,11 +7,25 @@
  * already: a change to how one of them trusted a header would silently leave
  * the others open. So the reading lives here, and each limiter asks it.
  *
- * THE HEADERS ARE NOT BELIEVED BY DEFAULT. Reached directly, the only source of
- * `X-Forwarded-For` and `X-Real-IP` is the client itself, and a client that
- * rewrites them on every request would otherwise be a new caller each time and
- * never reach a limit. They are read only when the operator has declared, with
- * `SKYBOOK_TRUST_PROXY`, that a proxy in front really does set them.
+ * NO HEADER IS BELIEVED BY DEFAULT. Reached directly, every client-address
+ * header is the client's own word, and a client that rewrites one on every
+ * request would otherwise be a new caller each time and never reach a limit.
+ * A header is read only when the operator has declared, with
+ * `SKYBOOK_TRUST_PROXY`, that a proxy in front really does set it.
+ *
+ * WHICH HEADER, WHEN TRUSTED: `CF-Connecting-IP`, AND ONLY THAT ONE. Render
+ * sends every request through Cloudflare, and Cloudflare documents that it
+ * APPENDS to an `X-Forwarded-For` the client already sent rather than
+ * replacing it -- so the first entry of that header is whatever the client
+ * chose. `CF-Connecting-IP` is one address that Cloudflare sets itself.
+ * `X-Forwarded-For` and `X-Real-IP` are never read, not even as a fallback,
+ * because a fallback is exactly where a forged value would get back in.
+ *
+ * NOT YET VERIFIED ON THE LIVE SERVICE. That Cloudflare sets or refuses a
+ * client-supplied `CF-Connecting-IP` on the route to this deployment comes
+ * from documentation and third-party tests, not from observing production.
+ * Until it is checked there, the per-caller limits are not a proven control;
+ * the global ceilings are the limits that hold whatever any header says.
  */
 import { isIP } from "node:net";
 
@@ -29,7 +43,7 @@ export const UNATTRIBUTED = "unattributed";
 export const TRUST_PROXY_VARIABLE = "SKYBOOK_TRUST_PROXY";
 
 /**
- * Whether the forwarded client-address headers may be believed.
+ * Whether the proxy's client-address header may be believed.
  *
  * An explicit boolean wins, so a caller (or a test) can force either posture;
  * otherwise the environment decides, and the safe default when it says nothing
@@ -73,20 +87,34 @@ export function normaliseCaller(raw: string): string | null {
   return value;
 }
 
+/** The one header read behind a trusted proxy. See the note at the top. */
+export const CLIENT_ADDRESS_HEADER = "cf-connecting-ip";
+
+/**
+ * The longest header value that is even looked at.
+ *
+ * 45 characters is the longest textual IP address there is -- an IPv6 address
+ * with an embedded IPv4 tail, `ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255`
+ * -- so anything longer cannot be one address and is refused before parsing.
+ */
+export const MAX_CLIENT_ADDRESS_LENGTH = 45;
+
 /**
  * The caller key for one request, given whether a proxy is trusted.
  *
- * Untrusted (the default): every request is `UNATTRIBUTED`, so a rotated header
- * cannot escape a limit by pretending to be a new caller. Trusted: the first
- * forwarded hop, normalised, so alternate spellings of one machine share a key
- * and a non-address falls back to `UNATTRIBUTED` rather than minting a bucket.
+ * Untrusted (the default): every request is `UNATTRIBUTED`, whatever headers
+ * it carries, so a rotated header cannot escape a limit by pretending to be a
+ * new caller. Trusted: the single `CF-Connecting-IP` value, normalised, so
+ * alternate spellings of one machine share a key. A value that is missing,
+ * empty, too long, holds more than one entry (a client that sends the header
+ * twice arrives here comma-joined) or is not an address falls back to
+ * `UNATTRIBUTED` rather than minting a bucket -- and never to another header.
  */
 export function trustedCaller(request: Request, trustProxy: boolean): string {
   if (!trustProxy) return UNATTRIBUTED;
 
-  const forwarded = request.headers.get("x-forwarded-for");
-  const first = forwarded?.split(",")[0]?.trim();
-  const raw = first || request.headers.get("x-real-ip")?.trim() || "";
+  const raw = request.headers.get(CLIENT_ADDRESS_HEADER);
+  if (raw === null || raw.length > MAX_CLIENT_ADDRESS_LENGTH || raw.includes(",")) return UNATTRIBUTED;
 
   return normaliseCaller(raw) ?? UNATTRIBUTED;
 }

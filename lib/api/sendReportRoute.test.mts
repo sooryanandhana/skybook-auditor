@@ -146,7 +146,7 @@ const request = (body: unknown, signedIn = true, caller = "1.2.3.4") =>
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-forwarded-for": caller,
+      "cf-connecting-ip": caller,
       ...(signedIn
         ? { cookie: `${SESSION_COOKIE}=${signSession(USER_ID, "SALES", { secret: SECRET }, NOW)}` }
         : {}),
@@ -760,7 +760,7 @@ test("a successful send spends exactly one", async () => {
   const { store, jobId } = storeWith("completed");
   const mail = fakeProvider();
 
-  // Trusted proxy, so the caller key is the forwarded address and this test can
+  // Trusted proxy, so the caller key is the CF-Connecting-IP value and this test can
   // speak about "that caller's" allowance. The default posture is covered on
   // its own below.
   const result = await sendReportRoute(

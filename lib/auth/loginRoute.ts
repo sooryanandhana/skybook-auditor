@@ -31,14 +31,15 @@ export const CANNOT_SIGN_IN =
 
 export interface LoginOptions extends SessionOptions, CredentialOptions {
   /**
-   * Whether a trusted proxy sits in front, so the forwarded client-address
-   * headers may be believed.
+   * Whether a trusted proxy sits in front, so its client-address header,
+   * `CF-Connecting-IP`, may be believed. `X-Forwarded-For` and `X-Real-IP`
+   * never are; see callerAddress.ts.
    *
    * FALSE BY DEFAULT, and that is the safe posture: reached directly, the only
-   * source of these headers is the client itself, and a client that rewrites
-   * them on every request would otherwise be a new caller each time and never
-   * reach a limit. Set the SKYBOOK_TRUST_PROXY environment variable only when
-   * the deployment really does terminate behind a proxy that sets them.
+   * source of that header is the client itself, and a client that rewrites it
+   * on every request would otherwise be a new caller each time and never reach
+   * a limit. Set the SKYBOOK_TRUST_PROXY environment variable only when the
+   * deployment really does sit behind Cloudflare, which sets it.
    */
   readonly trustProxy?: boolean;
   /**

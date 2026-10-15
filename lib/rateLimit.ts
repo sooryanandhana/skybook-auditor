@@ -102,11 +102,13 @@ function configuredLimit(): number {
  * The most audits this server will start in a minute, whoever asks.
  *
  * WHY A SECOND LIMIT EXISTS AT ALL. The per-caller limit is keyed on the
- * caller's address, and that address is read from `x-forwarded-for` — a header
- * the client sets. With nothing but a proxy header telling us who is who, a
- * script that changes it on every request is a new caller every time and never
- * reaches any limit at all. That is not a theoretical hole: it is one line of
- * code, and it spends a metered Google quota today and paid API credit later.
+ * caller's address, and that address comes from a request header. With nothing
+ * but a header telling us who is who, a script that can change it on every
+ * request is a new caller every time and never reaches any limit at all. That
+ * is not a theoretical hole: `x-forwarded-for` was once read here, and on
+ * Render its first entry is the client's to choose. The header now read,
+ * `cf-connecting-ip`, is not yet verified on the live service either (see
+ * callerAddress.ts), and this limit must hold whatever any header says.
  *
  * This ceiling is counted across every caller together, so no header can move
  * a request out from under it. It is deliberately NOT configurable — a limit
@@ -237,27 +239,24 @@ function pruneIdleCallers(windowStart: number): void {
 /**
  * Works out who is calling.
  *
- * NOTE ON TRUST: `x-forwarded-for` is set by proxies and CAN BE FORGED by a
- * caller when the app is reached directly. Nothing here can tell a genuine
- * proxy header from an invented one, so nothing here tries: a caller who
- * changes the header on every request is a new caller every time, and their
- * per-caller allowance never runs out.
+ * NOTE ON TRUST: every client-address header CAN BE FORGED by a caller when the
+ * app is reached directly, and `x-forwarded-for` can be forged even behind
+ * Render's Cloudflare edge, which appends to a client-sent one. Nothing here
+ * can tell a genuine proxy header from an invented one by looking at it; the
+ * operator's `SKYBOOK_TRUST_PROXY` declaration is the only thing that does.
  *
  * That is why this is not the only limit. `GLOBAL_LIMIT` is counted across all
  * callers together and no header can move a request out from under it. This
  * function decides who gets their own allowance; the ceiling decides how much
  * the server will do in total.
- *
- * If this is ever placed behind a real proxy, only that proxy's value should
- * be trusted, and this is the function to change.
  */
 /**
  * Who is asking, for the audit allowance.
  *
- * DEFAULT-UNTRUSTED, THROUGH THE SHARED READER. A forwarded header is believed
- * only behind a configured proxy; otherwise every request is one bucket, so
- * rotating the header cannot escape the per-caller limit. The global ceiling
- * below is keyed on nobody and holds regardless.
+ * DEFAULT-UNTRUSTED, THROUGH THE SHARED READER. Only `cf-connecting-ip` is
+ * believed, and only behind a configured proxy; otherwise every request is one
+ * bucket, so rotating a header cannot escape the per-caller limit. The global
+ * ceiling below is keyed on nobody and holds regardless.
  */
 export function callerKey(request: Request, trustProxy: boolean = trustsProxy()): string {
   return trustedCaller(request, trustProxy);

@@ -64,7 +64,7 @@ const trusting = { ...options, trustProxy: true };
 const attempt = (body: unknown, caller = "1.2.3.4") =>
   new Request("https://skybook.example/api/auth/login", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": caller },
+    headers: { "content-type": "application/json", "cf-connecting-ip": caller },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 
@@ -328,7 +328,7 @@ test("behind a trusted proxy, alternate spellings of one address share one bucke
   // ::ffff:127.0.0.1 and ::ffff:7f00:1 are 127.0.0.1; a limit that counted
   // them apart would let one machine act as three.
   const spellings = ["127.0.0.1", "::ffff:127.0.0.1", "::ffff:7f00:1", "::FFFF:127.0.0.1"];
-  const run = await guessRun({ ...trusting }, 40, (i) => ({ "x-forwarded-for": spellings[i % spellings.length] }));
+  const run = await guessRun({ ...trusting }, 40, (i) => ({ "cf-connecting-ip": spellings[i % spellings.length] }));
 
   // One bucket: after ten failures it locks, so most of the forty are 429.
   assert.ok((run.status[429] ?? 0) >= 25, `expected a locked bucket, saw ${JSON.stringify(run.status)}`);
@@ -336,8 +336,27 @@ test("behind a trusted proxy, alternate spellings of one address share one bucke
 
 test("behind a trusted proxy, a header of junk cannot mint a fresh bucket per request", async () => {
   // Not an address, so it is treated as unattributed rather than a new caller.
-  const junk = await guessRun({ ...trusting }, 40, (i) => ({ "x-forwarded-for": `not-an-ip-${i}` }));
+  const junk = await guessRun({ ...trusting }, 40, (i) => ({ "cf-connecting-ip": `not-an-ip-${i}` }));
   assert.equal(junk.status[429] ?? 0, 0, "junk keys do not lock, but they also do not multiply");
+});
+
+test("behind a trusted proxy, rotating X-Forwarded-For under one CF-Connecting-IP still locks", async () => {
+  // The bypass this closes: Cloudflare appends to a client-sent X-Forwarded-For,
+  // so its first entry is the attacker's to choose. Keyed on CF-Connecting-IP,
+  // all forty are one caller and the hard limit of ten holds.
+  const run = await guessRun({ ...trusting }, 40, (i) => ({
+    "cf-connecting-ip": "203.0.113.7",
+    "x-forwarded-for": `198.51.100.${i}, 203.0.113.7, 172.71.0.1, 10.0.0.1`,
+    "x-real-ip": `198.51.100.${i}`,
+  }));
+  assert.equal(run.status[429] ?? 0, 30, `expected ten failures then a lock, saw ${JSON.stringify(run.status)}`);
+});
+
+test("untrusted, a rotating CF-Connecting-IP does not mint new callers either", async () => {
+  // Reached directly, CF-Connecting-IP is the client's own word like any other.
+  const rotated = await guessRun({ ...options }, 40, (i) => ({ "cf-connecting-ip": `198.51.100.${i}` }));
+  assert.equal(rotated.status[429] ?? 0, 0, "untrusted: one shared bucket, never a per-caller 429");
+  assert.ok(rotated.waited.some((ms) => ms > 0), "the account slow-down is spent");
 });
 
 test("the account slow-down grows and then holds, and the right password still gets through", async () => {
@@ -413,16 +432,21 @@ test("callerAddress ignores the headers entirely when the proxy is not trusted",
   assert.equal(callerAddress(request, false), "unattributed");
 });
 
-test("callerAddress reads and normalises the first forwarded hop when trusted", () => {
+test("callerAddress reads and normalises CF-Connecting-IP when trusted, ignoring X-Forwarded-For", () => {
   const request = new Request("https://skybook.example/api/auth/login", {
-    headers: { "x-forwarded-for": "::ffff:203.0.113.7, 10.0.0.1" },
+    headers: { "cf-connecting-ip": "::ffff:203.0.113.7", "x-forwarded-for": "198.51.100.9, 10.0.0.1" },
   });
   assert.equal(callerAddress(request, true), "203.0.113.7");
 });
 
-test("callerAddress falls back to unattributed when a trusted header is junk", () => {
-  const request = new Request("https://skybook.example/api/auth/login", {
-    headers: { "x-forwarded-for": "not-an-ip" },
+test("callerAddress falls back to unattributed when a trusted header is junk or absent", () => {
+  const junk = new Request("https://skybook.example/api/auth/login", {
+    headers: { "cf-connecting-ip": "not-an-ip" },
   });
-  assert.equal(callerAddress(request, true), "unattributed");
+  assert.equal(callerAddress(junk, true), "unattributed");
+
+  const onlyForwarded = new Request("https://skybook.example/api/auth/login", {
+    headers: { "x-forwarded-for": "203.0.113.7" },
+  });
+  assert.equal(callerAddress(onlyForwarded, true), "unattributed");
 });

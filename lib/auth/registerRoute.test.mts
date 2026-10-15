@@ -25,7 +25,7 @@ const NOW = 1_757_000_000_000;
 function post(body: unknown, caller = "1.2.3.4") {
   return new Request("https://skybook.example/api/auth/register", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": caller },
+    headers: { "content-type": "application/json", "cf-connecting-ip": caller },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 }
@@ -244,6 +244,23 @@ test("too many sign-ups from one caller are refused with 429", async () => {
 
   const blocked = await registerRoute(post({ email: "one-too-many@shop.com", password: PASSWORD }), { db, trustProxy: true });
   assert.equal(blocked.ok, false);
+  assert.equal(blocked.ok === false && blocked.status, 429);
+});
+
+test("behind a trusted proxy, rotating X-Forwarded-For under one CF-Connecting-IP is one caller", async () => {
+  resetRegisterLimits();
+  const { db } = recordingDb();
+  const forged = (i: number) =>
+    new Request("https://skybook.example/api/auth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.7", "x-forwarded-for": `198.51.100.${i}` },
+      body: JSON.stringify({ email: `rot${i}@shop.com`, password: PASSWORD }),
+    });
+
+  for (let i = 0; i < REGISTER_PER_CALLER; i += 1) {
+    assert.equal((await registerRoute(forged(i), { db, trustProxy: true })).ok, true, `attempt ${i}`);
+  }
+  const blocked = await registerRoute(forged(REGISTER_PER_CALLER), { db, trustProxy: true });
   assert.equal(blocked.ok === false && blocked.status, 429);
 });
 

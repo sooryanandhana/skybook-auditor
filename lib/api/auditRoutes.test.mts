@@ -220,13 +220,32 @@ test("behind a trusted proxy, distinct callers are bounded by the global ceiling
 
   for (let i = 0; i < 60; i += 1) {
     const result = await startAuditRoute(
-      postJson({ url: "https://example.com" }, { "x-forwarded-for": `203.0.113.${i}` }),
+      postJson({ url: "https://example.com" }, { "cf-connecting-ip": `203.0.113.${i}` }),
       { store, runImpl: auditReturning(true), trustProxy: true },
     );
     if (result.status === 202) accepted += 1;
   }
 
   assert.equal(accepted, GLOBAL_LIMIT);
+});
+
+test("behind a trusted proxy, a forged X-Forwarded-For under one CF-Connecting-IP is one caller", async () => {
+  // Cloudflare appends to a client's X-Forwarded-For, so rotating its first
+  // entry costs nothing. The route keys on CF-Connecting-IP, so it buys nothing.
+  const store = createJobStore<SiteAuditResult>();
+  let accepted = 0;
+  let last: Awaited<ReturnType<typeof startAuditRoute>> | undefined;
+
+  for (let i = 0; i < 60; i += 1) {
+    last = await startAuditRoute(
+      postJson({ url: "https://example.com" }, { "cf-connecting-ip": "198.51.100.40", "x-forwarded-for": `203.0.113.${i}` }),
+      { store, runImpl: auditReturning(true), trustProxy: true },
+    );
+    if (last.status === 202) accepted += 1;
+  }
+
+  assert.equal(accepted, DEFAULT_LIMIT);
+  assert.equal(last?.headers?.["X-RateLimit-Limit"], String(DEFAULT_LIMIT), "the caller's own limit, not the ceiling");
 });
 
 test("the limit is checked before the body is read", async () => {

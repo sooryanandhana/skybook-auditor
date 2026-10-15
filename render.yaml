@@ -46,8 +46,10 @@ services:
       - key: PAGESPEED_API_KEY
         sync: false
       # --- operational, non-secret ---
-      # Render sits behind a proxy: trust X-Forwarded-For so rate limiting sees
-      # the real client IP rather than the proxy's.
+      # Render sends traffic through Cloudflare: trust its CF-Connecting-IP
+      # header so rate limiting keys on the client IP. X-Forwarded-For is never
+      # read (Cloudflare appends to a client-sent one). That this header is
+      # authentic on the live route is not yet verified.
       - key: SKYBOOK_TRUST_PROXY
         value: "1"
       - key: PUPPETEER_EXECUTABLE_PATH

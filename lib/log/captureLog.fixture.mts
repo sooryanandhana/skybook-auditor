@@ -85,4 +85,5 @@ export const APPROVED_FIELDS = [
   "waitMs",
   "pages",
   "stop",
+  "status",
 ] as const;

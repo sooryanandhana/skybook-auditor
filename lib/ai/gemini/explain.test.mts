@@ -846,3 +846,93 @@ test("the adapter makes exactly one call to the provider, textually as well", ()
   // Strip that one SDK option before asserting the adapter rolls no retry of its own.
   assert.ok(!/\bretry\b/i.test(code.replace(/retryOptions/g, "")), "the adapter has retry logic of its own");
 });
+
+// ---------------------------------------------------------------------------
+// The provider's HTTP status, kept as a number (Step 1: written before the code)
+//
+// A failure may carry `httpStatus`: the provider's own numeric HTTP status, so
+// a "provider-error" can later be told apart as 500, 503 or 504. Only a whole
+// number from 100 to 599 is kept. The reason and the sentence are unchanged,
+// and nothing the provider wrote is ever kept.
+// ---------------------------------------------------------------------------
+
+/** The status a result carries, read without assuming the field exists yet. */
+const httpStatusOf = (result: unknown): unknown => (result as { httpStatus?: unknown }).httpStatus;
+const hasHttpStatus = (result: unknown): boolean => typeof result === "object" && result !== null && "httpStatus" in result;
+
+test("a provider fault with status 503 is a provider-error that keeps the number 503", async () => {
+  const result = await explainAudit(reportInput(), { apiKey: KEY, client: throws(sdkError("ServiceUnavailableError", 503)).client });
+
+  assert.equal(result.state, "not-explained");
+  if (result.state !== "not-explained") return;
+  assert.equal(result.reason, "provider-error");
+  assert.equal(httpStatusOf(result), 503);
+});
+
+test("the real SDK's 503 keeps the number 503, in one request", async () => {
+  await withStubbedFetch(
+    async () => jsonResponse(503, { error: { code: 503, message: "overloaded", status: "UNAVAILABLE" } }),
+    async (count) => {
+      const result = await explainAudit(reportInput(), { apiKey: "offline-key-for-this-test", timeoutMs: 2_000 });
+
+      assert.equal(count(), 1);
+      assert.equal(result.state === "not-explained" && result.reason, "provider-error");
+      assert.equal(httpStatusOf(result), 503);
+    },
+  );
+});
+
+test("a status that is missing, not a number, or outside 100 to 599 is never kept", async () => {
+  const cases: ReadonlyArray<readonly [string, unknown]> = [
+    ["no status at all", undefined],
+    ["a status of 99", 99],
+    ["a status of 600", 600],
+    ["a fractional status", 503.5],
+    ["a negative status", -1],
+    ["a status written as text", "503"],
+    ["a status of null", null],
+    ["a status that is not a number", Number.NaN],
+  ];
+
+  for (const [label, status] of cases) {
+    const error = new Error("a message that must never reach a report");
+    error.name = "APIError";
+    if (status !== undefined) Object.assign(error, { status });
+
+    const result = await explainAudit(reportInput(), { apiKey: KEY, client: throws(error).client });
+
+    assert.equal(result.state, "not-explained", label);
+    assert.ok(!hasHttpStatus(result), `${label}: an invalid status was kept as ${JSON.stringify(httpStatusOf(result))}`);
+  }
+});
+
+test("the kept status is only ever the number, never anything the provider wrote", async () => {
+  const leak = "SECRET-BODY x-goog-api-key: AIzaSyExampleNotReal";
+  const error = sdkError("InternalServerError", 500);
+  error.message = leak;
+  Object.assign(error, { body: leak, headers: { "x-goog-api-key": "AIzaSyExampleNotReal" } });
+
+  const result = await explainAudit(reportInput(), { apiKey: KEY, client: throws(error).client });
+
+  assert.equal(httpStatusOf(result), 500);
+  assert.equal(typeof httpStatusOf(result), "number");
+  const text = JSON.stringify(result);
+  for (const forbidden of ["SECRET-BODY", "AIzaSy", "x-goog-api-key", KEY]) {
+    assert.ok(!text.includes(forbidden), `${forbidden} was kept`);
+  }
+});
+
+test("a failure that is not the provider's own has no status to keep", async () => {
+  const unreachable = await explainAudit(reportInput(), { apiKey: KEY, client: throws(sdkError("APIConnectionError", null)).client });
+  const prose = await explainAudit(reportInput(), { apiKey: KEY, client: replies(answered("sorry, here is prose")).client });
+
+  assert.ok(!hasHttpStatus(unreachable), "a network failure");
+  assert.ok(!hasHttpStatus(prose), "an unreadable answer");
+});
+
+test("a successful result never gains a status field", async () => {
+  const result = await explainAudit(reportInput(), { apiKey: KEY, client: replies(answered(JSON.stringify(goodAnswer()))).client });
+
+  assert.equal(result.state, "explained");
+  assert.ok(!hasHttpStatus(result));
+});

@@ -318,3 +318,42 @@ test("the audit is untouched by asking, logged or not", async () => {
 
   assert.equal(JSON.stringify(store.get(jobId)?.result), before);
 });
+
+// ---------------------------------------------------------------------------
+// The provider's HTTP status in the log line (Step 1: written before the code)
+// ---------------------------------------------------------------------------
+
+/** A provider failure that kept the provider's numeric HTTP status. */
+const failedWithStatus = (status: number): ExplainResult =>
+  ({ state: "not-explained", reason: "provider-error", message: FAILURE_SENTENCE, httpStatus: status }) as unknown as ExplainResult;
+
+test("a provider failure that kept its HTTP status logs that status", async () => {
+  const { store, jobId } = finishedJob();
+
+  const captured = await captureLog(() => explainJob(jobId, store, answering(failedWithStatus(503))));
+  const [line] = linesFor(captured, "ai.explain");
+
+  assert.equal(line.outcome, "failed");
+  assert.equal(line.reason, "provider-error");
+  assert.equal(line.status, 503);
+});
+
+test("the status is the only thing added: no sentence, no provider text, nothing else", async () => {
+  const { store, jobId } = finishedJob();
+
+  const captured = await captureLog(() => explainJob(jobId, store, answering(failedWithStatus(503))));
+  const [line] = linesFor(captured, "ai.explain");
+
+  assert.deepEqual(Object.keys(line).sort(), ["job", "ms", "op", "outcome", "reason", "status", "ts"]);
+  assertSafe(captured.all);
+});
+
+test("a failure without a status logs none", async () => {
+  const { store, jobId } = finishedJob();
+
+  const captured = await captureLog(() => explainJob(jobId, store, answering(notExplained("provider-error"))));
+  const [line] = linesFor(captured, "ai.explain");
+
+  assert.equal(line.reason, "provider-error");
+  assert.ok(!("status" in line));
+});

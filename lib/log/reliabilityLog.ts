@@ -64,6 +64,12 @@ export interface ReliabilityEvent {
   readonly pages?: number;
   /** Why the crawl stopped: one of the crawl's own stop-reason codes. */
   readonly stop?: string;
+  /**
+   * The provider's HTTP status on a failed explanation. Written only for
+   * `ai.explain` with outcome "failed", and only as a whole number from 100 to
+   * 599; dropped everywhere else.
+   */
+  readonly status?: number;
 }
 
 /** Every outcome and reason an operation may report. Nothing else is written. */
@@ -162,6 +168,11 @@ function oneOf(value: unknown, allowed: readonly string[]): string | undefined {
   return typeof value === "string" && allowed.includes(value) ? value : undefined;
 }
 
+/** `value` if it is a whole number from 100 to 599 -- an HTTP status -- and otherwise nothing. */
+function httpStatus(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599 ? value : undefined;
+}
+
 /** `value` if it is a whole number that is not negative, and otherwise nothing. */
 function count(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
@@ -224,6 +235,7 @@ function lineFor(event: ReliabilityEvent, at: Date): string | null {
   put("waitMs", count(event.waitMs));
   put("pages", count(event.pages));
   put("stop", oneOf(event.stop, STOP));
+  put("status", op === "ai.explain" && outcome === "failed" ? httpStatus(event.status) : undefined);
 
   return JSON.stringify(line);
 }

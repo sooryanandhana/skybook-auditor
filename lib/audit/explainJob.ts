@@ -60,7 +60,15 @@ function explanationEvent(jobId: string, result: ExplainResult, ms: number): Rel
           ? "not-started"
           : "failed";
 
-  return { op: "ai.explain", job: jobId, outcome, reason: result.reason, ms };
+  return {
+    op: "ai.explain",
+    job: jobId,
+    outcome,
+    reason: result.reason,
+    ms,
+    // The provider's HTTP status, when the failure carried a valid one.
+    ...(result.httpStatus === undefined ? {} : { status: result.httpStatus }),
+  };
 }
 
 /**

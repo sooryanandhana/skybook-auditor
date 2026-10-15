@@ -1139,6 +1139,14 @@ test("explain: no key, no provider detail and no raw response reach the wire", a
   assert.ok(!wire.includes("x-goog-api-key"));
   assert.ok(!wire.includes("InternalServerError"));
   assert.ok(!wire.includes("gemini"), "the payload names no provider");
+
+  // The provider's numeric HTTP status is for the server's log only. It never
+  // reaches the browser, under either name.
+  assert.ok(answer.body.ok);
+  assert.ok(!("httpStatus" in answer.body), "httpStatus reached the browser payload");
+  assert.ok(!("status" in answer.body), "status reached the browser payload");
+  assert.ok(!wire.includes('"httpStatus"'));
+  assert.ok(!wire.includes('"status"'));
 });
 
 test("explain: an audit that could not read a page is refused without asking", async () => {

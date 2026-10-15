@@ -510,3 +510,37 @@ test("the logger imports nothing and reads no environment", () => {
   }
   assert.equal(source.split("console.log").length - 1, 1, "and it writes in exactly one place");
 });
+
+// ---------------------------------------------------------------------------
+// The HTTP status of a failed explanation (Step 1: written before the code)
+//
+// A failed `ai.explain` line may carry the provider's numeric HTTP status, so a
+// "provider-error" can be told apart as 500, 503 or 504. Only a whole number
+// from 100 to 599, only on a failed explanation, and never anything else the
+// provider said.
+// ---------------------------------------------------------------------------
+
+test("a failed explanation line carries its HTTP status", async () => {
+  const captured = await lineOf(loose({ op: "ai.explain", job: JOB, outcome: "failed", reason: "provider-error", ms: 1779, status: 503 }));
+
+  assert.equal(captured.lines.length, 1);
+  assert.equal(captured.lines[0].status, 503);
+  assert.equal(captured.lines[0].reason, "provider-error");
+});
+
+test("an HTTP status that is not a whole number from 100 to 599 is never written", async () => {
+  for (const bad of [99, 600, 503.5, -1, "503", null, Number.NaN]) {
+    const captured = await lineOf(loose({ op: "ai.explain", outcome: "failed", reason: "provider-error", status: bad }));
+
+    assert.equal(captured.lines.length, 1, `the line is still written for ${String(bad)}`);
+    assert.ok(!("status" in captured.lines[0]), `status ${JSON.stringify(bad)} was written`);
+  }
+});
+
+test("an HTTP status is written only on a failed explanation", async () => {
+  const succeeded = await lineOf(loose({ op: "ai.explain", outcome: "succeeded", accepted: 3, rejected: 0, status: 200 }));
+  const otherOperation = await lineOf(loose({ op: "pdf.render", outcome: "failed", reason: "timed-out", status: 503 }));
+
+  assert.ok(!("status" in succeeded.lines[0]), "a success carries no status");
+  assert.ok(!("status" in otherOperation.lines[0]), "no other operation carries one");
+});

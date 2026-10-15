@@ -113,6 +113,14 @@ export type ExplainResult =
       readonly reason: ExplanationFailureReason;
       /** A sentence a person can act on. Ours, never the provider's. */
       readonly message: string;
+      /**
+       * The provider's numeric HTTP status, when the request failed with one --
+       * for the server's diagnostic log, so a "provider-error" can be told apart
+       * as 500, 503 or 504. Only a whole number from 100 to 599 is kept, and it
+       * is the only thing kept from the provider's error: never its message,
+       * body or headers. Absent for every other failure.
+       */
+      readonly httpStatus?: number;
     };
 
 
@@ -125,8 +133,26 @@ export type ExplainResult =
  * borrow somebody else's wording -- the 5D key message and the validator's own
  * refusal -- pass it in, and neither has to be repeated here to be correct.
  */
-function notExplained(reason: ExplanationFailureReason, message?: string): ExplainResult {
-  return { state: "not-explained", reason, message: message ?? EXPLANATION_FAILURE_MESSAGES[reason] };
+function notExplained(reason: ExplanationFailureReason, message?: string, httpStatus?: number): ExplainResult {
+  return {
+    state: "not-explained",
+    reason,
+    message: message ?? EXPLANATION_FAILURE_MESSAGES[reason],
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+  };
+}
+
+/**
+ * The HTTP status a failed request carried, if it is a real one: a whole number
+ * from 100 to 599. Reads the one numeric field and nothing else on the error.
+ */
+function httpStatusOf(error: unknown): number | undefined {
+  try {
+    const status: unknown = (error as { status?: unknown } | null)?.status;
+    return typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +309,8 @@ export async function explainAudit(
         },
       });
     } catch (error) {
-      return notExplained(classify(error));
+      // The reason is classified as before; the status rides along for the log.
+      return notExplained(classify(error), undefined, httpStatusOf(error));
     }
 
     const text = outputText(response);

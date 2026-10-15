@@ -27,11 +27,12 @@ import {
   hashPassword,
   resetAttempts,
   signIn,
+  SPRAY_FREE_FAILURES,
 } from "./credentials.ts";
 
 /** Hashed once, because scrypt is slow on purpose and this file uses it a lot. */
 const PASSWORD = "a-password-the-salesperson-chose";
-const HASH = hashPassword(PASSWORD);
+const HASH = await hashPassword(PASSWORD);
 
 const NOW = 1_757_000_000_000;
 const USER_ID = "11111111-1111-1111-1111-111111111111";
@@ -94,14 +95,14 @@ const account = { db: dbWith(userRow()).db };
    Hashing — unchanged by the move to a database
    --------------------------------------------------------------------------- */
 
-test("a password is stored as a salted hash and never as itself", () => {
-  const stored = hashPassword("hunter2");
+test("a password is stored as a salted hash and never as itself", async () => {
+  const stored = await hashPassword("hunter2");
 
   assert.ok(!stored.includes("hunter2"), "the password is not in the stored value");
   assert.match(stored, /^scrypt:[0-9a-f]+:[0-9a-f]+$/, "scheme, salt and hash");
 });
 
-test("a stored hash survives an environment file unescaped", () => {
+test("a stored hash survives an environment file unescaped", async () => {
   /*
    * THE REGRESSION TEST FOR A REAL OUTAGE, and the reason this format uses a
    * colon rather than the dollar sign every Unix crypt format uses.
@@ -113,33 +114,33 @@ test("a stored hash survives an environment file unescaped", () => {
    * keep: a value with no dollar sign cannot be mangled that way wherever it is
    * pasted.
    */
-  const stored = hashPassword("any password at all");
+  const stored = await hashPassword("any password at all");
 
   assert.ok(!stored.includes("$"), "no dollar sign for an env loader to expand");
   assert.ok(!stored.includes("\\"), "and no escape anybody has to remember");
 });
 
-test("the same password hashes differently every time", () => {
+test("the same password hashes differently every time", async () => {
   /*
    * The salt earning its place. Without one, two people choosing the same
    * password store the same bytes, and one precomputed table covers both.
    */
-  assert.notEqual(hashPassword("hunter2"), hashPassword("hunter2"));
+  assert.notEqual(await hashPassword("hunter2"), await hashPassword("hunter2"));
 });
 
-test("a hash matches its own password and nothing else", () => {
-  assert.equal(checkPassword(PASSWORD, HASH), true);
+test("a hash matches its own password and nothing else", async () => {
+  assert.equal(await checkPassword(PASSWORD, HASH), true);
 
   for (const wrong of ["", " ", PASSWORD.toUpperCase(), `${PASSWORD} `, "hunter2"]) {
-    assert.equal(checkPassword(wrong, HASH), false, JSON.stringify(wrong));
+    assert.equal(await checkPassword(wrong, HASH), false, JSON.stringify(wrong));
   }
 });
 
-test("a password is case-sensitive, because everybody knows one is", () => {
-  assert.equal(checkPassword(PASSWORD.toUpperCase(), HASH), false);
+test("a password is case-sensitive, because everybody knows one is", async () => {
+  assert.equal(await checkPassword(PASSWORD.toUpperCase(), HASH), false);
 });
 
-test("a mistyped hash locks the door rather than opening it", () => {
+test("a mistyped hash locks the door rather than opening it", async () => {
   /*
    * FALSE FOR EVERY MALFORMED VALUE, never a throw and never true. A broken hash
    * in the database must leave the owner unable to sign in, not able to sign in
@@ -159,7 +160,7 @@ test("a mistyped hash locks the door rather than opening it", () => {
     // actually reaching the server when nobody could sign in.
     "scrypt",
   ]) {
-    assert.equal(checkPassword(PASSWORD, broken), false, JSON.stringify(broken));
+    assert.equal(await checkPassword(PASSWORD, broken), false, JSON.stringify(broken));
   }
 });
 
@@ -502,12 +503,15 @@ test("the account slow-down forgets failures once the window has passed", async 
   assert.equal(later.ok === false && later.delayMs, 0, "old failures no longer count");
 });
 
-test("a wrong address, not just a wrong password, feeds the account slow-down", async () => {
-  // Guessing the username is guessing too; both must climb the counter.
+test("guessing across many addresses feeds the spraying guard, not any one account", async () => {
+  // Guessing the username is guessing too. Spread across many addresses it never
+  // builds up any one account's delay, so the spraying guard counts it instead:
+  // past SPRAY_FREE_FAILURES failures in the window, further failures are slowed.
   resetAttempts();
-  for (let i = 0; i < ACCOUNT_FREE_ATTEMPTS + 2; i += 1) {
-    await signIn(`nobody-${i}@skybook.example`, "wrong", UNATTRIBUTED, account, NOW);
+  for (let i = 0; i < SPRAY_FREE_FAILURES; i += 1) {
+    const free = await signIn(`nobody-${i}@skybook.example`, "wrong", UNATTRIBUTED, account, NOW);
+    assert.equal(free.ok === false && free.delayMs, 0, `failure ${i + 1} is within the guard's free allowance`);
   }
   const slowed = await signIn("still-wrong@skybook.example", "wrong", UNATTRIBUTED, account, NOW);
-  assert.ok(slowed.ok === false && slowed.delayMs > 0);
+  assert.ok(slowed.ok === false && slowed.delayMs > 0, "the next failure, on yet another address, is slowed");
 });

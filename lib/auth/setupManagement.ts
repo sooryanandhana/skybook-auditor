@@ -56,7 +56,7 @@ export async function createManagementAccount(
 
   try {
     await create(
-      { email: normalisedEmail, passwordHash: hashPassword(password), role: "MANAGEMENT", status: "ACTIVE" },
+      { email: normalisedEmail, passwordHash: await hashPassword(password), role: "MANAGEMENT", status: "ACTIVE" },
       options.db,
     );
     return { ok: true, email: normalisedEmail };

@@ -80,7 +80,7 @@ test("the password is stored as a scrypt hash, never in plaintext", async () => 
   const hash = (inserts[0] as string[])[1];
   assert.match(hash, /^scrypt:[0-9a-f]+:[0-9a-f]+$/, "a salted scrypt hash");
   assert.ok(!hash.includes(PASSWORD), "the plaintext is not in the stored value");
-  assert.equal(checkPassword(PASSWORD, hash), true, "and it verifies the password");
+  assert.equal(await checkPassword(PASSWORD, hash), true, "and it verifies the password");
 });
 
 test("the email is normalised the same way login normalises it", async () => {

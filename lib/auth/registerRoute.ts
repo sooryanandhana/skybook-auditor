@@ -148,9 +148,11 @@ export async function registerRoute(request: Request, options: RegisterOptions =
   if (!isValidEmail(normalisedEmail)) return { ok: false, status: 400, error: INVALID_EMAIL };
   if (!isAcceptablePassword(password)) return { ok: false, status: 400, error: WEAK_PASSWORD };
 
-  const passwordHash = hashPassword(password);
-
   try {
+    // Inside the try, so a hashing failure is answered like any other failure of
+    // the server's, with no detail about why.
+    const passwordHash = await hashPassword(password);
+
     // Role and status are fixed here, NOT read from the body: a client cannot
     // ask to be a manager, or to skip approval.
     await create({ email: normalisedEmail, passwordHash, role: "SALES", status: "PENDING" }, options.db);

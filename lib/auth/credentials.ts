@@ -24,7 +24,7 @@
  * carries who the person is. Whether that was proved by a password today or by
  * Google Workspace later is this file's business and nobody else's.
  */
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from "node:crypto";
 import { UNATTRIBUTED } from "../callerAddress.ts";
 import { findByEmail, updateLastLogin, type Db, type Role, type User } from "../users/userRepository.ts";
 
@@ -70,6 +70,24 @@ const SCHEME = "scrypt";
 const SEPARATOR = ":";
 
 /**
+ * scrypt, without holding up the server while it works.
+ *
+ * THE SAME FUNCTION, CALLED THE OTHER WAY. `scryptSync` and `scrypt` are one
+ * algorithm with one set of inputs; the asynchronous form runs on Node's worker
+ * pool instead of the main thread. The synchronous form stopped every other
+ * request -- status polls, audits, downloads -- for the length of each sign-in
+ * attempt, deliberately slow ones included. The password, salt, key length and
+ * cost parameters passed here are exactly those passed before, so the bytes it
+ * produces are exactly those it produced before, and every stored hash still
+ * verifies.
+ */
+function deriveKey(password: string, salt: string, options: ScryptOptions): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, KEY_LENGTH, options, (error, key) => (error ? reject(error) : resolve(key)));
+  });
+}
+
+/**
  * A storable hash of a password, salted with fresh randomness.
  *
  * THE SALT IS PER-PASSWORD AND TRAVELS WITH THE HASH. Without one, two people
@@ -80,8 +98,8 @@ const SEPARATOR = ":";
  * Run by hand to produce the value that goes in the environment file. The
  * password itself is typed into a terminal and never written anywhere.
  */
-export function hashPassword(password: string, salt: string = randomBytes(SALT_LENGTH).toString("hex")): string {
-  const derived = scryptSync(password, salt, KEY_LENGTH, SCRYPT).toString("hex");
+export async function hashPassword(password: string, salt: string = randomBytes(SALT_LENGTH).toString("hex")): Promise<string> {
+  const derived = (await deriveKey(password, salt, SCRYPT)).toString("hex");
   return [SCHEME, salt, derived].join(SEPARATOR);
 }
 
@@ -91,13 +109,13 @@ export function hashPassword(password: string, salt: string = randomBytes(SALT_L
  * FALSE FOR A MALFORMED STORED VALUE, never a throw and never true. A hash
  * somebody mistyped into the environment file must lock the door, not open it.
  */
-export function checkPassword(password: string, stored: string): boolean {
+export async function checkPassword(password: string, stored: string): Promise<boolean> {
   const [scheme, salt, expected] = stored.split(SEPARATOR);
   if (scheme !== SCHEME || !salt || !expected) return false;
 
   let derived: Buffer;
   try {
-    derived = scryptSync(password, salt, KEY_LENGTH, SCRYPT);
+    derived = await deriveKey(password, salt, SCRYPT);
   } catch {
     return false;
   }
@@ -144,14 +162,39 @@ export { UNATTRIBUTED } from "../callerAddress.ts";
 /** When each caller last got it wrong. Cleared on success, and never persisted. */
 const failures = new Map<string, number[]>();
 
+/**
+ * The most callers whose failures are remembered at once.
+ *
+ * BOUNDED SO THE MAP CANNOT GROW WITHOUT END. Every distinct caller that gets a
+ * password wrong adds an entry, and an entry used to leave only when that same
+ * caller later signed in. Expired entries are now removed as new ones are
+ * written, and past this many the callers whose last failure is oldest are
+ * forgotten first. Ten thousand distinct callers failing inside one window is
+ * far beyond any honest use; the per-caller limit itself (`MAX_FAILED_ATTEMPTS`)
+ * is unchanged.
+ */
+export const MAX_TRACKED_CALLERS = 10_000;
+
 /* ---------------------------------------------------------------------------
-   Slowing a guessing campaign against the account itself
+   Slowing a guessing campaign against an account
 
    The per-caller limit above is only as trustworthy as the caller key, and
    without a trusted proxy that key cannot be trusted at all. This second
-   throttle needs no key: it counts failed attempts against the CONFIGURED
-   ACCOUNT, whoever they came from, and answers each one more slowly than the
-   last once a few have gone by.
+   throttle needs no key: it counts failed attempts against EACH ACCOUNT --
+   keyed by the address typed, normalised exactly as the lookup normalises it --
+   whoever they came from, and answers each one more slowly than the last once
+   a few have gone by.
+
+   PER ACCOUNT, NOT SHARED. It used to be one counter for the whole server, left
+   over from when there was one account: anybody's wrong guesses slowed
+   everybody's sign-in, and anybody's success wiped the slate for all. Now one
+   account's failures delay only attempts on that account, and a success clears
+   only that account's own record.
+
+   THE SAME FOR ADDRESSES THAT EXIST AND ADDRESSES THAT DO NOT. The key is the
+   address as typed, not the account found, so an unknown address builds up its
+   delay exactly as a real one does and the delay says nothing about which
+   addresses are registered.
 
    It NEVER refuses and NEVER locks the account. A hard account lock would hand
    an attacker a denial of service -- flood the form, and the real user cannot
@@ -168,26 +211,113 @@ export const ACCOUNT_BASE_DELAY_MS = 500;
 /** The longest any one attempt is held. Reached after about twelve failures. */
 export const ACCOUNT_MAX_DELAY_MS = 30_000;
 
-/** Failed attempts against the account, whatever caller they came from. */
-let accountFailures: number[] = [];
+/**
+ * The most accounts whose failures are remembered at once.
+ *
+ * BOUNDED, because the key is whatever address somebody types and an attacker
+ * can type endlessly many. Expired entries are removed as new ones are written,
+ * and past this many the accounts whose last failure is oldest are forgotten
+ * first. Flooding new addresses to push a targeted account's record out is
+ * itself hundreds of failed attempts, which the spraying guard below slows.
+ */
+export const MAX_TRACKED_ACCOUNTS = 1_000;
 
-/** Forgets every recorded failure, per-caller and account-wide. For tests. */
+/** The longest address kept as a key; longer ones are cut, matching the stored maximum. */
+const MAX_ACCOUNT_KEY_LENGTH = 254;
+
+/** Failed attempts against each account, whatever caller they came from. */
+const accountFailures = new Map<string, number[]>();
+
+/* ---------------------------------------------------------------------------
+   Slowing password spraying
+
+   The per-account slow-down has a gap of its own: a campaign that tries one or
+   two passwords against MANY accounts never builds up a delay on any of them.
+   This guard counts failed attempts across every account and, once there are
+   more of them in a window than ordinary mistakes explain, slows FURTHER FAILED
+   ATTEMPTS -- the delay is decided after the password is checked, so a correct
+   password is never held up by other accounts' failures. A success does not
+   clear it: one person signing in says nothing about a campaign against others.
+
+   THE THRESHOLD: fifty failures across all accounts in fifteen minutes. That is
+   five times the per-caller limit (`MAX_FAILED_ATTEMPTS`, ten) and well past the
+   registration limit's own ceiling (twenty sign-ups in the same window), so a
+   small team mistyping does not approach it, while a spraying campaign reaches
+   it quickly. Above it the delay follows the same curve as the per-account one.
+   --------------------------------------------------------------------------- */
+
+/** Failures across all accounts answered at full speed before the guard starts slowing them. */
+export const SPRAY_FREE_FAILURES = 50;
+
+/**
+ * The most failures the guard keeps. Past `SPRAY_FREE_FAILURES` plus enough to
+ * reach the longest delay, more would change nothing, so older ones are dropped.
+ */
+const MAX_SPRAY_FAILURES = SPRAY_FREE_FAILURES + 100;
+
+/** Failed attempts against any account, newest last. Never cleared by a success. */
+let sprayFailures: number[] = [];
+
+/** Forgets every recorded failure: per-caller, per-account and the spraying guard. For tests. */
 export function resetAttempts(): void {
   failures.clear();
-  accountFailures = [];
+  accountFailures.clear();
+  sprayFailures = [];
 }
+
+/** How many callers and accounts are being remembered. For tests of the bounds. */
+export function trackedFailureCounts(): { readonly callers: number; readonly accounts: number; readonly spray: number } {
+  return { callers: failures.size, accounts: accountFailures.size, spray: sprayFailures.length };
+}
+
+const withinWindow = (times: readonly number[], now: number) => times.filter((at) => at > now - ATTEMPT_WINDOW_MS);
 
 function recent(caller: string, now: number): number[] {
-  return (failures.get(caller) ?? []).filter((at) => at > now - ATTEMPT_WINDOW_MS);
+  return withinWindow(failures.get(caller) ?? [], now);
 }
 
-function recentAccountFailures(now: number): number[] {
-  return accountFailures.filter((at) => at > now - ATTEMPT_WINDOW_MS);
+/** The address as the lookup sees it, cut to the stored maximum. */
+function accountKey(email: string): string {
+  return email.trim().toLowerCase().slice(0, MAX_ACCOUNT_KEY_LENGTH);
+}
+
+function recentAccountFailures(key: string, now: number): number[] {
+  return withinWindow(accountFailures.get(key) ?? [], now);
 }
 
 /**
- * How long the answer to the next attempt should be held, given the failures
- * already recorded against the account.
+ * Records one more failure under `key`, keeping the map within `limit`.
+ *
+ * The entry is re-inserted so the map's order is the order of each key's latest
+ * failure: oldest first. Expired entries are dropped once the map is over its
+ * limit, and if that is not enough the oldest go next. Exported so its bounds
+ * can be tested directly, with a small limit.
+ */
+export function recordFailure(map: Map<string, number[]>, key: string, times: number[], limit: number, now: number): void {
+  map.delete(key);
+  map.set(key, times);
+  if (map.size <= limit) return;
+
+  for (const [other, otherTimes] of map) {
+    if (withinWindow(otherTimes, now).length === 0) map.delete(other);
+  }
+  for (const other of map.keys()) {
+    if (map.size <= limit) break;
+    map.delete(other);
+  }
+}
+
+/** How long a failed attempt is held because of failures across all accounts. */
+export function sprayDelayMs(failuresInWindow: number): number {
+  const beyondFree = failuresInWindow - SPRAY_FREE_FAILURES;
+  if (beyondFree < 0) return 0;
+  const steps = Math.min(beyondFree, 20);
+  return Math.min(ACCOUNT_BASE_DELAY_MS * 2 ** steps, ACCOUNT_MAX_DELAY_MS);
+}
+
+/**
+ * How long the answer to the next attempt on an account should be held, given
+ * the failures already recorded against that account.
  *
  * The first `ACCOUNT_FREE_ATTEMPTS` are instant, so an honest person who
  * mistypes once or twice notices nothing. After that each failure doubles the
@@ -274,9 +404,14 @@ const NOT_CONFIGURED =
  * unknown address still runs one scrypt, against this placeholder, and still
  * fails. It is not a secret and matches no real password.
  */
-let placeholderHash: string | null = null;
-function timingHash(): string {
-  return (placeholderHash ??= hashPassword("timing-equalisation-placeholder"));
+let placeholderHash: Promise<string> | null = null;
+function timingHash(): Promise<string> {
+  placeholderHash ??= hashPassword("timing-equalisation-placeholder").catch((error: unknown) => {
+    // Not kept if it failed, so the next attempt computes it afresh.
+    placeholderHash = null;
+    throw error;
+  });
+  return placeholderHash;
 }
 
 /**
@@ -330,7 +465,9 @@ export async function signIn(
    * right -- a correct password waits exactly as long as a wrong one would
    * have during an active campaign, and then succeeds.
    */
-  const delayMs = accountDelayMs(recentAccountFailures(now).length);
+  const key = accountKey(email);
+  const accountHistory = recentAccountFailures(key, now);
+  const delayMs = accountDelayMs(accountHistory.length);
 
   let user: User | null;
   try {
@@ -350,7 +487,15 @@ export async function signIn(
    * password take the same time to refuse -- the timing cannot be read as an
    * answer to "does this account exist".
    */
-  const passwordMatches = checkPassword(password, user?.passwordHash ?? timingHash());
+  let stored: string;
+  try {
+    stored = user?.passwordHash ?? (await timingHash());
+  } catch {
+    // The placeholder could not be computed. Checking against an empty value
+    // refuses, which is the only safe answer; no detail is passed on.
+    stored = "";
+  }
+  const passwordMatches = await checkPassword(password, stored);
 
   /*
    * ONLY AN ACTIVE ACCOUNT WITH THE RIGHT PASSWORD SIGNS IN. A missing account,
@@ -358,9 +503,31 @@ export async function signIn(
    * an attempt learns nothing about which it hit.
    */
   if (user === null || user.status !== "ACTIVE" || !passwordMatches) {
-    if (caller !== UNATTRIBUTED) failures.set(caller, [...recentFailures, now]);
-    accountFailures = [...recentAccountFailures(now), now];
-    return { ok: false, reason: "rejected", message: REJECTED, delayMs };
+    /*
+     * RE-READ HERE, NOT REUSED FROM THE START OF THIS ATTEMPT. Between that read
+     * and this point the attempt waited for the database and for scrypt, and any
+     * attempts running alongside it may have recorded failures meanwhile. Writing
+     * the earlier snapshot back would overwrite theirs, so a burst of parallel
+     * guesses would count as one. This read and the writes below run without
+     * pausing, so nothing can slip in between them.
+     *
+     * It does NOT make admission atomic: attempts that all arrive before any of
+     * them has failed still all pass the per-caller check at the top. What it
+     * guarantees is that every failure is counted.
+     */
+    if (caller !== UNATTRIBUTED) recordFailure(failures, caller, [...recent(caller, now), now], MAX_TRACKED_CALLERS, now);
+    recordFailure(accountFailures, key, [...recentAccountFailures(key, now), now], MAX_TRACKED_ACCOUNTS, now);
+
+    /*
+     * The spraying guard, read from the failures BEFORE this one and applied
+     * only to this failed attempt -- so a correct password is never held up by
+     * it -- and then this failure is added to it.
+     */
+    const recentSpray = withinWindow(sprayFailures, now);
+    const failedDelayMs = Math.max(delayMs, sprayDelayMs(recentSpray.length));
+    sprayFailures = [...recentSpray, now].slice(-MAX_SPRAY_FAILURES);
+
+    return { ok: false, reason: "rejected", message: REJECTED, delayMs: failedDelayMs };
   }
 
   /*
@@ -368,7 +535,9 @@ export async function signIn(
    * already-authenticated user access, so a rejected stamp is swallowed.
    */
   await updateLastLogin(user.id, options.db).catch(() => undefined);
+  // Only this caller's and this account's own records are cleared. The spraying
+  // guard is not: one person signing in says nothing about a campaign against others.
   failures.delete(caller);
-  accountFailures = [];
+  accountFailures.delete(key);
   return { ok: true, user: { id: user.id, email: user.email, role: user.role }, delayMs };
 }

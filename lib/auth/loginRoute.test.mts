@@ -13,7 +13,7 @@ import { readSession, sessionCookieOptions } from "./session.ts";
 import { AFTER_LOGIN, CANNOT_SIGN_IN, LOGIN_PATH, callerAddress, loginRoute, logoutRoute, normaliseCaller } from "./loginRoute.ts";
 
 const PASSWORD = "a-password-the-salesperson-chose";
-const HASH = hashPassword(PASSWORD);
+const HASH = await hashPassword(PASSWORD);
 const SECRET = "test-secret-that-is-long-enough-to-be-accepted-0123456789";
 const NOW = 1_757_000_000_000;
 

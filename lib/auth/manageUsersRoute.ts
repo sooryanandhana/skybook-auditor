@@ -132,7 +132,7 @@ export async function manageUserRoute(request: Request, deps: ManageDeps = {}): 
 
       // A manager-set password is temporary: flag it so the holder can be asked
       // to change it. The hash is stored; the plaintext is never kept or returned.
-      const updated = await setPassword(userId, hashPassword(password), true, deps.db);
+      const updated = await setPassword(userId, await hashPassword(password), true, deps.db);
       return updated === null
         ? { ok: false, status: 404, error: NO_SUCH_USER }
         : { ok: true, status: 200, user: view(updated) };

@@ -215,7 +215,7 @@ test("set-password: hashes the new password, stores only the hash, flags a chang
   const stored = byId.get("act")!.password_hash as string;
   assert.match(stored, /^scrypt:[0-9a-f]+:[0-9a-f]+$/, "a salted scrypt hash");
   assert.ok(!stored.includes(STRONG_PASSWORD), "never the plaintext");
-  assert.equal(checkPassword(STRONG_PASSWORD, stored), true, "and it verifies the new password");
+  assert.equal(await checkPassword(STRONG_PASSWORD, stored), true, "and it verifies the new password");
   assert.equal(byId.get("act")!.must_change_password, true, "flagged to be changed");
 });
 

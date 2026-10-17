@@ -415,8 +415,10 @@ function timingHash(): Promise<string> {
 }
 
 /**
- * The most password checks this process runs at once, and the most attempts
- * allowed to wait for one.
+ * The most SIGN-IN password checks this process runs at once, and the most
+ * sign-in attempts allowed to wait for one. Hashing a new password, at
+ * registration or when an account is set up or reset, does not pass through
+ * this gate.
  *
  * WHY THESE NUMBERS. Each check is one scrypt, which needs about 32 MiB
  * (128 * N * r) and runs on Node's shared thread pool -- four threads by

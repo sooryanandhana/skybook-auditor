@@ -48,8 +48,10 @@ services:
       # --- operational, non-secret ---
       # Render sends traffic through Cloudflare: trust its CF-Connecting-IP
       # header so rate limiting keys on the client IP. X-Forwarded-For is never
-      # read (Cloudflare appends to a client-sent one). That this header is
-      # authentic on the live route is not yet verified.
+      # read (Cloudflare appends to a client-sent one). On the onrender.com
+      # hostname a client-supplied CF-Connecting-IP was observed to be refused
+      # by Cloudflare (403, error code 1000); Render does not guarantee this,
+      # and any other hostname should be checked the same way.
       - key: SKYBOOK_TRUST_PROXY
         value: "1"
       - key: PUPPETEER_EXECUTABLE_PATH

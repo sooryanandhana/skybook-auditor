@@ -34,6 +34,7 @@ import { RESEND_API_KEY_VARIABLE, RESEND_ENDPOINT } from "../email/resend.ts";
 import { codeOnly } from "../email/provider.test.mts";
 import { GLOBAL_SENDS, MAX_SENDS, SEND_RATE_LIMITED, recordSend, resetSendLimit, sendAllowance } from "../email/sendLimit.ts";
 import { UNATTRIBUTED } from "../callerAddress.ts";
+import { accountLimitKey } from "../accountLimitKey.ts";
 import { contentFingerprint, type SendContent } from "../report/sendGate.ts";
 import { sendBody } from "../report/sendRequest.ts";
 import { withoutCredentials } from "../collector/url.ts";
@@ -674,6 +675,9 @@ test("no answer carries a secret, a session or a raw header value", async () => 
 /** How much of the allowance a caller has left, read without using any. */
 const remaining = (caller: string) => sendAllowance(caller, NOW).remaining;
 
+/** The key every signed-in request in this file is counted against: its account. */
+const SENDER = accountLimitKey(USER_ID);
+
 test("a refused confirmation spends nothing", async () => {
   resetSendLimit();
   const { store, jobId } = storeWith("completed");
@@ -688,7 +692,7 @@ test("a refused confirmation spends nothing", async () => {
   }
 
   assert.equal(mail.sent.length, 0, "nothing was sent");
-  assert.equal(remaining("7.7.7.7"), MAX_SENDS, "and nothing was spent");
+  assert.equal(remaining(SENDER), MAX_SENDS, "and nothing was spent");
 });
 
 test("a failed render spends nothing", async () => {
@@ -709,7 +713,7 @@ test("a failed render spends nothing", async () => {
   }
 
   assert.equal(mail.sent.length, 0);
-  assert.equal(remaining("7.7.7.8"), MAX_SENDS, "a renderer that times out is not a send");
+  assert.equal(remaining(SENDER), MAX_SENDS, "a renderer that times out is not a send");
 });
 
 test("a provider failure spends nothing", async () => {
@@ -729,7 +733,7 @@ test("a provider failure spends nothing", async () => {
     assert.equal(result.ok === false && result.status, 502, `attempt ${n}`);
   }
 
-  assert.equal(remaining("7.7.7.9"), MAX_SENDS);
+  assert.equal(remaining(SENDER), MAX_SENDS);
 });
 
 test("every other refusal spends nothing either", async () => {
@@ -752,7 +756,7 @@ test("every other refusal spends nothing either", async () => {
   }
 
   assert.equal(mail.sent.length, 0);
-  assert.equal(remaining("7.7.8.0"), MAX_SENDS);
+  assert.equal(remaining(SENDER), MAX_SENDS);
 });
 
 test("a successful send spends exactly one", async () => {
@@ -760,17 +764,15 @@ test("a successful send spends exactly one", async () => {
   const { store, jobId } = storeWith("completed");
   const mail = fakeProvider();
 
-  // Trusted proxy, so the caller key is the CF-Connecting-IP value and this test can
-  // speak about "that caller's" allowance. The default posture is covered on
-  // its own below.
+  // Counted against the signed-in account, whatever address the request names.
   const result = await sendReportRoute(
     request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }, true, "7.7.8.1"),
-    deps({ store, render: recordingRenderer().render, provider: mail.provider, trustProxy: true }),
+    deps({ store, render: recordingRenderer().render, provider: mail.provider }),
   );
 
   assert.equal(result.ok, true);
   assert.equal(mail.sent.length, 1);
-  assert.equal(remaining("7.7.8.1"), MAX_SENDS - 1, "exactly one, not two and not none");
+  assert.equal(remaining(SENDER), MAX_SENDS - 1, "exactly one, not two and not none");
 });
 
 test("the sixth successful send inside the window is refused", async () => {
@@ -883,7 +885,7 @@ test("a server with no key fails closed, before a browser is ever launched", asy
     assert.equal(result.ok === false && result.error, SEND_FAILURE_MESSAGES["not-configured"]);
     assert.equal(renderer.seen.length, 0, "nothing was typeset");
     assert.deepEqual(reachedNetwork, [], "and nothing was opened");
-    assert.equal(remaining("1.2.3.4"), MAX_SENDS, "a server that cannot send spends nothing");
+    assert.equal(remaining(SENDER), MAX_SENDS, "a server that cannot send spends nothing");
   } finally {
     resend.restore();
   }
@@ -940,7 +942,7 @@ test("what the service refuses comes back as our failure, never in its own words
 });
 
 test("a send the service accepts spends exactly one allowance", async () => {
-  // Trusted proxy, so the address is the caller key; see the note above.
+  // Counted against the signed-in account; see the note above.
   resetSendLimit();
   const { store, jobId } = storeWith("completed");
   const resend = wiredResend();
@@ -952,12 +954,12 @@ test("a send the service accepts spends exactly one allowance", async () => {
         true,
         "7.7.9.1",
       ),
-      deps({ store, render: recordingRenderer().render, trustProxy: true }),
+      deps({ store, render: recordingRenderer().render }),
     );
 
     assert.equal(result.ok, true);
     assert.equal(resend.calls.length, 1);
-    assert.equal(remaining("7.7.9.1"), MAX_SENDS - 1, "exactly one, not two and not none");
+    assert.equal(remaining(SENDER), MAX_SENDS - 1, "exactly one, not two and not none");
   } finally {
     resend.restore();
   }
@@ -985,7 +987,7 @@ test("a send the service refuses spends nothing", async () => {
 
     assert.equal(result.ok, false);
     assert.equal(resend.calls.length, 1, "asked once, and not asked again");
-    assert.equal(remaining("7.7.9.2"), MAX_SENDS, "nothing arrived, nothing was spent");
+    assert.equal(remaining(SENDER), MAX_SENDS, "nothing arrived, nothing was spent");
   } finally {
     resend.restore();
   }
@@ -1110,9 +1112,9 @@ test("no client-visible confirmation can carry a credential-bearing address", ()
    The header-rotation bypass, closed at the send endpoint
    --------------------------------------------------------------------------- */
 
-test("by default a send is counted against the shared bucket, not a header's address", async () => {
-  // The default posture: the forwarded address is not trusted, so the send is
-  // recorded against the one shared caller regardless of what the header says.
+test("a send is counted against the signed-in account, not an address or a shared bucket", async () => {
+  // No client address is read for this limit at all, so neither a header's
+  // claimed address nor the shared unattributed bucket is spent.
   resetSendLimit();
   const { store, jobId } = storeWith("completed");
   const mail = fakeProvider();
@@ -1123,8 +1125,81 @@ test("by default a send is counted against the shared bucket, not a header's add
   );
 
   assert.equal(result.ok, true);
-  assert.equal(remaining(UNATTRIBUTED), MAX_SENDS - 1, "spent against the shared bucket");
+  assert.equal(remaining(SENDER), MAX_SENDS - 1, "spent against the account");
+  assert.equal(remaining(UNATTRIBUTED), MAX_SENDS, "not against the shared bucket");
   assert.equal(remaining("7.7.8.1"), MAX_SENDS, "and not against the header's claimed address");
+});
+
+/* ---------------------------------------------------------------------------
+   One allowance per signed-in account
+   --------------------------------------------------------------------------- */
+
+const OTHER_ID = "22222222-2222-2222-2222-222222222222";
+const OTHER_USER = { ...ACTIVE_USER, id: OTHER_ID, email: "kim@skybook.example" };
+
+/** A fake database that knows both accounts, each by its own id. */
+function dbReturningEither(...users: Record<string, unknown>[]) {
+  return {
+    async query(sql: string, params: unknown[] = []) {
+      if (/^\s*SELECT/i.test(sql)) {
+        const id = String(params[0] ?? "");
+        return { rows: users.filter((user) => user.id === id) };
+      }
+      return { rows: [] };
+    },
+  };
+}
+
+/** A signed-in request from the named account. */
+const requestAs = (userId: string, body: unknown) =>
+  new Request("https://skybook.test/api/report/send", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie: `${SESSION_COOKIE}=${signSession(userId, "SALES", { secret: SECRET }, NOW)}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+test("two signed-in accounts have separate send allowances", async () => {
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const mail = fakeProvider();
+  const db = dbReturningEither(ACTIVE_USER, OTHER_USER);
+  const sendAs = (userId: string) =>
+    sendReportRoute(
+      requestAs(userId, { jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+      deps({ store, render: recordingRenderer().render, provider: mail.provider, db }),
+    );
+
+  for (let n = 0; n < MAX_SENDS; n += 1) assert.equal((await sendAs(USER_ID)).ok, true, `send ${n}`);
+
+  const sixth = await sendAs(USER_ID);
+  assert.equal(sixth.ok === false && sixth.status, 429, "the first account's own limit still holds");
+  assert.equal(sixth.ok === false && sixth.error, SEND_RATE_LIMITED);
+
+  const other = await sendAs(OTHER_ID);
+  assert.equal(other.ok, true, "the second account is not spent by the first");
+  assert.equal(remaining(SENDER), 0);
+  assert.equal(remaining(accountLimitKey(OTHER_ID)), MAX_SENDS - 1);
+  assert.equal(mail.sent.length, MAX_SENDS + 1);
+});
+
+test("the server-wide send ceiling still holds across accounts", async () => {
+  resetSendLimit();
+  // Other accounts have already sent the server's fill between them.
+  for (let i = 0; i < GLOBAL_SENDS; i += 1) recordSend(accountLimitKey(`account-${i}`), NOW);
+
+  const { store, jobId } = storeWith("completed");
+  const mail = fakeProvider();
+  const result = await sendReportRoute(
+    request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+    deps({ store, render: recordingRenderer().render, provider: mail.provider }),
+  );
+
+  assert.equal(remaining(SENDER), 0, "this account has sent nothing, yet the server has no room");
+  assert.equal(result.ok === false && result.status, 429);
+  assert.equal(mail.sent.length, 0, "nothing left the building");
 });
 
 test("rotating the forwarded header no longer buys unlimited sends", async () => {

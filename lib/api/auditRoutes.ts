@@ -26,6 +26,7 @@ import { runPerformanceChecks } from "../collector/performanceChecks.ts";
 import { normalizeUrl } from "../collector/url.ts";
 import { createDeadline } from "../collector/deadline.ts";
 import { callerKey, checkRateLimit, type RateLimitResult } from "../rateLimit.ts";
+import { accountLimitKey } from "../accountLimitKey.ts";
 import { trustsProxy } from "../callerAddress.ts";
 import { runRules } from "../rules/runner.ts";
 import { SPEED_RULES } from "../rules/all.ts";
@@ -69,6 +70,27 @@ function tooManyRequests<T>(limit: RateLimitResult): ApiResult<T> {
       "X-RateLimit-Remaining": "0",
     },
   };
+}
+
+/** Who an audit allowance is counted against: see `allowanceKey`. */
+interface AllowanceDeps {
+  /**
+   * The signed-in account, handed in by the route adapter from the session it
+   * has already checked. Production always sets it.
+   */
+  readonly userId?: string;
+  readonly trustProxy?: boolean;
+}
+
+/**
+ * The per-caller key for the audit allowance.
+ *
+ * THE ACCOUNT WHEN THERE IS ONE, so each salesperson has their own allowance
+ * whatever any client-address header says or fails to say. The address reading
+ * remains only for a caller that names no account, which no production route is.
+ */
+function allowanceKey(request: Request, deps: AllowanceDeps): string {
+  return deps.userId !== undefined ? accountLimitKey(deps.userId) : callerKey(request, trustsProxy(deps.trustProxy));
 }
 
 /**
@@ -138,9 +160,9 @@ function strategyFrom(request: Request): "mobile" | "desktop" {
  */
 export async function startAuditRoute(
   request: Request,
-  deps: Pick<StartAuditOptions, "store" | "runImpl"> & { trustProxy?: boolean } = {},
+  deps: Pick<StartAuditOptions, "store" | "runImpl"> & AllowanceDeps = {},
 ): Promise<ApiResult<AuditStartResponse>> {
-  const limit = checkRateLimit(callerKey(request, trustsProxy(deps.trustProxy)));
+  const limit = checkRateLimit(allowanceKey(request, deps));
   if (!limit.allowed) return tooManyRequests<AuditStartResponse>(limit);
 
   const url = await readUrl<AuditStartResponse>(request);
@@ -205,9 +227,9 @@ export function auditResultRoute(
  */
 export async function performanceRoute(
   request: Request,
-  deps: { measure?: typeof runPerformanceChecks; store?: AuditJobStore; trustProxy?: boolean } = {},
+  deps: { measure?: typeof runPerformanceChecks; store?: AuditJobStore } & AllowanceDeps = {},
 ): Promise<ApiResult<PerformanceResponse>> {
-  const limit = checkRateLimit(callerKey(request, trustsProxy(deps.trustProxy)));
+  const limit = checkRateLimit(allowanceKey(request, deps));
   if (!limit.allowed) return tooManyRequests<PerformanceResponse>(limit);
 
   const url = await readUrl<PerformanceResponse>(request);

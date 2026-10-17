@@ -13,6 +13,7 @@ import {
   checkRegisterLimit,
   resetRegisterLimits,
 } from "./registerLimit.ts";
+import { UNATTRIBUTED } from "../callerAddress.ts";
 
 const NOW = 1_757_000_000_000;
 const WINDOW_MS = 15 * 60 * 1000;
@@ -79,4 +80,50 @@ test("reset forgets everything", () => {
 
   resetRegisterLimits();
   assert.equal(checkRegisterLimit("1.2.3.4", NOW).allowed, true);
+});
+
+/* ---------------------------------------------------------------------------
+   The unattributed caller: everybody whose address could not be read
+   --------------------------------------------------------------------------- */
+
+test("unattributed sign-ups are held by the global ceiling, not a shared per-caller five", () => {
+  resetRegisterLimits();
+
+  for (let i = 0; i < REGISTER_GLOBAL; i += 1) {
+    assert.equal(checkRegisterLimit(UNATTRIBUTED, NOW).allowed, true, `attempt ${i}`);
+  }
+
+  const blocked = checkRegisterLimit(UNATTRIBUTED, NOW);
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.scope, "global");
+  assert.ok(blocked.retryAfterSeconds > 0);
+});
+
+test("unattributed sign-ups spend the same global budget identified callers use", () => {
+  resetRegisterLimits();
+  for (let i = 0; i < REGISTER_GLOBAL - 1; i += 1) checkRegisterLimit(UNATTRIBUTED, NOW);
+
+  assert.equal(checkRegisterLimit("1.2.3.4", NOW).allowed, true, "the last place in the window");
+  const blocked = checkRegisterLimit("5.6.7.8", NOW);
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.scope, "global");
+});
+
+test("unattributed sign-ups do not use up an identified caller's own five", () => {
+  resetRegisterLimits();
+  for (let i = 0; i < REGISTER_PER_CALLER; i += 1) checkRegisterLimit(UNATTRIBUTED, NOW);
+
+  for (let i = 0; i < REGISTER_PER_CALLER; i += 1) {
+    assert.equal(checkRegisterLimit("1.2.3.4", NOW).allowed, true, `identified attempt ${i}`);
+  }
+  const blocked = checkRegisterLimit("1.2.3.4", NOW);
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.scope, "caller", "the identified caller's own limit is unchanged");
+});
+
+test("the global window still slides for unattributed sign-ups", () => {
+  resetRegisterLimits();
+  for (let i = 0; i < REGISTER_GLOBAL; i += 1) checkRegisterLimit(UNATTRIBUTED, NOW);
+  assert.equal(checkRegisterLimit(UNATTRIBUTED, NOW + WINDOW_MS - 1).allowed, false);
+  assert.equal(checkRegisterLimit(UNATTRIBUTED, NOW + WINDOW_MS + 1).allowed, true);
 });

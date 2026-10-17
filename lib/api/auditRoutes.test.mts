@@ -532,6 +532,90 @@ test("performance: a measurement that throws becomes a 500, not a crash", async 
   assert.doesNotMatch(result.body.ok === false ? result.body.error : "", /nobody predicted/);
 });
 
+// ---------------------------------------------------------------------------
+// One allowance per signed-in account
+//
+// Production hands the route the account its session belongs to, and the
+// allowance is counted against that account rather than any client address.
+// ---------------------------------------------------------------------------
+
+test("two signed-in accounts have separate audit allowances", async () => {
+  const store = createJobStore<SiteAuditResult>();
+  const start = (userId: string) =>
+    startAuditRoute(postJson({ url: "https://example.com" }), { store, runImpl: auditReturning(true), userId });
+
+  for (let i = 0; i < DEFAULT_LIMIT; i += 1) {
+    assert.equal((await start("account-a")).status, 202, `account A request ${i + 1}`);
+  }
+
+  const refused = await start("account-a");
+  assert.equal(refused.status, 429, "account A's own limit still holds");
+  assert.equal(refused.headers?.["X-RateLimit-Limit"], String(DEFAULT_LIMIT), "its own limit, not the ceiling");
+
+  assert.equal((await start("account-b")).status, 202, "account B is not spent by account A");
+});
+
+test("an account's allowance holds whatever client-address headers it sends", async () => {
+  const store = createJobStore<SiteAuditResult>();
+  let accepted = 0;
+
+  for (let i = 0; i < 40; i += 1) {
+    const result = await startAuditRoute(
+      postJson({ url: "https://example.com" }, { "cf-connecting-ip": `203.0.113.${i}`, "x-forwarded-for": `198.51.100.${i}` }),
+      { store, runImpl: auditReturning(true), userId: "account-a", trustProxy: true },
+    );
+    if (result.status === 202) accepted += 1;
+  }
+
+  assert.equal(accepted, DEFAULT_LIMIT);
+});
+
+test("the global ceiling still holds across accounts", async () => {
+  const store = createJobStore<SiteAuditResult>();
+  let accepted = 0;
+  let last: Awaited<ReturnType<typeof startAuditRoute>> | undefined;
+
+  for (let i = 0; i < 60; i += 1) {
+    last = await startAuditRoute(postJson({ url: "https://example.com" }), {
+      store,
+      runImpl: auditReturning(true),
+      userId: `account-${i}`,
+    });
+    if (last.status === 202) accepted += 1;
+  }
+
+  assert.equal(accepted, GLOBAL_LIMIT);
+  assert.equal(last?.headers?.["X-RateLimit-Limit"], String(GLOBAL_LIMIT), "the ceiling, not an account's own limit");
+});
+
+test("performance: shares the signed-in account's audit allowance, and only that account's", async () => {
+  for (let i = 0; i < DEFAULT_LIMIT; i += 1) {
+    await startAuditRoute(postJson({ url: "https://example.com" }), {
+      store: createJobStore<SiteAuditResult>(),
+      runImpl: auditReturning(true),
+      userId: "account-a",
+    });
+  }
+
+  const speed = (userId: string) =>
+    performanceRoute(
+      new Request("https://audit.test/api/audit/performance", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: "https://example.com" }),
+      }),
+      {
+        measure: async () => {
+          throw new Error("not measured in this test");
+        },
+        userId,
+      },
+    );
+
+  assert.equal((await speed("account-a")).status, 429, "account A has spent its allowance on audits");
+  assert.notEqual((await speed("account-b")).status, 429, "account B has not");
+});
+
 test("performance: shares the audit's allowance rather than adding a second one", async () => {
   // This endpoint spends a paid Google quota, so it counts against the same
   // ten per minute. A separate bucket would double what one caller can spend.

@@ -12,7 +12,7 @@
  * is the right trade for a single-instance tool; a shared store would be a
  * dependency registration does not otherwise need.
  */
-import { trustedCaller, trustsProxy } from "../callerAddress.ts";
+import { UNATTRIBUTED, trustedCaller, trustsProxy } from "../callerAddress.ts";
 
 /** How many accounts one caller may request in the window. */
 export const REGISTER_PER_CALLER = 5;
@@ -51,26 +51,34 @@ export interface RegisterLimitResult {
  * the global count, so a refusal neither extends a lockout nor spends the
  * shared budget. Everything here is synchronous, so two attempts at once cannot
  * interleave between the count and the record.
+ *
+ * AN UNATTRIBUTED CALLER HAS NO PER-CALLER LIMIT, only the global one. It is
+ * every visitor whose address could not be read, not one person, so five
+ * attempts by anybody would otherwise shut sign-up for everybody. The global
+ * ceiling still counts and stops it -- the same choice the sign-in lock makes.
  */
 export function checkRegisterLimit(caller: string, now: number = Date.now()): RegisterLimitResult {
   const windowStart = now - WINDOW_MS;
-  const mine = (perCaller.get(caller) ?? []).filter((at) => at > windowStart);
+  const attributed = caller !== UNATTRIBUTED;
+  const mine = attributed ? (perCaller.get(caller) ?? []).filter((at) => at > windowStart) : [];
   const all = globalTimes.filter((at) => at > windowStart);
 
-  if (mine.length >= REGISTER_PER_CALLER) {
+  if (attributed && mine.length >= REGISTER_PER_CALLER) {
     perCaller.set(caller, mine);
     globalTimes = all;
     return { allowed: false, retryAfterSeconds: retryAfter(mine[0], now), scope: "caller" };
   }
 
   if (all.length >= REGISTER_GLOBAL) {
-    perCaller.set(caller, mine);
+    if (attributed) perCaller.set(caller, mine);
     globalTimes = all;
     return { allowed: false, retryAfterSeconds: retryAfter(all[0], now), scope: "global" };
   }
 
-  mine.push(now);
-  perCaller.set(caller, mine);
+  if (attributed) {
+    mine.push(now);
+    perCaller.set(caller, mine);
+  }
   all.push(now);
   globalTimes = all;
 

@@ -41,7 +41,7 @@ import {
   type OutgoingEmail,
 } from "../email/provider.ts";
 import { SEND_RATE_LIMITED, recordSend, sendAllowance } from "../email/sendLimit.ts";
-import { trustedCaller, trustsProxy } from "../callerAddress.ts";
+import { accountLimitKey } from "../accountLimitKey.ts";
 import { resendConfigured, resendProvider } from "../email/resend.ts";
 
 /** Where the verified sending address is read from. Never anything a caller typed. */
@@ -73,8 +73,6 @@ export type SendReportResult =
 
 export interface SendReportDeps extends GuardOptions {
   readonly store?: AuditJobStore;
-  /** Whether a trusted proxy set the forwarded address. Off by default. */
-  readonly trustProxy?: boolean;
   /** Swapped by tests so no test launches a browser it does not need. */
   readonly render?: typeof renderPdf;
   /**
@@ -164,7 +162,8 @@ export async function sendReportRoute(
   const now = deps.now ?? Date.now();
 
   // 1. Signed in. The page redirect is a courtesy; this is the boundary.
-  if ((await requireSession(request, deps, now)) === null) {
+  const user = await requireSession(request, deps, now);
+  if (user === null) {
     return { ok: false, status: 401, error: UNAUTHORISED };
   }
 
@@ -203,8 +202,12 @@ export async function sendReportRoute(
    * allowance here meant five failed renders locked somebody out for ten
    * minutes and told them they had sent too much. The allowance is spent at
    * the end, once a provider has actually taken a message.
+   *
+   * COUNTED AGAINST THE SIGNED-IN ACCOUNT, not a client address: each
+   * salesperson has their own allowance, and the server-wide ceiling inside
+   * `sendAllowance` still bounds them all together.
    */
-  const caller = trustedCaller(request, trustsProxy(deps.trustProxy));
+  const caller = accountLimitKey(user.id);
   if (!sendAllowance(caller, now).allowed) {
     return { ok: false, status: 429, error: SEND_RATE_LIMITED };
   }

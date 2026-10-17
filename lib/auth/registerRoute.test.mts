@@ -16,7 +16,7 @@ import {
   WEAK_PASSWORD,
   registerRoute,
 } from "./registerRoute.ts";
-import { REGISTER_PER_CALLER, resetRegisterLimits } from "./registerLimit.ts";
+import { REGISTER_GLOBAL, REGISTER_PER_CALLER, resetRegisterLimits } from "./registerLimit.ts";
 import { checkPassword, resetAttempts, signIn } from "./credentials.ts";
 
 const PASSWORD = "a-long-enough-password";
@@ -261,6 +261,21 @@ test("behind a trusted proxy, rotating X-Forwarded-For under one CF-Connecting-I
     assert.equal((await registerRoute(forged(i), { db, trustProxy: true })).ok, true, `attempt ${i}`);
   }
   const blocked = await registerRoute(forged(REGISTER_PER_CALLER), { db, trustProxy: true });
+  assert.equal(blocked.ok === false && blocked.status, 429);
+});
+
+test("without a readable address, sign-ups are held by the global ceiling, not a shared five", async () => {
+  // The default posture: no trusted proxy, so every request is unattributed.
+  // Five attempts by anybody must not close sign-up for everybody.
+  resetRegisterLimits();
+  const { db } = recordingDb();
+
+  for (let i = 0; i < REGISTER_GLOBAL; i += 1) {
+    const ok = await registerRoute(post({ email: `any${i}@shop.com`, password: PASSWORD }), { db });
+    assert.equal(ok.ok, true, `attempt ${i}`);
+  }
+
+  const blocked = await registerRoute(post({ email: "one-too-many@shop.com", password: PASSWORD }), { db });
   assert.equal(blocked.ok === false && blocked.status, 429);
 });
 

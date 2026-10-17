@@ -364,7 +364,7 @@ export interface AuthenticatedUser {
  */
 export type SignInResult = (
   | { readonly ok: true; readonly user: AuthenticatedUser }
-  | { readonly ok: false; readonly reason: "rejected" | "rate-limited" | "not-configured"; readonly message: string }
+  | { readonly ok: false; readonly reason: "rejected" | "rate-limited" | "not-configured" | "busy"; readonly message: string }
 ) & {
   /**
    * How long the caller should be made to wait before the answer is returned.
@@ -415,6 +415,66 @@ function timingHash(): Promise<string> {
 }
 
 /**
+ * The most password checks this process runs at once, and the most attempts
+ * allowed to wait for one.
+ *
+ * WHY THESE NUMBERS. Each check is one scrypt, which needs about 32 MiB
+ * (128 * N * r) and runs on Node's shared thread pool -- four threads by
+ * default, the same four that resolve DNS and read files for the audit crawler.
+ * Four at once is therefore no more than the pool already ran; what changes is
+ * that the queue behind them can no longer grow without end. Sixteen waiting is
+ * a burst of honest sign-ins several times over, and anything beyond it is
+ * answered at once instead of being held in memory.
+ */
+export const MAX_ACTIVE_VERIFICATIONS = 4;
+export const MAX_WAITING_VERIFICATIONS = 16;
+
+/** How long an attempt refused for capacity is told to wait, in seconds. */
+export const VERIFICATION_RETRY_AFTER_SECONDS = 5;
+
+export const SIGN_IN_BUSY =
+  "Sign-in is busy right now. Nothing you typed was wrong. Try again in a few seconds.";
+
+let activeVerifications = 0;
+const waitingVerifications: Array<() => void> = [];
+
+/**
+ * A place to run one sign-in's database lookup and password check, or null when
+ * every place is taken and the queue behind them is full.
+ *
+ * RACE SAFETY: the count is read and taken in one synchronous step, and a
+ * finished attempt hands its place straight to the oldest waiter, so the number
+ * running never passes the limit. The release it gives is safe to call twice.
+ */
+export function claimVerificationSlot(): Promise<() => void> | null {
+  if (activeVerifications < MAX_ACTIVE_VERIFICATIONS) {
+    activeVerifications += 1;
+    return Promise.resolve(verificationRelease());
+  }
+  if (waitingVerifications.length >= MAX_WAITING_VERIFICATIONS) return null;
+  return new Promise((resolve) => {
+    waitingVerifications.push(() => resolve(verificationRelease()));
+  });
+}
+
+function verificationRelease(): () => void {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = waitingVerifications.shift();
+    // The place passes directly to the oldest waiter, so the count is unchanged.
+    if (next !== undefined) next();
+    else activeVerifications = Math.max(0, activeVerifications - 1);
+  };
+}
+
+/** How many sign-ins hold a place, and how many wait for one. For tests. */
+export function verificationLoad(): { readonly active: number; readonly waiting: number } {
+  return { active: activeVerifications, waiting: waitingVerifications.length };
+}
+
+/**
  * One attempt to sign in, against the accounts in the database.
  *
  * THE RATE CHECK COMES FIRST, before the database is touched or the password is
@@ -458,6 +518,29 @@ export async function signIn(
     return { ok: false, reason: "rate-limited", message: RATE_LIMITED, delayMs: 0 };
   }
 
+  /*
+   * A PLACE IN THE VERIFICATION QUEUE, before the database or scrypt is touched.
+   * Over capacity the attempt is answered at once as busy: nothing is looked up,
+   * hashed or recorded, and the answer is the same whatever address was typed.
+   * The place is given back in `finally`, however the attempt ends.
+   */
+  const release = await claimVerificationSlot();
+  if (release === null) return { ok: false, reason: "busy", message: SIGN_IN_BUSY, delayMs: 0 };
+  try {
+    return await verifiedAttempt(email, password, caller, options, now);
+  } finally {
+    release();
+  }
+}
+
+/** The rest of one sign-in attempt, run while it holds a verification place. */
+async function verifiedAttempt(
+  email: string,
+  password: string,
+  caller: string,
+  options: CredentialOptions,
+  now: number,
+): Promise<SignInResult> {
   /*
    * The account throttle is read BEFORE the password is hashed and applied to
    * whatever this attempt turns out to be. Its delay depends only on failures

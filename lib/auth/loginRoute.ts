@@ -11,7 +11,7 @@
  * because the whole point of the design is that swapping the first for Google
  * Workspace later leaves the second, and this, untouched.
  */
-import { signIn, type CredentialOptions } from "./credentials.ts";
+import { signIn, VERIFICATION_RETRY_AFTER_SECONDS, type CredentialOptions } from "./credentials.ts";
 import { trustedCaller, trustsProxy as trustsProxyFlag } from "../callerAddress.ts";
 import { sessionCookieOptions, signSession, type SessionOptions } from "./session.ts";
 
@@ -68,7 +68,13 @@ const realSleep = (ms: number): Promise<void> =>
  */
 export type LoginOutcome =
   | { readonly ok: true; readonly email: string; readonly cookie: string; readonly maxAgeSeconds: number }
-  | { readonly ok: false; readonly status: number; readonly error: string };
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly error: string;
+      /** Set only on a 503 for capacity: when the caller may try again, in seconds. */
+      readonly retryAfterSeconds?: number;
+    };
 
 /** Only the two fields a sign-in form may send. Anything else is ignored. */
 function submitted(body: unknown): { email: string; password: string } {
@@ -125,6 +131,13 @@ export async function loginRoute(
      * and reporting it as a wrong password would send somebody hunting for a
      * typo that is not there.
      */
+    /*
+     * And 503 with a wait when the server has no room to check a password right
+     * now: temporary, the same for every address, and nothing was checked.
+     */
+    if (attempt.reason === "busy") {
+      return { ok: false, status: 503, error: attempt.message, retryAfterSeconds: VERIFICATION_RETRY_AFTER_SECONDS };
+    }
     const status = attempt.reason === "rate-limited" ? 429 : attempt.reason === "not-configured" ? 503 : 401;
     return { ok: false, status, error: attempt.message };
   }

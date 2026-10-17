@@ -15,7 +15,10 @@ export async function POST(request: Request): Promise<NextResponse> {
   const outcome = await loginRoute(request);
 
   if (!outcome.ok) {
-    return NextResponse.json({ ok: false, error: outcome.error }, { status: outcome.status });
+    // Retry-After only on a temporary refusal for capacity; nothing else sets it.
+    const headers =
+      outcome.retryAfterSeconds === undefined ? undefined : { "Retry-After": String(outcome.retryAfterSeconds) };
+    return NextResponse.json({ ok: false, error: outcome.error }, { status: outcome.status, headers });
   }
 
   /*

@@ -12,7 +12,13 @@
  */
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { pdfExportRoute } from "./pdfExportRoute.ts";
+import { pdfExportRoute as exportAs } from "./pdfExportRoute.ts";
+
+/** The account every request in this file is signed in as, and the owner of its jobs. */
+const OWNER = "owner-account";
+/** The export as the owner asks for it. */
+const pdfExportRoute = (request: Request, deps: Partial<Parameters<typeof exportAs>[1]> = {}) =>
+  exportAs(request, { userId: OWNER, ...deps });
 import { PDF_RENDER_MESSAGES, PdfRenderError, type PdfRenderFailure } from "../audit/pdf/render.ts";
 import { createJobStore } from "../jobs/jobStore.ts";
 import { runRealAudit, runRealCertificateFailure } from "../audit/pdf/realAudit.fixture.mts";
@@ -59,7 +65,7 @@ type Commentary = "not-requested" | "pending" | "explained" | "not-explained";
 
 function finishedJob(commentary: Commentary = "not-requested", audit: unknown = REAL_AUDIT) {
   const store = createJobStore() as unknown as AuditJobStore;
-  const job = store.create(ENTRY);
+  const job = store.create(ENTRY, OWNER);
   store.finish(job.id, "completed", audit as never);
 
   if (commentary !== "not-requested") store.claimExplanation(job.id);
@@ -249,8 +255,8 @@ test("something thrown that is not an error is logged as an internal error", asy
 
 test("a request that is refused before rendering writes nothing", async () => {
   const store = createJobStore() as unknown as AuditJobStore;
-  const queued = store.create(ENTRY);
-  const failed = store.create(ENTRY);
+  const queued = store.create(ENTRY, OWNER);
+  const failed = store.create(ENTRY, OWNER);
   store.fail(failed.id, "The website could not be reached.");
 
   const captured = await captureLog(async () => {

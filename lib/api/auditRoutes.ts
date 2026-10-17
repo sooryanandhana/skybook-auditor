@@ -33,6 +33,7 @@ import { SPEED_RULES } from "../rules/all.ts";
 import { PERFORMANCE_BUDGET_MS } from "../budgets.ts";
 import { auditJobs, startAudit, type AuditJobStore, type StartAuditOptions } from "../jobs/auditJobs.ts";
 import { statusAnswer, resultAnswer, JOB_NOT_FOUND, NO_JOB_ID } from "../jobs/jobResponses.ts";
+import { ownedBy } from "../jobs/jobStore.ts";
 import { explainJob, type ExplainJobDeps } from "../audit/explainJob.ts";
 import type {
   SpeedResult,
@@ -188,11 +189,12 @@ export async function startAuditRoute(
  */
 export function auditStatusRoute(
   request: Request,
-  deps: { store?: StartAuditOptions["store"] } = {},
+  deps: { store?: StartAuditOptions["store"]; userId: string },
 ): ApiResult<AuditStatusResponse> {
   const store = deps.store ?? auditJobs();
   const jobId = jobIdFrom(request);
-  const answer = statusAnswer(jobId, store.get(jobId));
+  // Only the signed-in account's own job; anybody else's reads as not found.
+  const answer = statusAnswer(jobId, ownedBy(store.get(jobId), deps.userId));
 
   return { status: answer.status, body: answer.body };
 }
@@ -205,11 +207,12 @@ export function auditStatusRoute(
  */
 export function auditResultRoute(
   request: Request,
-  deps: { store?: StartAuditOptions["store"] } = {},
+  deps: { store?: StartAuditOptions["store"]; userId: string },
 ): ApiResult<AuditResultResponse> {
   const store = deps.store ?? auditJobs();
   const jobId = jobIdFrom(request);
-  const answer = resultAnswer(jobId, store.get(jobId));
+  // Only the signed-in account's own job; anybody else's reads as not found.
+  const answer = resultAnswer(jobId, ownedBy(store.get(jobId), deps.userId));
 
   return { status: answer.status, body: answer.body };
 }
@@ -294,9 +297,16 @@ export async function performanceRoute(
      * takes no attachment, and the speed answer is returned either way. A
      * failure to file something away is not a reason to withhold a
      * measurement that succeeded.
+     *
+     * ONLY BESIDE THE REQUESTER'S OWN AUDIT. Somebody else's job, or one with no
+     * owner, is treated exactly as an unknown one: nothing is attached, and the
+     * measurement -- of an address the requester named -- is returned as usual.
      */
     const jobId = jobIdFrom(request);
-    if (jobId !== "") (deps.store ?? auditJobs()).attach(jobId, speed);
+    if (jobId !== "" && deps.userId !== undefined) {
+      const store = deps.store ?? auditJobs();
+      if (ownedBy(store.get(jobId), deps.userId) !== null) store.attach(jobId, speed);
+    }
 
     return { status: 200, body: { ok: true, ...speed } };
   } catch {
@@ -350,11 +360,20 @@ export const EXPLAIN_NO_PAGE_MEASUREMENTS =
  */
 export async function explainRoute(
   request: Request,
-  deps: { store?: AuditJobStore } & ExplainJobDeps = {},
+  deps: { store?: AuditJobStore; userId: string } & ExplainJobDeps,
 ): Promise<ApiResult<AuditExplanationResponse>> {
   const store = deps.store ?? auditJobs();
   const jobId = jobIdFrom(request);
   if (jobId === "") return { status: 400, body: { ok: false, error: NO_JOB_ID } };
+
+  /*
+   * ONLY THE SIGNED-IN ACCOUNT'S OWN AUDIT, checked before anything is claimed
+   * or a model is asked. Somebody else's job, or one with no owner, gets the
+   * same answer as a job that does not exist.
+   */
+  if (ownedBy(store.get(jobId), deps.userId) === null) {
+    return { status: 404, body: { ok: false, jobId, error: JOB_NOT_FOUND } };
+  }
 
   const outcome = await explainJob(jobId, store, deps);
 

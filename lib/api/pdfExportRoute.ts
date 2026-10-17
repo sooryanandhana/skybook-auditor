@@ -29,6 +29,7 @@
  * already throws an error carrying none of those.
  */
 import { auditJobs, type AuditJobStore } from "../jobs/auditJobs.ts";
+import { ownedBy } from "../jobs/jobStore.ts";
 import { JOB_NOT_FOUND, NO_JOB_ID, NOT_READY, UNKNOWN_FAILURE } from "../jobs/jobResponses.ts";
 import { buildPdfDocument, type PdfDocument, type PdfDocumentOptions } from "../audit/pdfDocument.ts";
 import { renderPdf, PDF_RENDER_MESSAGES, PdfRenderError } from "../audit/pdf/render.ts";
@@ -160,6 +161,8 @@ export interface PdfExportDeps {
   readonly store?: AuditJobStore;
   /** Swapped by tests so no test launches a browser it does not need. */
   readonly render?: typeof renderPdf;
+  /** The signed-in account, from the session. Only its own audits are exported. */
+  readonly userId: string;
 }
 
 /**
@@ -172,7 +175,7 @@ export interface PdfExportDeps {
  */
 export async function pdfExportRoute(
   request: Request,
-  deps: PdfExportDeps = {},
+  deps: PdfExportDeps,
 ): Promise<PdfExportResult> {
   const store = deps.store ?? auditJobs();
   const render = deps.render ?? renderPdf;
@@ -184,8 +187,12 @@ export async function pdfExportRoute(
    * UNKNOWN AND EXPIRED GIVE THE SAME ANSWER, because they cannot be told
    * apart: an expired job is deleted. The job layer already owns that sentence
    * and the half-hour window it explains, so it is used rather than reworded.
+   *
+   * SOMEBODY ELSE'S AUDIT GIVES IT TOO, as does one with no owner: only the
+   * signed-in account's own job is exported, and that is decided here, before
+   * the request body is read or anything is built or rendered.
    */
-  const job = store.get(jobId);
+  const job = ownedBy(store.get(jobId), deps.userId);
   if (job === null) return { ok: false, status: 404, error: JOB_NOT_FOUND };
 
   if (job.status === "queued" || job.status === "running") {

@@ -14,7 +14,7 @@
  */
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { pdfExportRoute, exportFilename, NO_RESULT } from "./pdfExportRoute.ts";
+import { pdfExportRoute as exportAs, exportFilename, NO_RESULT } from "./pdfExportRoute.ts";
 import { JOB_NOT_FOUND, NO_JOB_ID, NOT_READY } from "../jobs/jobResponses.ts";
 import { PDF_RENDER_MESSAGES, PdfRenderError } from "../audit/pdf/render.ts";
 import { createJobStore } from "../jobs/jobStore.ts";
@@ -52,10 +52,19 @@ const REAL_AUDIT = await runRealAudit({
   checks: { spfMissing: true },
 });
 
-/** A store holding one job in whichever state a test needs. */
-function storeWith(state: "completed" | "partial" | "queued" | "running" | "failed") {
+/** The account every request in this file is signed in as, and the owner of its jobs. */
+const OWNER = "owner-account";
+/** Another signed-in account, which owns none of them. */
+const STRANGER = "stranger-account";
+
+/** The export as the owner asks for it. A test names a different account to override. */
+const pdfExportRoute = (request: Request, deps: Partial<Parameters<typeof exportAs>[1]> = {}) =>
+  exportAs(request, { userId: OWNER, ...deps });
+
+/** A store holding one job in whichever state a test needs, owned by `owner`. */
+function storeWith(state: "completed" | "partial" | "queued" | "running" | "failed", owner: string | null = OWNER) {
   const store = createJobStore() as unknown as AuditJobStore;
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", owner);
 
   if (state === "running") store.markRunning(job.id);
   if (state === "failed") store.fail(job.id, "The website could not be reached.");
@@ -214,7 +223,7 @@ test("an expired job is refused exactly as an unknown one is", async () => {
    * id. The sentence already mentions the half-hour window.
    */
   const store = createJobStore({ ttlMs: 1, now: () => Date.now() }) as unknown as AuditJobStore;
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", OWNER);
   await new Promise((resolve) => setTimeout(resolve, 5));
 
   const result = await pdfExportRoute(request(job.id), { store, render: recordingRenderer().render });
@@ -261,7 +270,8 @@ test("a finished job with no result is refused rather than rendered empty", asyn
    * a store that hands back exactly that, and nothing else here does.
    */
   const store = {
-    get: () => ({ id: "job-1", status: "completed", result: null }),
+    // Owned by the signed-in account, so the request reaches the branch under test.
+    get: () => ({ id: "job-1", ownerId: OWNER, status: "completed", result: null }),
   } as unknown as AuditJobStore;
 
   const result = await pdfExportRoute(request("job-1"), { store, render: recordingRenderer().render });
@@ -461,4 +471,47 @@ test("the route file sends the headers a download needs", async () => {
   assert.match(route, /runtime = "nodejs"/, "the renderer needs a browser and a filesystem");
   assert.ok(route.includes("export async function POST"), "and it is a POST");
   assert.ok(!route.includes("export async function GET"), "never a GET on the polling path");
+});
+
+// ---------------------------------------------------------------------------
+// Only the account that started an audit may download it
+// ---------------------------------------------------------------------------
+
+test("another account cannot download an audit's PDF, and nothing is rendered", async () => {
+  const { store, jobId } = storeWith("completed");
+  const renderer = recordingRenderer();
+
+  const theirs = await exportAs(request(jobId), { store, render: renderer.render, userId: STRANGER });
+  const missing = await exportAs(request("00000000-0000-4000-8000-000000000000"), {
+    store,
+    render: renderer.render,
+    userId: STRANGER,
+  });
+
+  assert.ok(!theirs.ok);
+  assert.equal(theirs.status, 404);
+  assert.equal(theirs.error, JOB_NOT_FOUND);
+  assert.deepEqual(theirs, missing, "indistinguishable from a job that does not exist");
+  assert.equal(renderer.seen.length, 0, "no document was rendered");
+});
+
+test("a job with no owner is downloaded by nobody", async () => {
+  const { store, jobId } = storeWith("completed", null);
+  const renderer = recordingRenderer();
+
+  const result = await exportAs(request(jobId), { store, render: renderer.render, userId: OWNER });
+
+  assert.ok(!result.ok);
+  assert.equal(result.status, 404);
+  assert.equal(renderer.seen.length, 0);
+});
+
+test("the owner can still download their own PDF", async () => {
+  const { store, jobId } = storeWith("completed");
+  const renderer = recordingRenderer();
+
+  const result = await exportAs(request(jobId), { store, render: renderer.render, userId: OWNER });
+
+  assert.ok(result.ok);
+  assert.equal(renderer.seen.length, 1);
 });

@@ -16,15 +16,16 @@ import { strict as assert } from "node:assert";
 import test, { beforeEach } from "node:test";
 import {
   startAuditRoute,
-  auditStatusRoute,
-  auditResultRoute,
+  auditStatusRoute as statusRouteAs,
+  auditResultRoute as resultRouteAs,
   performanceRoute,
-  explainRoute,
+  explainRoute as explainRouteAs,
   EXPLAIN_IN_PROGRESS,
   EXPLAIN_NOT_FINISHED,
   EXPLAIN_NO_PAGE_MEASUREMENTS,
 } from "./auditRoutes.ts";
 import { createJobStore } from "../jobs/jobStore.ts";
+import { JOB_NOT_FOUND } from "../jobs/jobResponses.ts";
 import { AI_CONTRACT_VERSION } from "../ai/contract.ts";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
 import type { Finding } from "../types.ts";
@@ -35,6 +36,22 @@ import { runSecurityChecks } from "../collector/securityChecks.ts";
 import type { AuditResult, PerformanceData, SiteAuditResult, SpeedResult } from "../types.ts";
 import { withSpeed } from "../audit/withSpeed.ts";
 import { buildAIReportInput } from "../ai/buildReportInput.ts";
+
+/** The account every request in this file is signed in as, and the owner of the jobs it makes. */
+const OWNER = "owner-account";
+/** Another signed-in account, which owns none of them. */
+const STRANGER = "stranger-account";
+
+// The job routes as the owner calls them. A test names a different account to override.
+const auditStatusRoute = (request: Request, deps: Partial<Parameters<typeof statusRouteAs>[1]> = {}) =>
+  statusRouteAs(request, { userId: OWNER, ...deps });
+const auditResultRoute = (request: Request, deps: Partial<Parameters<typeof resultRouteAs>[1]> = {}) =>
+  resultRouteAs(request, { userId: OWNER, ...deps });
+const explainRoute = (request: Request, deps: Partial<Parameters<typeof explainRouteAs>[1]> = {}) =>
+  explainRouteAs(request, { userId: OWNER, ...deps });
+/** A speed check sent by the owner, so its measurement may be filed beside the owner's audit. */
+const ownersSpeedCheck = (request: Request, deps: Parameters<typeof performanceRoute>[1] = {}) =>
+  performanceRoute(request, { userId: OWNER, ...deps });
 
 beforeEach(() => {
   resetRateLimits();
@@ -287,7 +304,7 @@ test("status: an unknown job is not found", () => {
 
 test("status: a job reports queued, then running, then completed", () => {
   const store = createJobStore<SiteAuditResult>();
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", OWNER);
   const ask = () => auditStatusRoute(getWith(`jobId=${job.id}`), { store });
 
   const queued = ask();
@@ -306,7 +323,7 @@ test("status: a job reports queued, then running, then completed", () => {
 
 test("status: a crawl that stopped short reports partial, not completed", () => {
   const store = createJobStore<SiteAuditResult>();
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", OWNER);
   store.finish(job.id, "partial", {} as SiteAuditResult);
 
   const result = auditStatusRoute(getWith(`jobId=${job.id}`), { store });
@@ -317,7 +334,7 @@ test("status: a crawl that stopped short reports partial, not completed", () => 
 
 test("status: a failed job says so, and says why", () => {
   const store = createJobStore<SiteAuditResult>();
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", OWNER);
   store.fail(job.id, "That website address could not be found.");
 
   const result = auditStatusRoute(getWith(`jobId=${job.id}`), { store });
@@ -337,7 +354,7 @@ test("status: an expired job is gone, not stale", () => {
    */
   let clock = 1_000_000;
   const store = createJobStore<SiteAuditResult>({ now: () => clock });
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", OWNER);
   store.finish(job.id, "completed", {} as SiteAuditResult);
 
   assert.equal(auditStatusRoute(getWith(`jobId=${job.id}`), { store }).status, 200);
@@ -365,7 +382,7 @@ test("result: an unknown job is not found", () => {
 
 test("result: a job still running is refused with 409, not half a report", () => {
   const store = createJobStore<SiteAuditResult>();
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", OWNER);
 
   const queued = auditResultRoute(getWith(`jobId=${job.id}`), { store });
   assert.equal(queued.status, 409);
@@ -378,7 +395,7 @@ test("result: a job still running is refused with 409, not half a report", () =>
 
 test("result: a finished audit comes back whole", () => {
   const store = createJobStore<SiteAuditResult>();
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", OWNER);
   const audit = {
     site: { findings: [], skippedChecks: [], evaluatedPages: 3 },
     crawl: { complete: true },
@@ -396,7 +413,7 @@ test("result: a finished audit comes back whole", () => {
 test("result: a partial audit still returns its findings, labelled partial", () => {
   // The findings are real. Only the claim of having seen the whole site is not.
   const store = createJobStore<SiteAuditResult>();
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", OWNER);
   store.finish(job.id, "partial", {
     site: { findings: [], skippedChecks: [], evaluatedPages: 2 },
     crawl: { complete: false },
@@ -728,9 +745,9 @@ function storedAudit(): SiteAuditResult {
 }
 
 /** A store holding one finished audit, ready to receive a speed result. */
-function storeWithFinishedAudit() {
+function storeWithFinishedAudit(owner: string | null = OWNER) {
   const store = createJobStore<SiteAuditResult, SpeedResult>();
-  const job = store.create("https://example.com");
+  const job = store.create("https://example.com", owner);
   store.finish(job.id, "completed", storedAudit());
   return { store, jobId: job.id };
 }
@@ -745,7 +762,7 @@ const speedRequestFor = (jobId: string, url = "https://example.com") =>
 test("performance: the measured result is filed beside the audit it belongs to", async () => {
   const { store, jobId } = storeWithFinishedAudit();
 
-  const answer = await performanceRoute(speedRequestFor(jobId), {
+  const answer = await ownersSpeedCheck(speedRequestFor(jobId), {
     measure: async () => measured(),
     store,
   });
@@ -760,7 +777,7 @@ test("performance: the measured result is filed beside the audit it belongs to",
 test("performance: the browser still receives exactly what it always did", async () => {
   const { store, jobId } = storeWithFinishedAudit();
 
-  const answer = await performanceRoute(speedRequestFor(jobId), {
+  const answer = await ownersSpeedCheck(speedRequestFor(jobId), {
     measure: async () => measured(),
     store,
   });
@@ -776,7 +793,7 @@ test("performance: filing it away changes nothing about the stored audit", async
   const { store, jobId } = storeWithFinishedAudit();
   const before = JSON.stringify(store.get(jobId)?.result);
 
-  await performanceRoute(speedRequestFor(jobId), { measure: async () => measured(), store });
+  await ownersSpeedCheck(speedRequestFor(jobId), { measure: async () => measured(), store });
 
   const after = store.get(jobId);
   assert.equal(JSON.stringify(after?.result), before, "the crawl's result is untouched");
@@ -798,7 +815,7 @@ test("performance: a request naming no audit still answers, and files nothing", 
 test("performance: an unknown audit is not a reason to withhold the measurement", async () => {
   const { store } = storeWithFinishedAudit();
 
-  const answer = await performanceRoute(speedRequestFor("no-such-job"), {
+  const answer = await ownersSpeedCheck(speedRequestFor("no-such-job"), {
     measure: async () => measured(),
     store,
   });
@@ -816,7 +833,7 @@ test("the server can now describe a whole audit, speed included", async () => {
    * fail-closed boundary it was built to be.
    */
   const { store, jobId } = storeWithFinishedAudit();
-  await performanceRoute(speedRequestFor(jobId), { measure: async () => measured(), store });
+  await ownersSpeedCheck(speedRequestFor(jobId), { measure: async () => measured(), store });
 
   const job = store.get(jobId);
   assert.ok(job?.result);
@@ -874,9 +891,9 @@ const withFindings: Finding[] = [
 ] as unknown as Finding[];
 
 /** A finished audit that actually found something, so there is prose to place. */
-function storeWithFindings() {
+function storeWithFindings(owner: string | null = OWNER) {
   const store = createJobStore<SiteAuditResult, SpeedResult, ExplainResult>();
-  const job = store.create("https://example.com");
+  const job = store.create("https://example.com", owner);
   const audit = storedAudit();
   const withOne = {
     ...audit,
@@ -1011,7 +1028,7 @@ test("explain: no job id is a 400", async () => {
 
 test("explain: an audit still running is refused without asking", async () => {
   const store = createJobStore<SiteAuditResult, SpeedResult, ExplainResult>();
-  const job = store.create("https://example.com");
+  const job = store.create("https://example.com", OWNER);
   store.markRunning(job.id);
   let asked = 0;
 
@@ -1260,7 +1277,7 @@ test("explain: an audit that could not read a page is refused without asking", a
    * says why rather than reporting a provider failure that never happened.
    */
   const store = createJobStore<AuditResult, SpeedResult, ExplainResult>();
-  const job = store.create("https://example.com");
+  const job = store.create("https://example.com", OWNER);
   store.finish(job.id, "partial", {
     kind: "certificate-failure",
     website: { requestedUrl: "https://example.com/", checkedAt: "2026-09-16T10:00:00.000Z" },
@@ -1294,7 +1311,7 @@ test("explain: an audit that could not read a page is refused without asking", a
 
 test("result: a partial audit of a refused certificate is handed over, with its problem", async () => {
   const store = createJobStore<AuditResult, SpeedResult, ExplainResult>();
-  const job = store.create("https://example.com");
+  const job = store.create("https://example.com", OWNER);
   store.finish(job.id, "partial", {
     kind: "certificate-failure",
     website: { requestedUrl: "https://example.com/", checkedAt: "2026-09-16T10:00:00.000Z" },
@@ -1321,4 +1338,134 @@ test("result: a partial audit of a refused certificate is handed over, with its 
     "kind" in answer.body.result ? answer.body.result.certificateProblem : null,
     "expired",
   );
+});
+
+// ---------------------------------------------------------------------------
+// ONLY THE ACCOUNT THAT STARTED AN AUDIT MAY READ, EXPLAIN OR ATTACH TO IT
+//
+// Somebody else's job, and a job with no owner, answer exactly as a job that
+// does not exist. Nothing is claimed, explained or attached for them.
+// ---------------------------------------------------------------------------
+
+const NO_SUCH_JOB = "00000000-0000-4000-8000-000000000000";
+
+test("ownership: another account cannot read an audit's status", () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  const theirs = statusRouteAs(getWith(`jobId=${jobId}`), { store, userId: STRANGER });
+  const missing = statusRouteAs(getWith(`jobId=${NO_SUCH_JOB}`), { store, userId: STRANGER });
+
+  assert.equal(theirs.status, 404);
+  assert.deepEqual(theirs.body, { ok: false, error: JOB_NOT_FOUND });
+  assert.deepEqual(theirs, missing, "indistinguishable from a job that does not exist");
+});
+
+test("ownership: another account cannot read an audit's result", () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  const theirs = resultRouteAs(getWith(`jobId=${jobId}`), { store, userId: STRANGER });
+  const missing = resultRouteAs(getWith(`jobId=${NO_SUCH_JOB}`), { store, userId: STRANGER });
+
+  assert.equal(theirs.status, 404);
+  assert.deepEqual(theirs.body, { ok: false, error: JOB_NOT_FOUND });
+  assert.deepEqual(theirs, missing);
+});
+
+test("ownership: a job with no owner cannot be read by anybody", () => {
+  const { store, jobId } = storeWithFinishedAudit(null);
+
+  for (const userId of [OWNER, STRANGER]) {
+    assert.equal(statusRouteAs(getWith(`jobId=${jobId}`), { store, userId }).status, 404, userId);
+    assert.equal(resultRouteAs(getWith(`jobId=${jobId}`), { store, userId }).status, 404, userId);
+  }
+});
+
+test("ownership: the owner still reads their own status and result", () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  assert.equal(statusRouteAs(getWith(`jobId=${jobId}`), { store, userId: OWNER }).status, 200);
+  const result = resultRouteAs(getWith(`jobId=${jobId}`), { store, userId: OWNER });
+  assert.equal(result.status, 200);
+  assert.ok(result.body.ok);
+});
+
+test("ownership: another account cannot have an audit explained, and no model is asked", async () => {
+  const { store, jobId } = storeWithFindings();
+  let asked = 0;
+  const explain = async () => {
+    asked += 1;
+    return goodExplanation;
+  };
+
+  const theirs = await explainRouteAs(explainRequestFor(jobId), { store, explain, userId: STRANGER });
+  const missing = await explainRouteAs(explainRequestFor(NO_SUCH_JOB), { store, explain, userId: STRANGER });
+
+  assert.equal(theirs.status, 404);
+  assert.deepEqual(theirs.body, { ok: false, jobId, error: JOB_NOT_FOUND });
+  assert.deepEqual(missing.body, { ok: false, jobId: NO_SUCH_JOB, error: JOB_NOT_FOUND }, "the same answer a missing job gets");
+  assert.equal(asked, 0, "no model was asked");
+  assert.equal(store.get(jobId)?.explanationClaimed, false, "and the owner's single claim was not spent");
+
+  // The owner can still have it explained afterwards.
+  const own = await explainRouteAs(explainRequestFor(jobId), { store, explain, userId: OWNER });
+  assert.equal(own.status, 200);
+  assert.equal(asked, 1);
+});
+
+test("ownership: a job with no owner is explained for nobody", async () => {
+  const { store, jobId } = storeWithFindings(null);
+  let asked = 0;
+
+  const answer = await explainRouteAs(explainRequestFor(jobId), {
+    store,
+    userId: OWNER,
+    explain: async () => {
+      asked += 1;
+      return goodExplanation;
+    },
+  });
+
+  assert.equal(answer.status, 404);
+  assert.equal(asked, 0);
+});
+
+test("ownership: another account's speed check is not filed beside the audit", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  const answer = await performanceRoute(speedRequestFor(jobId), {
+    measure: async () => measured(),
+    store,
+    userId: STRANGER,
+  });
+
+  // The measurement of the address they named is theirs; the audit is not.
+  assert.equal(answer.status, 200);
+  assert.equal(store.get(jobId)?.attached, null, "nothing was attached to somebody else's audit");
+
+  // The owner's own speed check still files.
+  await ownersSpeedCheck(speedRequestFor(jobId), { measure: async () => measured(), store });
+  assert.ok(store.get(jobId)?.attached);
+});
+
+test("ownership: a speed check is filed beside no ownerless audit, and none without an account", async () => {
+  const ownerless = storeWithFinishedAudit(null);
+  await ownersSpeedCheck(speedRequestFor(ownerless.jobId), { measure: async () => measured(), store: ownerless.store });
+  assert.equal(ownerless.store.get(ownerless.jobId)?.attached, null);
+
+  const unnamed = storeWithFinishedAudit();
+  await performanceRoute(speedRequestFor(unnamed.jobId), { measure: async () => measured(), store: unnamed.store });
+  assert.equal(unnamed.store.get(unnamed.jobId)?.attached, null, "no account named, nothing filed");
+});
+
+test("ownership: an audit started through the route is readable by its starter alone", async () => {
+  const store = createJobStore<SiteAuditResult>();
+  const started = await startAuditRoute(postJson({ url: "https://example.com" }), {
+    store,
+    runImpl: auditReturning(true),
+    userId: OWNER,
+  });
+  const jobId = started.body.ok ? started.body.jobId : "";
+
+  assert.equal(statusRouteAs(getWith(`jobId=${jobId}`), { store, userId: OWNER }).status, 200);
+  assert.equal(statusRouteAs(getWith(`jobId=${jobId}`), { store, userId: STRANGER }).status, 404);
 });

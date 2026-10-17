@@ -20,10 +20,12 @@ export async function POST(request: Request): Promise<NextResponse<AuditExplanat
    * rendered a page never passed the sign-in, so every route asks for
    * itself. The decision is in lib/auth/guard.ts and is tested there.
    */
-  if ((await requireSession(request)) === null) {
+  const user = await requireSession(request);
+  if (user === null) {
     const refused = unauthorised();
     return NextResponse.json(refused.body, { status: refused.status });
   }
-  const { status, body } = await explainRoute(request);
+  // Only this account's own audit; anybody else's answers as not found.
+  const { status, body } = await explainRoute(request, { userId: user.id });
   return NextResponse.json(body, { status });
 }

@@ -206,6 +206,19 @@ export interface JobStore<TResult, TAttached = never, TExplanation = never> {
   readonly size: number;
 }
 
+/**
+ * The job, if it belongs to `userId`; otherwise null.
+ *
+ * ONE ANSWER FOR MISSING, OWNERLESS AND SOMEBODY ELSE'S. The status, result,
+ * explanation, speed-check and PDF routes pass their lookups through this (the
+ * email route makes the same comparison inline), so a job that belongs to
+ * another account is indistinguishable from one that never existed, and a job
+ * with no owner belongs to nobody. Managers are not exempt.
+ */
+export function ownedBy<J extends { readonly ownerId: string | null }>(job: J | null, userId: string): J | null {
+  return job !== null && job.ownerId === userId ? job : null;
+}
+
 export interface JobStoreOptions {
   ttlMs?: number;
   /** Injectable clock, so expiry is tested exactly rather than waited for. */

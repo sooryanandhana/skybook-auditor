@@ -48,10 +48,25 @@ const sends = new Map<string, number[]>();
 /** Every send, across all callers, for the un-keyed global ceiling. */
 let globalSends: number[] = [];
 
+/**
+ * Sends that have been let through and have not finished yet, per caller and
+ * in total.
+ *
+ * WHY THESE EXIST. A send is only recorded once a provider has accepted it,
+ * which is several awaits after the allowance was asked -- a render and a
+ * network call. Without these, twenty requests arriving together all saw the
+ * same empty history and all went out. Each one now holds a place from the
+ * moment it is let through until it finishes, so the ones behind it see it.
+ */
+const inFlight = new Map<string, number>();
+let globalInFlight = 0;
+
 /** Forgets everything recorded. For tests, so one cannot leak into the next. */
 export function resetSendLimit(): void {
   sends.clear();
   globalSends = [];
+  inFlight.clear();
+  globalInFlight = 0;
 }
 
 export interface SendAllowance {
@@ -81,33 +96,82 @@ export interface SendAllowance {
  *
  * A SLIDING WINDOW, like the audit limiter, and for the same reason: a counter
  * that reset on the minute would let twice the limit through across a boundary.
+ *
+ * SENDS STILL IN FLIGHT COUNT TOO, against the caller and the server alike,
+ * so a request already let through holds its place until it finishes.
  */
 export function sendAllowance(caller: string, now: number = Date.now()): SendAllowance {
   const within = recent(caller, now);
+  const mine = within.length + (inFlight.get(caller) ?? 0);
 
-  if (within.length >= MAX_SENDS) {
-    const oldest = within[0];
-    return {
-      allowed: false,
-      remaining: 0,
-      retryAfterSeconds: Math.max(1, Math.ceil((oldest + SEND_WINDOW_MS - now) / 1000)),
-    };
+  if (mine >= MAX_SENDS) {
+    return { allowed: false, remaining: 0, retryAfterSeconds: retryAfter(within, now) };
   }
 
   // The server-wide ceiling. A caller with allowance left is still refused once
   // the whole server has sent its fill -- which is what a rotated header runs
   // into as soon as it can no longer look like a fresh caller.
   const globalWithin = recentGlobal(now);
-  if (globalWithin.length >= GLOBAL_SENDS) {
-    const oldest = globalWithin[0];
-    return {
-      allowed: false,
-      remaining: 0,
-      retryAfterSeconds: Math.max(1, Math.ceil((oldest + SEND_WINDOW_MS - now) / 1000)),
-    };
+  if (globalWithin.length + globalInFlight >= GLOBAL_SENDS) {
+    return { allowed: false, remaining: 0, retryAfterSeconds: retryAfter(globalWithin, now) };
   }
 
-  return { allowed: true, remaining: MAX_SENDS - within.length, retryAfterSeconds: 0 };
+  return { allowed: true, remaining: MAX_SENDS - mine, retryAfterSeconds: 0 };
+}
+
+/** A place held for one send that has been let through, until it finishes. */
+export interface SendReservation {
+  readonly allowed: boolean;
+  /** Seconds until the caller may try again. Only meaningful when refused. */
+  readonly retryAfterSeconds: number;
+  /**
+   * Gives the place back. Call it in a `finally`, whatever happened. Safe to
+   * call more than once, and does nothing for a refused reservation.
+   */
+  release(): void;
+}
+
+/**
+ * Asks for room to send AND holds it, in one synchronous step.
+ *
+ * RACE SAFETY: there is no await between the check and the hold, so of
+ * requests arriving together each one sees every place taken before it. The
+ * hold is not a send: it is given back by `release`, and only `recordSend`
+ * spends the allowance, so a send that fails or throws still costs nothing.
+ */
+export function reserveSend(caller: string, now: number = Date.now()): SendReservation {
+  const allowance = sendAllowance(caller, now);
+  if (!allowance.allowed) {
+    return { allowed: false, retryAfterSeconds: allowance.retryAfterSeconds, release: () => {} };
+  }
+
+  inFlight.set(caller, (inFlight.get(caller) ?? 0) + 1);
+  globalInFlight += 1;
+
+  let released = false;
+  return {
+    allowed: true,
+    retryAfterSeconds: 0,
+    release() {
+      if (released) return;
+      released = true;
+      const left = (inFlight.get(caller) ?? 0) - 1;
+      if (left > 0) inFlight.set(caller, left);
+      else inFlight.delete(caller);
+      globalInFlight = Math.max(0, globalInFlight - 1);
+    },
+  };
+}
+
+/** Sends being held right now, per caller and in total. For tests. */
+export function sendsInFlight(caller?: string): number {
+  return caller === undefined ? globalInFlight : (inFlight.get(caller) ?? 0);
+}
+
+/** Seconds until the oldest of `times` leaves the window; one when none is recorded yet. */
+function retryAfter(times: readonly number[], now: number): number {
+  const oldest = times[0];
+  return oldest === undefined ? 1 : Math.max(1, Math.ceil((oldest + SEND_WINDOW_MS - now) / 1000));
 }
 
 /**

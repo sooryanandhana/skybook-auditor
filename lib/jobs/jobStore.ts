@@ -88,6 +88,14 @@ export interface Job<TResult, TAttached = never, TExplanation = never> {
   id: string;
   /** The address the audit was asked about, as submitted. */
   requestedUrl: string;
+  /**
+   * The signed-in account that started the audit, or null when none was named.
+   *
+   * Set once, at creation, and never changed by anything after. A route that
+   * acts on the job for somebody -- sending its report by email -- requires the
+   * requester to be this account, and a null owner matches no account at all.
+   */
+  ownerId: string | null;
   status: JobStatus;
   progress: JobProgress;
   /** Present only once the job reached "completed" or "partial". */
@@ -147,7 +155,8 @@ export interface Job<TResult, TAttached = never, TExplanation = never> {
 }
 
 export interface JobStore<TResult, TAttached = never, TExplanation = never> {
-  create(requestedUrl: string): Job<TResult, TAttached, TExplanation>;
+  /** A new queued job, owned by `ownerId` when one is named. */
+  create(requestedUrl: string, ownerId?: string | null): Job<TResult, TAttached, TExplanation>;
   /** The job, or null if it never existed or has expired. */
   get(id: string): Job<TResult, TAttached, TExplanation> | null;
   /** Records progress. Ignored once the job is terminal. */
@@ -260,12 +269,13 @@ export function createJobStore<TResult, TAttached = never, TExplanation = never>
   };
 
   return {
-    create(requestedUrl) {
+    create(requestedUrl, ownerId = null) {
       sweep();
       const at = now();
       const job: Job<TResult, TAttached, TExplanation> = {
         id: newId(),
         requestedUrl,
+        ownerId,
         status: "queued",
         progress: { ...EMPTY_PROGRESS },
         result: null,

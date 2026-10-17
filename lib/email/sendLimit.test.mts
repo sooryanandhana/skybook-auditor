@@ -15,8 +15,10 @@ import {
   SEND_RATE_LIMITED,
   SEND_WINDOW_MS,
   recordSend,
+  reserveSend,
   resetSendLimit,
   sendAllowance,
+  sendsInFlight,
 } from "./sendLimit.ts";
 
 const NOW = 1_757_000_000_000;
@@ -202,4 +204,62 @@ test("the ceiling forgets sends once the window has passed", () => {
   for (let i = 0; i < GLOBAL_SENDS; i += 1) recordSend(`203.0.113.${i}`, NOW);
   assert.equal(sendAllowance("198.51.100.99", NOW).allowed, false);
   assert.equal(sendAllowance("198.51.100.99", NOW + SEND_WINDOW_MS + 1).allowed, true);
+});
+
+/* ---------------------------------------------------------------------------
+   Places held by sends still in flight
+   --------------------------------------------------------------------------- */
+
+test("a held place counts against the caller until it is given back", () => {
+  resetSendLimit();
+  const held = Array.from({ length: MAX_SENDS }, () => reserveSend("198.51.100.1", NOW));
+  assert.ok(held.every((r) => r.allowed));
+  assert.equal(sendsInFlight("198.51.100.1"), MAX_SENDS);
+
+  const refused = reserveSend("198.51.100.1", NOW);
+  assert.equal(refused.allowed, false, "the sixth is refused while five are in flight");
+  assert.ok(refused.retryAfterSeconds >= 1);
+  assert.equal(sendAllowance("198.51.100.1", NOW).remaining, 0);
+
+  held[0].release();
+  assert.equal(reserveSend("198.51.100.1", NOW).allowed, true, "a released place is free again");
+});
+
+test("a held place counts against the server-wide ceiling too", () => {
+  resetSendLimit();
+  for (let i = 0; i < GLOBAL_SENDS; i += 1) assert.equal(reserveSend(`203.0.113.${i}`, NOW).allowed, true);
+  assert.equal(reserveSend("198.51.100.99", NOW).allowed, false);
+  assert.equal(sendsInFlight(), GLOBAL_SENDS);
+});
+
+test("releasing is safe to repeat and never goes below zero", () => {
+  resetSendLimit();
+  const held = reserveSend("198.51.100.2", NOW);
+  held.release();
+  held.release();
+  reserveSend("198.51.100.2", NOW).release();
+  const refusedRelease = (() => {
+    for (let i = 0; i < MAX_SENDS; i += 1) recordSend("198.51.100.3", NOW);
+    return reserveSend("198.51.100.3", NOW);
+  })();
+  assert.equal(refusedRelease.allowed, false);
+  refusedRelease.release();
+
+  assert.equal(sendsInFlight("198.51.100.2"), 0);
+  assert.equal(sendsInFlight(), 0);
+  assert.equal(sendAllowance("198.51.100.2", NOW).remaining, MAX_SENDS);
+});
+
+test("a held place is not a send: giving it back spends nothing", () => {
+  resetSendLimit();
+  for (let i = 0; i < MAX_SENDS * 3; i += 1) reserveSend("198.51.100.4", NOW).release();
+  assert.equal(sendAllowance("198.51.100.4", NOW).remaining, MAX_SENDS);
+});
+
+test("a recorded send and its released place count once, not twice", () => {
+  resetSendLimit();
+  const held = reserveSend("198.51.100.5", NOW);
+  recordSend("198.51.100.5", NOW);
+  held.release();
+  assert.equal(sendAllowance("198.51.100.5", NOW).remaining, MAX_SENDS - 1);
 });

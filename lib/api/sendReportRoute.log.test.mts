@@ -122,7 +122,8 @@ const EXPLAINED = {
 
 function finishedJob(explained = false) {
   const store = createJobStore() as unknown as AuditJobStore;
-  const job = store.create(ENTRY);
+  // Owned by the signed-in account: the send route refuses anybody else's job.
+  const job = store.create(ENTRY, USER_ID);
   store.finish(job.id, "completed", REAL_AUDIT);
   if (explained) {
     store.claimExplanation(job.id);

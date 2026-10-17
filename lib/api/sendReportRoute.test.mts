@@ -32,7 +32,7 @@ import { runRealAudit } from "../audit/pdf/realAudit.fixture.mts";
 import { SEND_FAILURE_MESSAGES, fakeProvider } from "../email/provider.ts";
 import { RESEND_API_KEY_VARIABLE, RESEND_ENDPOINT } from "../email/resend.ts";
 import { codeOnly } from "../email/provider.test.mts";
-import { GLOBAL_SENDS, MAX_SENDS, SEND_RATE_LIMITED, recordSend, resetSendLimit, sendAllowance } from "../email/sendLimit.ts";
+import { GLOBAL_SENDS, MAX_SENDS, SEND_RATE_LIMITED, recordSend, resetSendLimit, sendAllowance, sendsInFlight } from "../email/sendLimit.ts";
 import { UNATTRIBUTED } from "../callerAddress.ts";
 import { accountLimitKey } from "../accountLimitKey.ts";
 import { contentFingerprint, type SendContent } from "../report/sendGate.ts";
@@ -95,9 +95,17 @@ const REAL_AUDIT = await runRealAudit({
   checks: { spfMissing: true },
 });
 
-function storeWith(state: "completed" | "partial" | "queued" | "running" | "failed") {
+/**
+ * A store holding one job in the given state, owned by the signed-in account
+ * unless a different owner (or none) is named. The send route refuses a job
+ * its requester does not own, so the fixture says who started it.
+ */
+function storeWith(
+  state: "completed" | "partial" | "queued" | "running" | "failed",
+  owner: string | null = USER_ID,
+) {
   const store = createJobStore() as unknown as AuditJobStore;
-  const job = store.create("https://example.com/");
+  const job = store.create("https://example.com/", owner);
 
   if (state === "running") store.markRunning(job.id);
   if (state === "failed") store.fail(job.id, "The website could not be reached.");
@@ -1163,14 +1171,18 @@ const requestAs = (userId: string, body: unknown) =>
 
 test("two signed-in accounts have separate send allowances", async () => {
   resetSendLimit();
-  const { store, jobId } = storeWith("completed");
+  // Each account sends a report of its own audit.
+  const mine = storeWith("completed", USER_ID);
+  const theirs = storeWith("completed", OTHER_ID);
   const mail = fakeProvider();
   const db = dbReturningEither(ACTIVE_USER, OTHER_USER);
-  const sendAs = (userId: string) =>
-    sendReportRoute(
+  const sendAs = (userId: string) => {
+    const { store, jobId } = userId === USER_ID ? mine : theirs;
+    return sendReportRoute(
       requestAs(userId, { jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
       deps({ store, render: recordingRenderer().render, provider: mail.provider, db }),
     );
+  };
 
   for (let n = 0; n < MAX_SENDS; n += 1) assert.equal((await sendAs(USER_ID)).ok, true, `send ${n}`);
 
@@ -1220,4 +1232,178 @@ test("rotating the forwarded header no longer buys unlimited sends", async () =>
   assert.equal(result.status, 429);
   assert.equal(result.error, SEND_RATE_LIMITED);
   assert.equal(mail.sent.length, 0, "nothing left the building");
+});
+
+/* ---------------------------------------------------------------------------
+   Only the account that started an audit may send its report
+   --------------------------------------------------------------------------- */
+
+test("an account cannot send another account's report, even with a valid job id and confirmation", async () => {
+  resetSendLimit();
+  // Started by the other account; everything else about the request is valid.
+  const { store, jobId } = storeWith("completed", OTHER_ID);
+  const mail = fakeProvider();
+  const renderer = recordingRenderer();
+
+  const result = await sendReportRoute(
+    request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+    deps({ store, render: renderer.render, provider: mail.provider, db: dbReturningEither(ACTIVE_USER, OTHER_USER) }),
+  );
+
+  assert.equal(result.ok === false && result.status, 404);
+  assert.equal(result.ok === false && result.error, JOB_NOT_FOUND);
+  assert.equal(renderer.seen.length, 0, "refused before anything was rendered");
+  assert.equal(mail.sent.length, 0, "and before any provider was asked");
+  assert.equal(remaining(SENDER), MAX_SENDS, "nothing was spent");
+  assert.equal(sendsInFlight(), 0, "and nothing is left held");
+});
+
+test("somebody else's job is answered exactly like a job that does not exist", async () => {
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed", OTHER_ID);
+  const send = (id: string) =>
+    sendReportRoute(
+      request({ jobId: id, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+      deps({ store, render: recordingRenderer().render, provider: fakeProvider().provider }),
+    );
+
+  assert.deepEqual(await send(jobId), await send("00000000-0000-4000-8000-000000000000"));
+});
+
+test("a job with no owner is sent by nobody", async () => {
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed", null);
+  const mail = fakeProvider();
+
+  const result = await sendReportRoute(
+    request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+    deps({ store, render: recordingRenderer().render, provider: mail.provider }),
+  );
+
+  assert.equal(result.ok === false && result.status, 404);
+  assert.equal(mail.sent.length, 0);
+});
+
+test("the owner can still send their own report", async () => {
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed", OTHER_ID);
+  const mail = fakeProvider();
+
+  const result = await sendReportRoute(
+    requestAs(OTHER_ID, { jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+    deps({ store, render: recordingRenderer().render, provider: mail.provider, db: dbReturningEither(ACTIVE_USER, OTHER_USER) }),
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(mail.sent.length, 1);
+  assert.equal(remaining(accountLimitKey(OTHER_ID)), MAX_SENDS - 1);
+});
+
+test("the audit route records the signed-in account as the job's owner", async () => {
+  const { startAuditRoute } = await import("./auditRoutes.ts");
+  const { resetRateLimits } = await import("../rateLimit.ts");
+  resetRateLimits();
+  const store = createJobStore() as unknown as AuditJobStore;
+
+  const started = await startAuditRoute(
+    new Request("https://skybook.test/api/audit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "https://example.com" }),
+    }),
+    { store, userId: OTHER_ID, runImpl: async () => REAL_AUDIT as never },
+  );
+
+  assert.equal(started.status, 202);
+  const jobId = started.body.ok ? started.body.jobId : "";
+  assert.equal(store.get(jobId)?.ownerId, OTHER_ID);
+  resetRateLimits();
+});
+
+/* ---------------------------------------------------------------------------
+   Requests arriving together cannot share the same room
+   --------------------------------------------------------------------------- */
+
+/** A renderer slow enough that every request in a burst is in flight at once. */
+const slowRenderer = () => async () => {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  return FAKE_PDF;
+};
+
+test("twenty simultaneous sends from one account cannot pass its cap of five", async () => {
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const mail = fakeProvider();
+
+  const results = await Promise.all(
+    Array.from({ length: 20 }, () =>
+      sendReportRoute(
+        request({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+        deps({ store, render: slowRenderer(), provider: mail.provider }),
+      ),
+    ),
+  );
+
+  assert.equal(results.filter((r) => r.ok).length, MAX_SENDS);
+  assert.equal(results.filter((r) => r.ok === false && r.status === 429).length, 20 - MAX_SENDS);
+  assert.equal(mail.sent.length, MAX_SENDS);
+  assert.equal(remaining(SENDER), 0);
+  assert.equal(sendsInFlight(), 0, "every place was given back");
+});
+
+test("simultaneous sends across accounts cannot pass the server-wide cap", async () => {
+  resetSendLimit();
+  const ids = [USER_ID, OTHER_ID, "33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444"];
+  const db = dbReturningEither(...ids.map((id, i) => ({ ...ACTIVE_USER, id, email: `person${i}@skybook.example` })));
+  const mail = fakeProvider();
+  const own = new Map(ids.map((id) => [id, storeWith("completed", id)]));
+
+  // Four accounts, five each: twenty requests, every one within its own account's cap.
+  const results = await Promise.all(
+    ids.flatMap((id) =>
+      Array.from({ length: MAX_SENDS }, () => {
+        const { store, jobId } = own.get(id)!;
+        return sendReportRoute(
+          requestAs(id, { jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) }),
+          deps({ store, render: slowRenderer(), provider: mail.provider, db }),
+        );
+      }),
+    ),
+  );
+
+  assert.equal(results.filter((r) => r.ok).length, GLOBAL_SENDS);
+  assert.equal(mail.sent.length, GLOBAL_SENDS);
+  assert.equal(sendsInFlight(), 0);
+});
+
+test("failed and thrown sends give their place back and spend nothing", async () => {
+  resetSendLimit();
+  const { store, jobId } = storeWith("completed");
+  const body = () => ({ jobId, recipient: RECIPIENT, confirmedFor: confirmationFor(store, jobId) });
+
+  // Refused by the provider, and thrown by it, in parallel and more times than the cap.
+  const refusing = fakeProvider({ ok: false, failure: "provider-error" });
+  const throwing = { send: async () => { throw new Error("socket closed"); } };
+  const refused = await Promise.allSettled(
+    Array.from({ length: MAX_SENDS + 2 }, () =>
+      sendReportRoute(request(body()), deps({ store, render: slowRenderer(), provider: refusing.provider }))),
+  );
+  assert.equal(refused.filter((o) => o.status === "fulfilled" && o.value.ok === false && o.value.status === 502).length, MAX_SENDS);
+  assert.equal(sendsInFlight(), 0, "the refused sends gave their places back");
+
+  const thrown = await Promise.allSettled(
+    Array.from({ length: MAX_SENDS + 2 }, () =>
+      sendReportRoute(request(body()), deps({ store, render: slowRenderer(), provider: throwing }))),
+  );
+  assert.equal(thrown.filter((o) => o.status === "rejected").length, MAX_SENDS, "a thrown send propagates as before");
+
+  assert.equal(sendsInFlight(), 0, "no place is left held");
+  assert.equal(sendsInFlight(SENDER), 0);
+  assert.equal(remaining(SENDER), MAX_SENDS, "nothing was spent");
+
+  // And the account can still send its full allowance afterwards.
+  const mail = fakeProvider();
+  for (let n = 0; n < MAX_SENDS; n += 1) {
+    assert.equal((await sendReportRoute(request(body()), deps({ store, render: recordingRenderer().render, provider: mail.provider }))).ok, true, `send ${n}`);
+  }
 });

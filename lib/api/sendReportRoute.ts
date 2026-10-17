@@ -40,7 +40,7 @@ import {
   type EmailProvider,
   type OutgoingEmail,
 } from "../email/provider.ts";
-import { SEND_RATE_LIMITED, recordSend, sendAllowance } from "../email/sendLimit.ts";
+import { SEND_RATE_LIMITED, recordSend, reserveSend } from "../email/sendLimit.ts";
 import { accountLimitKey } from "../accountLimitKey.ts";
 import { resendConfigured, resendProvider } from "../email/resend.ts";
 
@@ -208,146 +208,164 @@ export async function sendReportRoute(
    * `sendAllowance` still bounds them all together.
    */
   const caller = accountLimitKey(user.id);
-  if (!sendAllowance(caller, now).allowed) {
+  const reservation = reserveSend(caller, now);
+  if (!reservation.allowed) {
     return { ok: false, status: 429, error: SEND_RATE_LIMITED };
   }
 
   /*
-   * 5. The job layer's own sentences, exactly as the export endpoint returns
-   * them. Unknown and expired are one answer because an expired job is deleted
-   * and the two cannot be told apart.
+   * THE PLACE IS HELD FROM HERE UNTIL THIS REQUEST ENDS, and given back in the
+   * `finally` whatever happens: refused below, failed, thrown or sent. Nothing
+   * is awaited between asking for it and holding it, so requests arriving
+   * together cannot all pass on the same room. Only `recordSend`, after a
+   * provider has accepted, spends the allowance itself.
    */
-  const job = store.get(sent.jobId);
-  if (job === null) return { ok: false, status: 404, error: JOB_NOT_FOUND };
-  if (job.status === "queued" || job.status === "running") {
-    return { ok: false, status: 409, error: NOT_READY };
-  }
-  if (job.status === "failed") {
-    return { ok: false, status: 409, error: job.error ?? UNKNOWN_FAILURE };
-  }
-
-  // 6. The same projection the download uses. It re-checks the job itself.
-  const outcome = buildPdfDocument(sent.jobId, store, sent.fields);
-  if (!outcome.ok) {
-    if (outcome.reason === "unknown-job") return { ok: false, status: 404, error: JOB_NOT_FOUND };
-    if (outcome.reason === "not-finished") return { ok: false, status: 409, error: NOT_READY };
-    return { ok: false, status: 409, error: NO_RESULT };
-  }
-
-  // Read here, straight after the document was built. See `commentaryAt`.
-  const commentary = commentaryAt(outcome.document, store, sent.jobId);
-
-  /*
-   * 7. THE CONFIRMATION, RECOMPUTED HERE RATHER THAN BELIEVED.
-   *
-   * The browser sends the fingerprint it holds; this rebuilds one from the job
-   * and the fields actually being used and requires them to match. It cannot
-   * prove a person ticked a box -- nothing without a second channel could --
-   * and it is not pretending to. What it proves is that the content being sent
-   * is the content that was confirmed, which is the failure this catches: a
-   * stale page, an edited field, a doubled request carrying an old body.
-   *
-   * The audited address comes from the DOCUMENT rather than from the request,
-   * so a caller cannot supply one that makes their fingerprint fit.
-   */
-  const content: SendContent = {
-    jobId: sent.jobId,
-    recipient: sent.recipient,
-    auditedUrl: outcome.document.cover.auditedUrl,
-    ...sent.fields,
-  };
-
-  if (sent.confirmedFor === "" || sent.confirmedFor !== contentFingerprint(content)) {
-    return { ok: false, status: 409, error: NOT_CONFIRMED };
-  }
-
-  // 8. The same renderer the download button uses, and no retry on failure.
-  let pdf: Buffer;
-  const rendering = { op: "pdf.render", job: sent.jobId, via: "email" } as const;
-  const renderedAt = Date.now();
   try {
-    pdf = await render(outcome.document);
+    /*
+     * 5. The job layer's own sentences, exactly as the export endpoint returns
+     * them. Unknown and expired are one answer because an expired job is deleted
+     * and the two cannot be told apart.
+     */
+    const job = store.get(sent.jobId);
+    /*
+     * ONLY THE ACCOUNT THAT STARTED THE AUDIT MAY SEND ITS REPORT. Somebody
+     * else's job is answered exactly as a job that does not exist, so the answer
+     * says nothing about whether it does, and a job with no owner belongs to
+     * nobody. Checked before the document is built, rendered or sent.
+     */
+    if (job === null || job.ownerId !== user.id) return { ok: false, status: 404, error: JOB_NOT_FOUND };
+    if (job.status === "queued" || job.status === "running") {
+      return { ok: false, status: 409, error: NOT_READY };
+    }
+    if (job.status === "failed") {
+      return { ok: false, status: 409, error: job.error ?? UNKNOWN_FAILURE };
+    }
+
+    // 6. The same projection the download uses. It re-checks the job itself.
+    const outcome = buildPdfDocument(sent.jobId, store, sent.fields);
+    if (!outcome.ok) {
+      if (outcome.reason === "unknown-job") return { ok: false, status: 404, error: JOB_NOT_FOUND };
+      if (outcome.reason === "not-finished") return { ok: false, status: 409, error: NOT_READY };
+      return { ok: false, status: 409, error: NO_RESULT };
+    }
+
+    // Read here, straight after the document was built. See `commentaryAt`.
+    const commentary = commentaryAt(outcome.document, store, sent.jobId);
+
+    /*
+     * 7. THE CONFIRMATION, RECOMPUTED HERE RATHER THAN BELIEVED.
+     *
+     * The browser sends the fingerprint it holds; this rebuilds one from the job
+     * and the fields actually being used and requires them to match. It cannot
+     * prove a person ticked a box -- nothing without a second channel could --
+     * and it is not pretending to. What it proves is that the content being sent
+     * is the content that was confirmed, which is the failure this catches: a
+     * stale page, an edited field, a doubled request carrying an old body.
+     *
+     * The audited address comes from the DOCUMENT rather than from the request,
+     * so a caller cannot supply one that makes their fingerprint fit.
+     */
+    const content: SendContent = {
+      jobId: sent.jobId,
+      recipient: sent.recipient,
+      auditedUrl: outcome.document.cover.auditedUrl,
+      ...sent.fields,
+    };
+
+    if (sent.confirmedFor === "" || sent.confirmedFor !== contentFingerprint(content)) {
+      return { ok: false, status: 409, error: NOT_CONFIRMED };
+    }
+
+    // 8. The same renderer the download button uses, and no retry on failure.
+    let pdf: Buffer;
+    const rendering = { op: "pdf.render", job: sent.jobId, via: "email" } as const;
+    const renderedAt = Date.now();
+    try {
+      pdf = await render(outcome.document);
+      logOutcome({
+        ...rendering,
+        outcome: "succeeded",
+        ms: Date.now() - renderedAt,
+        bytes: Buffer.isBuffer(pdf) ? pdf.length : undefined,
+        ...commentary,
+      });
+    } catch (error) {
+      // The category only. The error is not handed to the log at all.
+      logOutcome({
+        ...rendering,
+        outcome: "failed",
+        reason: renderFailureReason(error),
+        ms: Date.now() - renderedAt,
+        ...commentary,
+      });
+
+      const message =
+        error instanceof PdfRenderError ? error.message : PDF_RENDER_MESSAGES["internal-error"];
+      return { ok: false, status: 500, error: message };
+    }
+
+    const preview = previewFor(content);
+    const email: OutgoingEmail = {
+      to: preview.recipient,
+      from,
+      subject: preview.subject,
+      /*
+       * THE SAME WORDS THE PERSON READ. The preview is not a mock-up of the
+       * email; it is the email, composed by the one function that composes it.
+       */
+      text: preview.body,
+      attachment: {
+        filename: exportFilename(outcome.document.cover.auditedUrl),
+        content: pdf,
+      },
+    };
+
+    // 9. One send. No loop, nothing calls this again, and the seam offers no retry.
+    const sentAt = Date.now();
+    const delivery = await provider.send(email);
+
+    /*
+     * WHETHER THE EMAIL SERVICE TOOK THE REQUEST, and nothing about the message:
+     * not who it was for, not who it was from, not its subject, and not the
+     * receipt the service handed back. "Accepted" is all that is known here --
+     * whether it arrived is the service's to say.
+     */
     logOutcome({
-      ...rendering,
-      outcome: "succeeded",
-      ms: Date.now() - renderedAt,
-      bytes: Buffer.isBuffer(pdf) ? pdf.length : undefined,
-      ...commentary,
-    });
-  } catch (error) {
-    // The category only. The error is not handed to the log at all.
-    logOutcome({
-      ...rendering,
-      outcome: "failed",
-      reason: renderFailureReason(error),
-      ms: Date.now() - renderedAt,
-      ...commentary,
+      op: "email.send",
+      job: sent.jobId,
+      outcome: delivery.ok ? "accepted" : "not-accepted",
+      reason: delivery.ok ? undefined : delivery.failure,
+      ms: Date.now() - sentAt,
     });
 
-    const message =
-      error instanceof PdfRenderError ? error.message : PDF_RENDER_MESSAGES["internal-error"];
-    return { ok: false, status: 500, error: message };
+    if (!delivery.ok) {
+      /*
+       * 502 for the service's problems and 429 for its limit. Never the
+       * provider's own message: it carries request ids, account ids and
+       * sometimes the message itself, and none of that belongs in front of a
+       * person or in a log.
+       */
+      /*
+       * 503 for "this server is not set up", which is what a missing,
+       * restricted or suspended key becomes. It is the same answer the early
+       * check gives, so a key that disappears between the two does not change
+       * what a person is told. 429 for the service's limit, 502 for its
+       * problems and for a message it would not accept.
+       */
+      const status =
+        delivery.failure === "not-configured" ? 503 : delivery.failure === "rate-limited" ? 429 : 502;
+      return { ok: false, status, error: SEND_FAILURE_MESSAGES[delivery.failure] };
+    }
+
+    /*
+     * THE ONE PLACE AN ALLOWANCE IS SPENT, and it is after the only line that
+     * can put a message in front of a client. Nothing above here consumes one,
+     * so the count means what its name says.
+     */
+    recordSend(caller, now);
+
+    return { ok: true, recipient: preview.recipient };
+  } finally {
+    reservation.release();
   }
-
-  const preview = previewFor(content);
-  const email: OutgoingEmail = {
-    to: preview.recipient,
-    from,
-    subject: preview.subject,
-    /*
-     * THE SAME WORDS THE PERSON READ. The preview is not a mock-up of the
-     * email; it is the email, composed by the one function that composes it.
-     */
-    text: preview.body,
-    attachment: {
-      filename: exportFilename(outcome.document.cover.auditedUrl),
-      content: pdf,
-    },
-  };
-
-  // 9. One send. No loop, nothing calls this again, and the seam offers no retry.
-  const sentAt = Date.now();
-  const delivery = await provider.send(email);
-
-  /*
-   * WHETHER THE EMAIL SERVICE TOOK THE REQUEST, and nothing about the message:
-   * not who it was for, not who it was from, not its subject, and not the
-   * receipt the service handed back. "Accepted" is all that is known here --
-   * whether it arrived is the service's to say.
-   */
-  logOutcome({
-    op: "email.send",
-    job: sent.jobId,
-    outcome: delivery.ok ? "accepted" : "not-accepted",
-    reason: delivery.ok ? undefined : delivery.failure,
-    ms: Date.now() - sentAt,
-  });
-
-  if (!delivery.ok) {
-    /*
-     * 502 for the service's problems and 429 for its limit. Never the
-     * provider's own message: it carries request ids, account ids and
-     * sometimes the message itself, and none of that belongs in front of a
-     * person or in a log.
-     */
-    /*
-     * 503 for "this server is not set up", which is what a missing,
-     * restricted or suspended key becomes. It is the same answer the early
-     * check gives, so a key that disappears between the two does not change
-     * what a person is told. 429 for the service's limit, 502 for its
-     * problems and for a message it would not accept.
-     */
-    const status =
-      delivery.failure === "not-configured" ? 503 : delivery.failure === "rate-limited" ? 429 : 502;
-    return { ok: false, status, error: SEND_FAILURE_MESSAGES[delivery.failure] };
-  }
-
-  /*
-   * THE ONE PLACE AN ALLOWANCE IS SPENT, and it is after the only line that
-   * can put a message in front of a client. Nothing above here consumes one,
-   * so the count means what its name says.
-   */
-  recordSend(caller, now);
-
-  return { ok: true, recipient: preview.recipient };
 }

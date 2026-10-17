@@ -83,6 +83,8 @@ export interface StartAuditOptions {
   /** Swapped by tests so no job here reaches the network. */
   runImpl?: typeof runSiteAudit;
   audit?: Omit<SiteAuditOptions, "requestedUrl" | "onProgress">;
+  /** The signed-in account starting the audit, recorded as the job's owner. */
+  ownerId?: string;
 }
 
 /**
@@ -187,7 +189,7 @@ export function startAudit(
   const run = options.runImpl ?? runSiteAudit;
   const limit = options.maxConcurrent ?? MAX_CONCURRENT_AUDITS;
 
-  const job = store.create(requestedUrl);
+  const job = store.create(requestedUrl, options.ownerId ?? null);
   /** When it joined the queue, on the monotonic clock, for how long it waited. */
   const queuedAt = performance.now();
 

@@ -172,6 +172,8 @@ export async function startAuditRoute(
   // retry an assumed-https, unreachable entry over http (never an explicit one).
   const { jobId } = startAudit(url.url, {
     ...deps,
+    // The signed-in account owns the job, so only it may send the report.
+    ownerId: deps.userId,
     audit: { schemeWasAssumed: url.schemeWasAssumed },
   });
 

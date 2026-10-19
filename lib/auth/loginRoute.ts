@@ -12,7 +12,8 @@
  * Workspace later leaves the second, and this, untouched.
  */
 import { signIn, VERIFICATION_RETRY_AFTER_SECONDS, type CredentialOptions } from "./credentials.ts";
-import { trustedCaller, trustsProxy as trustsProxyFlag } from "../callerAddress.ts";
+import { callerAttribution, trustedCaller, trustsProxy as trustsProxyFlag } from "../callerAddress.ts";
+import { logCallerReadOnce } from "../log/reliabilityLog.ts";
 import { sessionCookieOptions, signSession, type SessionOptions } from "./session.ts";
 
 /** Where a person goes after signing in, and where they are sent to sign in. */
@@ -150,6 +151,15 @@ export async function loginRoute(
      */
     return { ok: false, status: 503, error: CANNOT_SIGN_IN };
   }
+
+  /*
+   * WAS THIS SIGN-IN ATTRIBUTED TO A CLIENT ADDRESS? Written only here, after a
+   * correct password, so nobody without one can make a line appear; at most once
+   * per answer per process; and as fixed words only -- never the address, the
+   * header, the account or anything else this request carried.
+   */
+  const attribution = callerAttribution(request, trustsProxy(options));
+  logCallerReadOnce(attribution.outcome, attribution.outcome === "unattributed" ? attribution.reason : undefined);
 
   return { ok: true, email: attempt.user.email, cookie, maxAgeSeconds: sessionCookieOptions().maxAge };
 }

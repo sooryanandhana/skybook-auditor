@@ -111,10 +111,51 @@ export const MAX_CLIENT_ADDRESS_LENGTH = 45;
  * `UNATTRIBUTED` rather than minting a bucket -- and never to another header.
  */
 export function trustedCaller(request: Request, trustProxy: boolean): string {
-  if (!trustProxy) return UNATTRIBUTED;
+  const read = readCaller(request, trustProxy);
+  return "caller" in read ? read.caller : UNATTRIBUTED;
+}
+
+/** Why a request was not attributed. A fixed word, never anything the request sent. */
+export type UnattributedReason =
+  | "proxy-not-trusted"
+  | "missing"
+  | "empty"
+  | "multiple"
+  | "too-long"
+  | "not-an-address";
+
+/**
+ * Whether a request was attributed, and if not, why -- WITHOUT the address.
+ *
+ * FOR A DIAGNOSTIC THAT MUST NOT LEAK. It answers from the very same reading as
+ * `trustedCaller`, so the two cannot disagree, but what it hands back holds only
+ * fixed words: never the address, the header or anything else the request sent.
+ */
+export type CallerAttribution =
+  | { readonly outcome: "attributed" }
+  | { readonly outcome: "unattributed"; readonly reason: UnattributedReason };
+
+export function callerAttribution(request: Request, trustProxy: boolean): CallerAttribution {
+  const read = readCaller(request, trustProxy);
+  return "caller" in read ? { outcome: "attributed" } : { outcome: "unattributed", reason: read.reason };
+}
+
+/**
+ * The one reading behind both functions above: the normalised address, or the
+ * reason there is none. Checked in the order `trustedCaller` always checked it.
+ */
+function readCaller(
+  request: Request,
+  trustProxy: boolean,
+): { readonly caller: string } | { readonly reason: UnattributedReason } {
+  if (!trustProxy) return { reason: "proxy-not-trusted" };
 
   const raw = request.headers.get(CLIENT_ADDRESS_HEADER);
-  if (raw === null || raw.length > MAX_CLIENT_ADDRESS_LENGTH || raw.includes(",")) return UNATTRIBUTED;
+  if (raw === null) return { reason: "missing" };
+  if (raw.length > MAX_CLIENT_ADDRESS_LENGTH) return { reason: "too-long" };
+  if (raw.includes(",")) return { reason: "multiple" };
 
-  return normaliseCaller(raw) ?? UNATTRIBUTED;
+  const caller = normaliseCaller(raw);
+  if (caller !== null) return { caller };
+  return { reason: raw.trim() === "" ? "empty" : "not-an-address" };
 }

@@ -27,7 +27,7 @@
  */
 
 /** The operations that report how they ended. */
-export type ReliabilityOp = "ai.explain" | "pdf.render" | "email.send" | "page.parse" | "audit.run";
+export type ReliabilityOp = "ai.explain" | "pdf.render" | "email.send" | "page.parse" | "audit.run" | "caller.read";
 
 /**
  * What a caller may hand in.
@@ -121,6 +121,16 @@ const WORDS: Record<ReliabilityOp, { outcomes: readonly string[]; reasons: reado
      */
     outcomes: ["started", "completed", "partial", "failed"],
     reasons: ["entry-unavailable", "unexpected", "certificate-failure"],
+  },
+  "caller.read": {
+    /*
+     * WHETHER A SUCCESSFUL SIGN-IN WAS ATTRIBUTED TO A CLIENT ADDRESS, and if
+     * not, which check it failed. Never the address, the header or who signed
+     * in: these words are the whole of what the line can say. See
+     * `logCallerReadOnce`, the only writer.
+     */
+    outcomes: ["attributed", "unattributed"],
+    reasons: ["proxy-not-trusted", "missing", "empty", "multiple", "too-long", "not-an-address"],
   },
 };
 
@@ -298,9 +308,56 @@ export function logOutcomeOnce(key: string, event: ReliabilityEvent): void {
   logOutcome(event);
 }
 
+/**
+ * The `caller.read` categories already written by this process.
+ *
+ * ITS OWN SET, NOT `logOutcomeOnce`'S. That one forgets its oldest key after
+ * ONCE_LIMIT others, so a category could be written again once enough audits
+ * had passed. This one never forgets and can only ever hold one of the seven
+ * permitted combinations -- `attributed` with no reason, or `unattributed` with
+ * exactly one approved reason -- so it holds at most seven entries, and each is
+ * written at most once per process however many sign-ins there are.
+ */
+const callerReadSeen = new Set<string>();
+
+/**
+ * Writes whether a successful sign-in was attributed, the first time each
+ * outcome-and-reason pair is seen by this process, and never again.
+ *
+ * Only the seven permitted combinations are accepted: `attributed` with no
+ * reason, or `unattributed` with exactly one approved reason. Anything else --
+ * a word off the lists, `attributed` with a reason, `unattributed` without one --
+ * writes nothing and is not remembered, so no value can grow the set or reach
+ * the line. The line itself is built by `logOutcome` from those words alone.
+ */
+export function logCallerReadOnce(outcome: string, reason?: string): void {
+  try {
+    const words = WORDS["caller.read"];
+    if (outcome === "attributed") {
+      if (reason !== undefined) return;
+    } else if (outcome === "unattributed") {
+      if (reason === undefined || !words.reasons.includes(reason)) return;
+    } else {
+      return;
+    }
+    const key = `${outcome}:${reason ?? ""}`;
+    if (callerReadSeen.has(key)) return;
+    callerReadSeen.add(key);
+  } catch {
+    return;
+  }
+  logOutcome(reason === undefined ? { op: "caller.read", outcome } : { op: "caller.read", outcome, reason });
+}
+
+/** How many `caller.read` categories this process has written. For tests. */
+export function callerReadsWritten(): number {
+  return callerReadSeen.size;
+}
+
 /** Forgets every key. For tests, which would otherwise depend on one another's. */
 export function resetLoggedOnce(): void {
   seen.clear();
+  callerReadSeen.clear();
 }
 
 // ---------------------------------------------------------------------------

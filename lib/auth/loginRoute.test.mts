@@ -248,7 +248,11 @@ test("signing out replaces the cookie with nothing that expires immediately", ()
    * There is no session store to delete a row from, so the cookie IS the
    * session. Ending one early means replacing it in the browser that holds it.
    */
-  const { cookie, maxAgeSeconds } = logoutRoute();
+  const outcome = logoutRoute(
+    new Request("https://skybook.example/api/auth/logout", { method: "POST", headers: { "sec-fetch-site": "same-origin" } }),
+  );
+  assert.ok(outcome.ok);
+  const { cookie, maxAgeSeconds } = outcome;
 
   assert.equal(cookie, "");
   assert.equal(maxAgeSeconds, 0);
@@ -257,7 +261,7 @@ test("signing out replaces the cookie with nothing that expires immediately", ()
 
 test("signing out touches no audit, no result and no report", () => {
   /*
-   * It takes no arguments and reaches nothing. There is no path from here to
+   * It reads one request header and reaches nothing else. There is no path from here to
    * anything the job store holds.
    *
    * NAMED AS IMPORTS RATHER THAN AS WORDS, and this file is the third place in

@@ -11,7 +11,7 @@
  * of connections at once, and the app runs as a single instance, so the pool is
  * deliberately small — see `MAX_CONNECTIONS`.
  */
-import { Pool } from "pg";
+import { Pool, type PoolConfig } from "pg";
 
 /** Where the connection string is read from. Never prefixed `NEXT_PUBLIC_`. */
 export const DATABASE_URL_VARIABLE = "DATABASE_URL";
@@ -24,6 +24,44 @@ export const DATABASE_URL_VARIABLE = "DATABASE_URL";
  * salesperson at a time and leaves room for a migration to connect alongside.
  */
 const MAX_CONNECTIONS = 5;
+
+/**
+ * How long to wait for a connection -- a new one, or a free one from the pool --
+ * before giving up, in milliseconds.
+ *
+ * WHY THERE IS A LIMIT AT ALL. node-postgres waits forever by default. A
+ * database that stopped answering would then hold every request that touched it,
+ * and a sign-in holds one of its few verification places while it waits, so a
+ * stall became an outage that lasted until the process restarted. Five seconds
+ * is many times a healthy connection and still fails a dead one quickly.
+ */
+export const CONNECTION_TIMEOUT_MS = 5_000;
+
+/**
+ * How long any one query may take before the driver gives up on it, in
+ * milliseconds. Enforced by the driver, not the database server.
+ *
+ * Every query this application makes is a single-row lookup or update on a
+ * small table, and the one migration creates a table and an index, so ten
+ * seconds is far beyond any of them. A query that times out rejects; the pool
+ * then discards that connection rather than lending it out again.
+ *
+ * MIGRATIONS SHARE THIS POOL AND THIS LIMIT. A future migration that rewrites a
+ * large table could need longer, and would need its own client with its own
+ * limit; none does today.
+ */
+export const QUERY_TIMEOUT_MS = 10_000;
+
+/** The options the shared pool is created with. Separate so they can be tested. */
+export function poolConfig(connectionString: string, nodeEnv: string | undefined = process.env.NODE_ENV): PoolConfig {
+  return {
+    connectionString,
+    max: MAX_CONNECTIONS,
+    ssl: nodeEnv === "production" ? { rejectUnauthorized: false } : undefined,
+    connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+    query_timeout: QUERY_TIMEOUT_MS,
+  };
+}
 
 let pool: Pool | null = null;
 
@@ -46,11 +84,7 @@ export function getPool(): Pool {
     );
   }
 
-  pool = new Pool({
-    connectionString,
-    max: MAX_CONNECTIONS,
-    ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
-  });
+  pool = new Pool(poolConfig(connectionString));
 
   return pool;
 }

@@ -77,6 +77,26 @@ export type LoginOutcome =
       readonly retryAfterSeconds?: number;
     };
 
+/** Said when a sign-in request is not sent as JSON. Status 415. */
+export const UNSUPPORTED_MEDIA_TYPE = "Sign-in requests must be sent as JSON.";
+export const UNSUPPORTED_MEDIA_TYPE_STATUS = 415;
+
+/**
+ * Whether the request says its body is JSON: `application/json`, in any case,
+ * with or without parameters such as `; charset=utf-8`.
+ *
+ * WHY IT MATTERS. An ordinary HTML form on any other site can post `text/plain`
+ * whose text happens to be valid JSON, and the body would parse; a form cannot
+ * send `application/json` at all, and a script on another site that tried would
+ * be stopped by the browser's cross-origin check first. Requiring it means a
+ * sign-in can only come from a page served by this application.
+ */
+export function isJsonRequest(request: Request): boolean {
+  const declared = request.headers.get("content-type");
+  if (declared === null) return false;
+  return declared.split(";")[0].trim().toLowerCase() === "application/json";
+}
+
 /** Only the two fields a sign-in form may send. Anything else is ignored. */
 function submitted(body: unknown): { email: string; password: string } {
   if (typeof body !== "object" || body === null) return { email: "", password: "" };
@@ -98,12 +118,20 @@ function submitted(body: unknown): { email: string; password: string } {
  * A MALFORMED BODY IS A REFUSAL, NOT A CRASH. Something posting nonsense to
  * this endpoint gets the same sentence as somebody with the wrong password,
  * because it is the same amount of "no".
+ *
+ * A BODY THAT IS NOT DECLARED AS JSON IS REFUSED FIRST, with 415, before the
+ * body is read: no caller is identified, no password is checked and no failure
+ * is counted, because nothing was attempted.
  */
 export async function loginRoute(
   request: Request,
   options: LoginOptions = {},
   now: number = Date.now(),
 ): Promise<LoginOutcome> {
+  if (!isJsonRequest(request)) {
+    return { ok: false, status: UNSUPPORTED_MEDIA_TYPE_STATUS, error: UNSUPPORTED_MEDIA_TYPE };
+  }
+
   let body: unknown;
   try {
     body = await request.json();
@@ -194,7 +222,27 @@ export function callerAddress(request: Request, trustProxy: boolean): string {
  * IT TOUCHES NOTHING ELSE. No audit job, no stored result, no report. Somebody
  * signing out and back in finds their audits exactly where they left them,
  * because this never had anything to do with them.
+ *
+ * NOT FROM ANOTHER SITE. A form on any other site could otherwise post here and
+ * sign somebody out without their asking. A browser says where a request came
+ * from in `Sec-Fetch-Site`; when it says anything but this application's own
+ * origin (`same-origin`) or the person themselves (`none`), the request is
+ * refused and the cookie is left alone. A request without the header -- an
+ * older browser, a tool -- is still allowed, so signing out never stops working
+ * for somebody whose browser does not send it. This is a nuisance guard for
+ * this one route, not a defence other endpoints may lean on.
  */
-export function logoutRoute(): { readonly cookie: string; readonly maxAgeSeconds: number } {
-  return { cookie: "", maxAgeSeconds: 0 };
+export const CROSS_SITE_LOGOUT = "Sign out from this application's own page.";
+export const CROSS_SITE_LOGOUT_STATUS = 403;
+
+export type LogoutOutcome =
+  | { readonly ok: true; readonly cookie: string; readonly maxAgeSeconds: number }
+  | { readonly ok: false; readonly status: number; readonly error: string };
+
+export function logoutRoute(request: Request): LogoutOutcome {
+  const site = request.headers.get("sec-fetch-site");
+  if (site !== null && site !== "same-origin" && site !== "none") {
+    return { ok: false, status: CROSS_SITE_LOGOUT_STATUS, error: CROSS_SITE_LOGOUT };
+  }
+  return { ok: true, cookie: "", maxAgeSeconds: 0 };
 }

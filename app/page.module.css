@@ -1938,41 +1938,70 @@ a.quickCard:hover {
   margin-bottom: 0.6rem;
 }
 
+/* Label/value tables: the measured facts, the certificate, the domain records
+   and the crawl details all use these. One outer border, quiet labels, values
+   in the heading colour, and alternate rows tinted instead of a rule under
+   every row. Presentation only -- every row is written by measurementsView. */
 .factList {
-  border: 1px solid #edf1f6;
-  border-radius: 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
   overflow: hidden;
 }
 
 .fact {
   display: grid;
-  grid-template-columns: 170px minmax(0, 1fr);
-  gap: 1rem;
-  padding: 0.6rem 0.9rem;
-  border-bottom: 1px solid #e8edf4;
+  grid-template-columns: minmax(8rem, 11rem) minmax(0, 1fr);
+  gap: 0.25rem 1.25rem;
+  padding: 0.7rem 1rem;
   font-size: 0.9rem;
+  line-height: 1.5;
 }
 
-.fact:last-child {
-  border-bottom: none;
+.fact:nth-child(even) {
+  background: var(--dash-hover);
 }
 
 .fact dt {
+  padding-top: 0.1rem;
+  font-size: 0.8rem;
+  font-weight: 500;
   color: #5b6779;
 }
 
 .fact dd {
   margin: 0;
-  /* Page titles and descriptions can be long or unbroken; never let them
-     push the layout sideways. */
+  font-weight: 500;
+  color: var(--dash-heading);
+  /* Page titles, SPF/DMARC records, issuers and redirect chains can be long
+     or unbroken; wrap them inside the column rather than push the layout
+     sideways. */
   overflow-wrap: anywhere;
 }
 
 .factNote {
   display: block;
+  margin-top: 0.2rem;
   font-size: 0.8rem;
+  font-weight: 400;
+  line-height: 1.45;
   color: #5b6779;
-  margin-top: 0.1rem;
+}
+
+/* A value the audit could not measure: shown as such, not as a result. */
+.factUnchecked {
+  font-style: italic;
+  font-weight: 400;
+}
+
+.fact dd.factUnchecked {
+  font-weight: 400;
+  color: #5b6779;
+}
+
+@media (prefers-color-scheme: dark) {
+  .fact dd.factUnchecked {
+    color: #9aa7be;
+  }
 }
 
 @media (max-width: 520px) {

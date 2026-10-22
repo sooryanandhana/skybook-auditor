@@ -67,6 +67,7 @@ import {
   findingsHeadline,
   groupSkippedByReason,
   headingCountText,
+  NOT_CHECKED,
   securityFacts,
   severityCounts,
   severityLabel,
@@ -865,7 +866,7 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
           */}
           <aside className={styles.dashSidebar} aria-label="Report sections">
             <nav className={styles.dashSideNav}>
-              <a className={`${styles.dashSideItem} ${styles.dashSideItemActive}`} href="#audit">
+              <a className={styles.dashSideItem} href="#audit">
                 <span className={styles.dashSideIcon}>{RUN_ICON}</span>
                 <span>New audit</span>
               </a>
@@ -873,7 +874,7 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
                 <span className={styles.dashSideIcon}>{OVERVIEW_ICON}</span>
                 <span>Audit summary</span>
               </a>
-              <a className={styles.dashSideItem} href="#results">
+              <a className={styles.dashSideItem} href="#findings">
                 <span className={styles.dashSideIcon}>{FINDINGS_ICON}</span>
                 <span>Findings</span>
               </a>
@@ -2230,7 +2231,9 @@ function Fact({ label, value, note }: { label: string; value: string; note?: str
   return (
     <div className={styles.fact}>
       <dt>{label}</dt>
-      <dd>
+      {/* Only the exact "could not be checked" value the report layer writes is
+          set apart; every other value is shown as measured. */}
+      <dd className={value === NOT_CHECKED ? styles.factUnchecked : undefined}>
         {value}
         {note && <span className={styles.factNote}>{note}</span>}
       </dd>

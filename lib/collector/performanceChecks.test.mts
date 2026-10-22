@@ -367,6 +367,62 @@ test("rejected address: a 400 says the address was rejected, not that the site i
   assert.match(result.message, /Speed was not measured/);
 });
 
+/**
+ * Google's reply to an invalid key: a 400 INVALID_ARGUMENT whose structured
+ * details name the reason. The same status a bad address gets.
+ */
+const INVALID_KEY_ERROR = {
+  error: {
+    code: 400,
+    message: "API key not valid. Please pass a valid API key.",
+    status: "INVALID_ARGUMENT",
+    details: [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        reason: "API_KEY_INVALID",
+        domain: "googleapis.com",
+        metadata: { service: "pagespeedonline.googleapis.com" },
+      },
+    ],
+  },
+};
+
+test("invalid key: a 400 Google marks API_KEY_INVALID blames the server's key, not the address", async () => {
+  const result = await run(INVALID_KEY_ERROR, { status: 400 });
+
+  assert.equal(result.status, "error");
+  assert.equal(result.failureReason, "api-error");
+  assert.match(result.message, /Speed was not measured/);
+  assert.match(result.message, /refused this server's API key/);
+  assert.doesNotMatch(result.message, /rejected this address/);
+});
+
+test("invalid key: the message never carries the key itself", async () => {
+  const key = "offline-test-key-not-a-real-credential";
+  const result = await run(INVALID_KEY_ERROR, { status: 400, apiKey: key });
+
+  assert.ok(!JSON.stringify(result).includes(key));
+});
+
+test("a 400 with some other reason still says the address was rejected", () => {
+  const otherReason = {
+    error: {
+      code: 400,
+      message: "Invalid value for url.",
+      details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "FIELD_INVALID" }],
+    },
+  };
+
+  assert.match(describeApiError(400, otherReason), /rejected this address/);
+  assert.match(describeApiError(400, { error: { code: 400, details: "API_KEY_INVALID" } }), /rejected this address/);
+  assert.match(describeApiError(400, null), /rejected this address/);
+});
+
+test("the key reason does not override a usage limit", () => {
+  const quotaWithKeyReason = { error: { code: 429, details: [{ reason: "API_KEY_INVALID" }] } };
+  assert.match(describeApiError(429, quotaWithKeyReason), /usage limit was reached/);
+});
+
 test("an error status with no readable body still explains itself", () => {
   assert.match(describeApiError(500, null), /returned an error \(500\)/);
   assert.match(describeApiError(500, null), /Speed was not measured/);

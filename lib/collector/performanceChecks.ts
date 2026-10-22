@@ -787,6 +787,25 @@ export function describeRequestError(error: unknown): string {
   return classifyRequestError(error).message;
 }
 
+/** Google's reason code for a key it does not accept. */
+const INVALID_KEY_REASON = "API_KEY_INVALID";
+
+/**
+ * Whether Google's error says, in its structured details, that the API key
+ * was rejected: `{"error":{"details":[{"reason":"API_KEY_INVALID", ...}]}}`.
+ *
+ * WHY IT MATTERS. Google answers an invalid key with a 400, the same status it
+ * uses for an address it will not test. Read by status alone, a misconfigured
+ * server key was reported as "rejected this address" -- in a report a client
+ * reads, a false statement about their website. Only Google's explicit reason
+ * counts, never a match on wording.
+ */
+function rejectsTheKey(error: Json | null): boolean {
+  const details = error?.details;
+  if (!Array.isArray(details)) return false;
+  return details.some((detail) => isObject(detail) && detail.reason === INVALID_KEY_REASON);
+}
+
 /** Pulls Google's own explanation out of an error response, when there is one. */
 export function describeApiError(status: number, body: unknown): string {
   const error = readObject(body, "error");
@@ -798,11 +817,13 @@ export function describeApiError(status: number, body: unknown): string {
   const headline =
     status === 429
       ? "Google's speed service refused the request because its usage limit was reached"
-      : status === 400
-        ? "Google's speed service rejected this address"
-        : status === 403
-          ? "Google's speed service refused the API key"
-          : `Google's speed service returned an error (${status})`;
+      : rejectsTheKey(error)
+        ? "Google's speed service refused this server's API key"
+        : status === 400
+          ? "Google's speed service rejected this address"
+          : status === 403
+            ? "Google's speed service refused the API key"
+            : `Google's speed service returned an error (${status})`;
 
   return detail
     ? `Speed was not measured: ${headline} — ${detail}`

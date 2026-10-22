@@ -17,7 +17,7 @@
  * a string chosen to be obviously fake.
  */
 import { strict as assert } from "node:assert";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import fs from "node:fs";
 import { AI_EXPLANATION_BUDGET_MS } from "../../budgets.ts";
 import { AI_CONTRACT_VERSION, type AIReportInput } from "../contract.ts";
@@ -25,6 +25,17 @@ import { explainAudit, type GeminiRequestClient } from "./explain.ts";
 import { SYSTEM_INSTRUCTION } from "./prompt.ts";
 import { resetGeminiClients } from "./client.ts";
 import { FIXTURE_RULE_IDS, HOSTILE, reportInput } from "./testInput.fixture.mts";
+import { keepAliveWhile } from "../../keepAlive.fixture.mts";
+
+/*
+ * The real fetch, put back after EVERY test. withStubbedFetch restores it in a
+ * `finally`, but a test that times out never reaches that `finally`, and the
+ * stub would otherwise stay installed for the rest of this file.
+ */
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
 
 const KEY = "test-key-not-a-real-credential";
 
@@ -787,16 +798,22 @@ test("a rejected key's sentence says the credentials were rejected", async () =>
   assert.doesNotMatch(result.message, /fault in this application/);
 });
 
-test("a request that never answers times out, once, and says so", async () => {
+test("a request that never answers times out, once, and says so", { timeout: 15_000 }, async () => {
   await withStubbedFetch(
     async (request) =>
-      new Promise<Response>((_resolve, reject) => {
-        // Rejects only when the SDK aborts it. If the deadline were not
-        // passed through, this test would hang rather than pass.
-        request.signal.addEventListener("abort", () =>
-          reject(request.signal.reason ?? new Error("aborted")),
-        );
-      }),
+      // The SDK's own timeout timer is unref'd; hold the process open while
+      // waiting. 16 s is longer than this test's 15 s limit (which is itself
+      // above the 10 s bound asserted below).
+      keepAliveWhile(
+        new Promise<Response>((_resolve, reject) => {
+          // Rejects only when the SDK aborts it. If the deadline were not
+          // passed through, this test would hang rather than pass.
+          request.signal.addEventListener("abort", () =>
+            reject(request.signal.reason ?? new Error("aborted")),
+          );
+        }),
+        16_000,
+      ),
     async (count) => {
       const started = Date.now();
       const input = deepFreeze(reportInput());

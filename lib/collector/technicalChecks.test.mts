@@ -17,7 +17,15 @@ import {
 import { createDeadline, type Deadline } from "./deadline.ts";
 import { fetchRobots, parseRobots, robotsMeasurement } from "./robots.ts";
 import type { TechnicalData } from "@/lib/types";
+import { keepAliveWhile } from "../keepAlive.fixture.mts";
 import fs from "node:fs";
+
+/** Hanging-request tests whose deadline is a few hundred milliseconds. */
+const QUICK_LIMIT = { timeout: 5_000 };
+/** The one test that waits out the checks' own ~10 s budget (it asserts < 12 s). */
+const OWN_BUDGET_LIMIT = { timeout: 20_000 };
+/** Longer than the largest limit above, so a test timeout reports a genuine hang. */
+const HANG_HOLD_MS = 21_000;
 
 test("detects a site blocking all crawlers", () => {
   assert.equal(blocksEveryCrawler("User-agent: *\nDisallow: /"), true);
@@ -120,7 +128,8 @@ function mockFetch(
 
 /** A request that never answers until the shared deadline aborts it. */
 function hangUntilAborted(init?: RequestInit): Promise<Response> {
-  return new Promise((_, reject) => {
+  // Held open while it hangs: the deadline's AbortSignal.timeout is unreferenced.
+  return keepAliveWhile(new Promise<Response>((_, reject) => {
     const signal = init?.signal;
     const fail = () => {
       const error = new Error("timed out");
@@ -130,7 +139,7 @@ function hangUntilAborted(init?: RequestInit): Promise<Response> {
     if (!signal) return;
     if (signal.aborted) return fail();
     signal.addEventListener("abort", fail);
-  });
+  }), HANG_HOLD_MS);
 }
 
 const notFound = async () => new Response("", { status: 404 });
@@ -161,7 +170,7 @@ async function runTechnicalChecks(
   return runTechnicalChecksImpl(pageUrl, robots, deadline);
 }
 
-test("all requests together stay inside ONE shared budget", async () => {
+test("all requests together stay inside ONE shared budget", QUICK_LIMIT, async () => {
   // Both robots.txt and sitemap.xml hang. With a per-request timeout this
   // would take two full budgets; with a shared one it takes a little over one.
   mockFetch((_method, _url, init) => hangUntilAborted(init));
@@ -182,7 +191,7 @@ test("all requests together stay inside ONE shared budget", async () => {
   assert.equal(result.sitemapUrl, null);
 });
 
-test("a timed-out HEAD does NOT trigger the GET fallback", async () => {
+test("a timed-out HEAD does NOT trigger the GET fallback", QUICK_LIMIT, async () => {
   // This doubling is what made a single audit take twenty seconds.
   mockFetch(async (_method, url, init) => {
     if (url.endsWith("/robots.txt")) return notFound();
@@ -278,7 +287,7 @@ test("a site blocking all crawlers is still detected", async () => {
   assert.equal(result.robotsBlocksEverything, true);
 });
 
-test("a slow robots.txt leaves less time for the sitemap, not a fresh budget", async () => {
+test("a slow robots.txt leaves less time for the sitemap, not a fresh budget", QUICK_LIMIT, async () => {
   // The point of a shared clock: time spent early is time no longer available.
   mockFetch(async (_method, url, init) => {
     if (url.endsWith("/robots.txt")) return hangUntilAborted(init);
@@ -296,7 +305,7 @@ test("a slow robots.txt leaves less time for the sitemap, not a fresh budget", a
   );
 });
 
-test("given the audit's clock, the checks still keep their OWN budget", async () => {
+test("given the audit's clock, the checks still keep their OWN budget", OWN_BUDGET_LIMIT, async () => {
   // Handing these checks the audit's deadline must not let them use all the
   // time the page fetch did not. Their ten-second limit still applies.
   mockFetch(async (_method, _url, init) => hangUntilAborted(init));
@@ -321,7 +330,7 @@ test("given the audit's clock, the checks still keep their OWN budget", async ()
   assert.ok(auditDeadline.remainingMs() > 15_000, "the audit should still have time left");
 });
 
-test("the checks stop early when the audit's clock runs out first", async () => {
+test("the checks stop early when the audit's clock runs out first", QUICK_LIMIT, async () => {
   mockFetch(async (_method, _url, init) => hangUntilAborted(init));
 
   const nearlySpent = createDeadline(150);
@@ -403,7 +412,7 @@ test("a 403 is UNAVAILABLE, not absent", async () => {
   assert.equal((await runTechnicalChecks(PAGE, 5_000)).robotsTxtStatus, "unavailable");
 });
 
-test("a timeout is UNAVAILABLE", async () => {
+test("a timeout is UNAVAILABLE", QUICK_LIMIT, async () => {
   mockFetch((_method, _url, init) => hangUntilAborted(init));
 
   assert.equal((await runTechnicalChecks(PAGE, 200)).robotsTxtStatus, "unavailable");

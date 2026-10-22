@@ -11,6 +11,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { capDeadline, createDeadline } from "./deadline.ts";
+import { keepAliveWhile } from "../keepAlive.fixture.mts";
+
+/** A wait on a deadline's own (unreferenced) signal fails as a timeout, not a hang. */
+const WAIT_LIMIT = { timeout: 5_000 };
+/** Longer than WAIT_LIMIT, so the test's timeout is what reports a genuine hang. */
+const HOLD_MS = 6_000;
 
 test("reports time remaining, counting down", async () => {
   const deadline = createDeadline(200);
@@ -46,7 +52,7 @@ test("a per-request cap applies when it is shorter than the budget", () => {
   assert.equal(signal.aborted, false);
 });
 
-test("the shared budget wins when it is shorter than the cap", async () => {
+test("the shared budget wins when it is shorter than the cap", WAIT_LIMIT, async () => {
   // The point of sharing a clock: a late request gets what is left, not a
   // fresh allowance.
   const deadline = createDeadline(60);
@@ -54,7 +60,7 @@ test("the shared budget wins when it is shorter than the cap", async () => {
 
   const startedAt = Date.now();
   const signal = deadline.signal(10_000);
-  await new Promise((resolve) => signal.addEventListener("abort", resolve));
+  await keepAliveWhile(new Promise((resolve) => signal.addEventListener("abort", resolve)), HOLD_MS);
 
   assert.ok(
     Date.now() - startedAt < 200,
@@ -62,14 +68,14 @@ test("the shared budget wins when it is shorter than the cap", async () => {
   );
 });
 
-test("an already-expired deadline still produces a usable signal", async () => {
+test("an already-expired deadline still produces a usable signal", WAIT_LIMIT, async () => {
   // A zero-length timeout would abort before the request is even sent, which
   // looks like a network failure rather than a timeout.
   const deadline = createDeadline(0);
   const signal = deadline.signal();
   assert.equal(signal.aborted, false, "must not be aborted before it is used");
 
-  await new Promise((resolve) => signal.addEventListener("abort", resolve));
+  await keepAliveWhile(new Promise((resolve) => signal.addEventListener("abort", resolve)), HOLD_MS);
   assert.equal(signal.aborted, true);
 });
 

@@ -15,6 +15,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import fs from "node:fs";
+import { keepAliveWhile } from "../keepAlive.fixture.mts";
 import { codeOnly } from "./provider.test.mts";
 import {
   RESEND_API_KEY_VARIABLE,
@@ -227,11 +228,16 @@ test("a connection that fails or hangs is a network failure, with nothing quoted
   assert.ok(!JSON.stringify(outcome).includes("ECONNREFUSED"), "the address is not quoted");
 });
 
-test("a request that times out is a network failure rather than a hang", async () => {
+test("a request that times out is a network failure rather than a hang", { timeout: 5_000 }, async () => {
   const hangs = (async (_input: RequestInfo | URL, init?: RequestInit) =>
-    new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-    })) as unknown as typeof fetch;
+    // Held open while it hangs: the provider's AbortSignal.timeout is unreferenced.
+    // 6 s is longer than this test's 5 s limit, so a hang is reported as a timeout.
+    keepAliveWhile(
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      }),
+      6_000,
+    )) as unknown as typeof fetch;
 
   const outcome = await resendProvider({ apiKey: KEY, fetchImpl: hangs, timeoutMs: 20 }).send(EMAIL);
 

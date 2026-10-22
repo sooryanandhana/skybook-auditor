@@ -10,6 +10,14 @@ import { PerformancePanel } from "./PerformancePanel";
 import { ReportDownload } from "./ReportDownload";
 import { ScoreDashboard } from "./ScoreDashboard";
 import {
+  AiCommentaryCard,
+  AuditStepper,
+  LatestAuditCard,
+  PriorityFixes,
+  QuickLinks,
+  type AuditPhase,
+} from "./DashboardPanels";
+import {
   SKIPPED_HEADING,
   SKIPPED_INTRO,
   findingsState,
@@ -36,7 +44,7 @@ import {
 } from "@/lib/report/siteFindingsView";
 import { MAX_EXPLAINED_FINDINGS } from "@/lib/ai/contract";
 import { exportableJobId } from "@/lib/report/pdfExport";
-import { withoutCredentials } from "@/lib/collector/url";
+import { normalizeUrl, withoutCredentials } from "@/lib/collector/url";
 import {
   AI_EXPLANATION_LABEL,
   AI_IMPACT_LABEL,
@@ -162,6 +170,24 @@ const TEAM_ICON = (
     <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
     <circle cx="9" cy="7" r="4" />
     <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+  </svg>
+);
+
+/** The magnifier inside the address box. */
+const SEARCH_ICON = (
+  <svg
+    width="18"
+    height="18"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <circle cx="11" cy="11" r="7" />
+    <path d="M21 21l-4.3-4.3" />
   </svg>
 );
 
@@ -688,98 +714,106 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
    */
   const reportJobId = exportableJobId(jobId, result !== null || certificateFailure !== null);
 
+  /*
+   * THE AT-A-GLANCE PANELS read only what this page already holds: the job's
+   * status, the server's score and graded findings, and the explanation the
+   * server returned. Nothing below decides a severity or a grade.
+   */
+  const hasResults = result !== null || certificateFailure !== null;
+  const phase: AuditPhase = isLoading
+    ? jobStatus === "queued"
+      ? "queued"
+      : "running"
+    : hasResults
+      ? "done"
+      : error !== null
+        ? "failed"
+        : "idle";
+  const panelFindings: Finding[] =
+    result !== null
+      ? [...(siteResult?.site.findings ?? result.findings), ...performanceFindings]
+      : (certificateFailure?.site.findings ?? []);
+  /*
+   * While the audit runs, the address as typed -- normalised the way the audit
+   * normalises it, so a bare `user:pass@site.com` parses, then stripped of any
+   * username and password before it is shown.
+   */
+  const typed = normalizeUrl(url);
+  const runningUrl = typed.ok ? withoutCredentials(typed.url.toString()) : null;
+  const panelScore = siteResult?.score ?? certificateFailure?.score ?? null;
+  /*
+   * Which report sections are on the page, read from the same conditions that
+   * render them: the score dashboard needs a score (and, for a reachable site,
+   * the site results it is read from); the report card needs a report job.
+   */
+  const summaryReady = result !== null ? Boolean(siteResult?.score) : Boolean(certificateFailure?.score);
+  const reportReady = hasResults && reportJobId !== null;
+  const auditedUrl =
+    result !== null
+      ? withoutCredentials(result.fetch.finalUrl)
+      : certificateFailure !== null
+        ? withoutCredentials(certificateFailure.failedUrl)
+        : null;
+
   return (
-    <div className={styles.shell}>
+    <div className={styles.dash}>
       {/*
-        The sidebar rail. Presentation only: the Skybook logo, a wordmark, and
-        a small nav whose links jump to sections that already exist on the page.
-        It measures nothing and decides nothing.
+        The top bar: the Skybook mark, links to sections that already exist on
+        the page, and the one Sign out control. Presentation only.
       */}
-      <aside className={styles.sidebar}>
-        <div className={styles.sidebarBrand}>
+      <header className={styles.dashTopNav}>
+        <a className={styles.dashBrand} href="#audit">
           {/*
-            The logo file has ~77% empty padding around it, and stacks the icon
-            above the wordmark and tagline. We show only the icon here by
-            scaling the image up inside a fixed-size box that hides the overflow.
-            The crop values come from measuring the file's actual content bounds.
+            The official full-colour icon on the light page, the white one on
+            the dark page. <picture> picks one, so only that file is fetched;
+            the CSS gives each its own crop inside the same frame.
           */}
           <span className={styles.logoMark} aria-hidden="true">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/skybook-digital-logo-white.png" alt="" className={styles.logoImg} />
+            <picture>
+              <source media="(prefers-color-scheme: dark)" srcSet="/skybook-digital-logo-white.png" />
+              <img src="/skybook-digital.jpg.jpeg" alt="" className={styles.dashLogoImg} />
+            </picture>
           </span>
-          <span className={styles.sidebarWordmark}>Skybook</span>
-        </div>
+          <span className={styles.dashBrandName}>
+            Skybook <span className={styles.dashBrandProduct}>Website Audit</span>
+          </span>
+        </a>
 
-        <nav className={styles.nav} aria-label="Dashboard sections">
-          <a className={`${styles.navItem} ${styles.navItemActive}`} href="#overview">
-            <span className={styles.navIcon}>{OVERVIEW_ICON}</span>
-            <span>Overview</span>
-          </a>
-          <a className={styles.navItem} href="#results">
-            <span className={styles.navIcon}>{FINDINGS_ICON}</span>
-            <span>Findings</span>
-          </a>
-          <a className={styles.navItem} href="#audit">
-            <span className={styles.navIcon}>{RUN_ICON}</span>
-            <span>New audit</span>
-          </a>
+        <div className={styles.dashTopActions}>
           {/*
-            Management only, and the one role-aware element on this page. A real
-            link (not a button) because it navigates; it reuses the nav item's
-            own styles, so it collapses to an icon at ≤1024px and sits in the
-            top row at ≤720px exactly as the section links do. Hidden entirely
-            for SALES — the destination is also guarded server-side regardless.
+            Management only, and the one role-aware element on this page. The
+            destination is guarded on the server regardless; this link's
+            presence decides nothing.
           */}
           {isManagement && (
-            <a className={styles.navItem} href="/users">
-              <span className={styles.navIcon}>{TEAM_ICON}</span>
-              <span>Team accounts</span>
+            <a className={styles.dashTopLink} href="/users">
+              Team accounts
             </a>
           )}
-        </nav>
-
-        {/*
-          Bottom of the rail: the product label and the one and only Sign out
-          control. It stays pinned to the bottom of the fixed sidebar while the
-          content scrolls, and reuses the existing SignOut handler unchanged.
-        */}
-        <div className={styles.sidebarFooter}>
-          <p className={styles.sidebarFoot}>Website Auditor</p>
           <SignOut />
         </div>
-      </aside>
+      </header>
 
-      <div className={styles.workspace}>
-        <main className={styles.main}>
-          {/*
-            The Website Audit header is one card at the top of the content
-            column: the eyebrow, heading and description, an "audit ready" status
-            pill, and the audit controls (address + Run Audit + the PageSpeed
-            opt-in). Same elements and handlers as before — only the frame
-            changed, so it aligns with the cards below.
-          */}
-          <header id="audit" className={styles.topbar}>
-            <div className={styles.topbarHead}>
-              <div className={styles.topbarTitles}>
-                <p className={styles.brand}>Skybook</p>
-                <h1 className={styles.title}>Website Audit</h1>
-                <p className={styles.subtitle}>
-                  Enter a website address to check its speed, SEO, security, and technical health.
-                </p>
-              </div>
-              <div className={styles.topbarActions}>
-                {/* A static readiness indicator for the header — presentation
-                    only; it reflects that the tool is ready, not audit state. */}
-                <span className={styles.statusPill}>
-                  <span className={styles.statusDot} aria-hidden="true" />
-                  Audit ready
-                </span>
-              </div>
-            </div>
+      <main className={styles.dashPage}>
+        {/*
+          The welcome heading and the audit controls: the address box, Run Audit
+          and the PageSpeed opt-in. Same elements and handlers as before; only
+          the frame changed.
+        */}
+        <section id="audit" className={styles.dashHero} aria-labelledby="dash-title">
+          <h1 id="dash-title" className={styles.dashTitle}>
+            Welcome to Skybook Website Audit
+          </h1>
+          <p className={styles.dashLead}>
+            Enter a website address to check its speed, SEO, security, and technical health.
+          </p>
 
-          <form className={styles.form} onSubmit={handleSubmit}>
+          <form className={styles.dashSearch} onSubmit={handleSubmit}>
+            <span className={styles.dashSearchIcon} aria-hidden="true">
+              {SEARCH_ICON}
+            </span>
             <input
-              className={styles.input}
+              className={styles.dashSearchInput}
               type="text"
               value={url}
               onChange={(event) => setUrl(event.target.value)}
@@ -787,7 +821,11 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
               aria-label="Website address"
               disabled={isLoading}
             />
-            <button className={styles.button} type="submit" disabled={isLoading || !url.trim()}>
+            <button
+              className={`${styles.button} ${styles.dashSearchButton}`}
+              type="submit"
+              disabled={isLoading || !url.trim()}
+            >
               {isLoading ? "Checking…" : "Run Audit"}
             </button>
           </form>
@@ -797,7 +835,7 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
             tool does, so the cost is on the label rather than discovered after the
             button is pressed.
           */}
-          <label className={styles.toggle}>
+          <label className={`${styles.toggle} ${styles.dashToggle}`}>
             <input
               type="checkbox"
               checked={includePerformance}
@@ -812,86 +850,147 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
               </span>
             </span>
           </label>
-          </header>
 
-          {/*
-            A statement of how the report is produced, not a caveat about it —
-            hence the plain subtitle style rather than the amber notice box that
-            carried the old "rules still being written" warning. It sits below
-            the header card, as its own line, so the two read as separate.
-          */}
-          <p className={styles.subtitle}>
+          {/* How the report is produced: a statement, not a caveat. */}
+          <p className={styles.dashNotice}>
             This report is generated from deterministic website checks.
             Recommendations are based on measured results.
           </p>
+        </section>
 
-      {isLoading && <AuditProgress />}
+        <div className={styles.dashBody}>
+          {/*
+            The section list. Each link jumps to a part of the report that the
+            page already renders; it measures nothing and decides nothing.
+          */}
+          <aside className={styles.dashSidebar} aria-label="Report sections">
+            <nav className={styles.dashSideNav}>
+              <a className={`${styles.dashSideItem} ${styles.dashSideItemActive}`} href="#audit">
+                <span className={styles.dashSideIcon}>{RUN_ICON}</span>
+                <span>New audit</span>
+              </a>
+              <a className={styles.dashSideItem} href="#overview">
+                <span className={styles.dashSideIcon}>{OVERVIEW_ICON}</span>
+                <span>Audit summary</span>
+              </a>
+              <a className={styles.dashSideItem} href="#results">
+                <span className={styles.dashSideIcon}>{FINDINGS_ICON}</span>
+                <span>Findings</span>
+              </a>
+              {isManagement && (
+                <a className={styles.dashSideItem} href="/users">
+                  <span className={styles.dashSideIcon}>{TEAM_ICON}</span>
+                  <span>Team accounts</span>
+                </a>
+              )}
+            </nav>
+            <div className={styles.dashSideFooter}>
+              {/* A static readiness indicator — presentation only. */}
+              <span className={styles.statusPill}>
+                <span className={styles.statusDot} aria-hidden="true" />
+                Audit ready
+              </span>
+              <p className={styles.dashSideFoot}>Website Auditor</p>
+            </div>
+          </aside>
 
-      {/*
-        Counts, never a percentage. A crawl discovers more of a site as it
-        reads it, so there is no denominator that would make a percentage
-        true — "12 of 40 discovered" is a fact, "30% complete" is a guess.
-      */}
-      {isLoading && progress !== null && (
-        <p className={styles.progressLine} role="status">
-          {jobStatus === "queued"
-            ? "Waiting for an available audit slot…"
-            : `${progress.evaluated} of ${progress.discovered} pages read` +
-              (progress.queued > 0 ? ` · ${progress.queued} waiting` : "") +
-              (progress.unavailable > 0
-                ? ` · ${progress.unavailable} could not be read`
-                : "") +
-              (progress.robotsExcluded > 0
-                ? ` · ${progress.robotsExcluded} excluded by robots.txt`
-                : "")}
-        </p>
-      )}
+          <div className={styles.dashMain}>
+            <QuickLinks
+              grade={panelScore?.grade ?? null}
+              passRate={panelScore?.passRate ?? null}
+              issueCount={panelFindings.filter((finding) => finding.severity !== "good").length}
+              hasResults={hasResults}
+              summaryReady={summaryReady}
+              reportReady={reportReady}
+            />
 
-      {/*
-        A crawl that stopped at a limit is not a whole-site audit, and the
-        report must say so rather than letting the reader assume otherwise.
-        This is state, not a finding: it carries no severity, because a limit
-        we imposed is not a fault of the website.
-      */}
-      {siteResult !== null && (
-        <CrawlSummary crawl={siteResult.crawl} />
-      )}
+            <AuditStepper phase={phase} auditedUrl={isLoading ? runningUrl : auditedUrl} />
 
-      {error && (
-        <div className={styles.error}>
-          <p>{error}</p>
-          {/* We couldn't audit the page, but we did reach the server —
-              show what was genuinely measured rather than discarding it. */}
-          {errorUptime && (
-            <p className={styles.errorDetail}>
-              The server did respond ({errorUptime.statusCode}) in{" "}
-              {errorUptime.serverResponseTimeMs} ms, so the site itself is reachable.
-            </p>
-          )}
+            {isLoading && <AuditProgress />}
+
+            {/*
+              Counts, never a percentage. A crawl discovers more of a site as it
+              reads it, so there is no denominator that would make a percentage
+              true — "12 of 40 discovered" is a fact, "30% complete" is a guess.
+            */}
+            {isLoading && progress !== null && (
+              <p className={styles.progressLine} role="status">
+                {jobStatus === "queued"
+                  ? "Waiting for an available audit slot…"
+                  : `${progress.evaluated} of ${progress.discovered} pages read` +
+                    (progress.queued > 0 ? ` · ${progress.queued} waiting` : "") +
+                    (progress.unavailable > 0
+                      ? ` · ${progress.unavailable} could not be read`
+                      : "") +
+                    (progress.robotsExcluded > 0
+                      ? ` · ${progress.robotsExcluded} excluded by robots.txt`
+                      : "")}
+              </p>
+            )}
+
+            <PriorityFixes findings={panelFindings} hasResults={hasResults} />
+          </div>
+
+          <aside className={styles.dashRail} aria-label="Audit at a glance">
+            <AiCommentaryCard
+              answer={explanation}
+              running={explanationRunning}
+              hasResults={result !== null}
+            />
+            <LatestAuditCard
+              url={auditedUrl}
+              checkedAt={result?.website.checkedAt ?? certificateFailure?.website.checkedAt ?? null}
+              statusCode={result?.uptime.statusCode ?? null}
+              serverResponseMs={result?.uptime.serverResponseTimeMs ?? null}
+              pagesRead={siteResult?.crawl.evaluated ?? null}
+            />
+          </aside>
+
+          <div className={styles.dashResults}>
+            {/*
+              A crawl that stopped at a limit is not a whole-site audit, and the
+              report must say so rather than letting the reader assume otherwise.
+              This is state, not a finding: it carries no severity, because a limit
+              we imposed is not a fault of the website.
+            */}
+            {siteResult !== null && <CrawlSummary crawl={siteResult.crawl} />}
+
+            {error && (
+              <div className={styles.error}>
+                <p>{error}</p>
+                {/* We couldn't audit the page, but we did reach the server —
+                    show what was genuinely measured rather than discarding it. */}
+                {errorUptime && (
+                  <p className={styles.errorDetail}>
+                    The server did respond ({errorUptime.statusCode}) in{" "}
+                    {errorUptime.serverResponseTimeMs} ms, so the site itself is reachable.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {certificateFailure !== null && (
+              <CertificateFailureResults audit={certificateFailure} reportJobId={reportJobId} />
+            )}
+
+            {result && (
+              <Results
+                data={result}
+                siteResult={siteResult}
+                performance={performance}
+                performanceRunning={performanceRunning}
+                performanceFindings={performanceFindings}
+                performanceSkipped={performanceSkipped}
+                performanceDesktop={performanceDesktop}
+                performanceDesktopRunning={performanceDesktopRunning}
+                explanation={explanation}
+                explanationRunning={explanationRunning}
+                reportJobId={reportJobId}
+              />
+            )}
+          </div>
         </div>
-      )}
-
-      {certificateFailure !== null && (
-        <CertificateFailureResults audit={certificateFailure} reportJobId={reportJobId} />
-      )}
-
-      {result && (
-        <Results
-          data={result}
-          siteResult={siteResult}
-          performance={performance}
-          performanceRunning={performanceRunning}
-          performanceFindings={performanceFindings}
-          performanceSkipped={performanceSkipped}
-          performanceDesktop={performanceDesktop}
-          performanceDesktopRunning={performanceDesktopRunning}
-          explanation={explanation}
-          explanationRunning={explanationRunning}
-          reportJobId={reportJobId}
-        />
-      )}
-        </main>
-      </div>
+      </main>
     </div>
   );
 }
@@ -1437,7 +1536,8 @@ function FindingsSection({
         app has no "Low" severity, so the fifth card is the real fourth
         severity, "Good".
       */}
-      <div className={styles.findingsSummary}>
+      {/* The Findings shortcut lands here, at the top of the findings. */}
+      <div id="findings" className={styles.findingsSummary}>
         <div className={styles.findingsSummaryCard}>
           <span className={styles.findingsSummaryCount}>{findings.length}</span>
           <span className={styles.findingsSummaryLabel}>Total findings</span>

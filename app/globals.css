@@ -23,6 +23,23 @@
   --card-shadow: 0 1px 2px rgba(22, 32, 46, 0.04);
   --ai-bg: #f7faff;
   --ai-border: #e2e9f5;
+
+  /* The dashboard canvas: a pale page with a soft Skybook-blue glow at the
+     top, dark slate text, and a slightly lifted card shadow. */
+  --dash-canvas: #f4f7fb;
+  --dash-glow-a: rgba(5, 162, 228, 0.16);
+  --dash-glow-b: rgba(38, 74, 154, 0.10);
+  --dash-heading: #16202e;
+  --dash-text: #2c3a4d;
+  --dash-muted: #66748a;
+  --dash-placeholder: #9aa6b8;
+  --dash-hover: #f1f5fa;
+  --dash-active: #e7f1fb;
+  --dash-track: #e3e8ef;
+  --dash-focus-ring: rgba(20, 122, 195, 0.18);
+  --dash-shadow: 0 8px 24px rgba(16, 24, 40, 0.06);
+  --dash-shadow-sm: 0 2px 6px rgba(16, 24, 40, 0.06);
+  --dash-shadow-lift: 0 14px 32px rgba(16, 24, 40, 0.1);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -42,6 +59,21 @@
     --card-shadow: none;
     --ai-bg: #121b2b;
     --ai-border: #26344a;
+
+    --dash-canvas: #0b111a;
+    --dash-glow-a: rgba(5, 162, 228, 0.14);
+    --dash-glow-b: rgba(38, 74, 154, 0.18);
+    --dash-heading: #f1f5fb;
+    --dash-text: #c9d3e1;
+    --dash-muted: #8b97aa;
+    --dash-placeholder: #6b7789;
+    --dash-hover: #18212f;
+    --dash-active: #172a40;
+    --dash-track: #232c3d;
+    --dash-focus-ring: rgba(63, 159, 220, 0.25);
+    --dash-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    --dash-shadow-sm: none;
+    --dash-shadow-lift: 0 14px 32px rgba(0, 0, 0, 0.35);
   }
 }
 
@@ -52,7 +84,13 @@ html {
 html,
 body {
   max-width: 100vw;
+  /* "clip" cuts off sideways overflow exactly as "hidden" did, but without
+     turning <body> into a scroll container -- which is what stopped the
+     dashboard sidebar from staying in view. Browsers without "clip" (Safari
+     before 16) keep the "hidden" line above it and simply lose the sticky
+     sidebar, as before. */
   overflow-x: hidden;
+  overflow-x: clip;
 }
 
 body {

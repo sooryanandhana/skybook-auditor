@@ -65,65 +65,101 @@ export default function LoginPage() {
     }
   }
 
+  /*
+   * THE LAYOUT IS PRESENTATION ONLY: a Skybook-blue welcome panel and a white
+   * form panel. The form, its fields, the request it sends and the sentence it
+   * shows on a refusal are exactly as above. There is no social sign-in, no
+   * "remember me" and no self-service reset because the server offers none; a
+   * forgotten password is reset by a manager on the Team Accounts page.
+   */
   return (
-    <main className={styles.main}>
-      <header className={styles.header}>
-        <div className={styles.brandRow}>
-          <span className={styles.logoMark} aria-hidden="true">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/skybook-digital-logo-white.png" alt="" className={styles.logoImg} />
+    <main className={styles.auth}>
+      <div className={styles.authCard}>
+        <section className={styles.authBrand}>
+          <div className={styles.authLogo}>
+            {/* The icon is Skybook blue, so it sits on a white badge to read on the blue panel. */}
+            <span className={styles.authLogoTile} aria-hidden="true">
+              <span className={styles.logoMark}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src="/skybook-digital-logo-white.png" alt="" className={styles.logoImg} />
+              </span>
+            </span>
+            <span className={styles.authLogoText}>
+              Skybook <span className={styles.authLogoProduct}>Website Audit</span>
+            </span>
+          </div>
+
+          <span className={styles.authWatermark} aria-hidden="true">
+            Sign in
           </span>
-          <p className={styles.brand}>Skybook</p>
-        </div>
-        <h1 className={styles.title}>Sign in</h1>
-        <p className={styles.subtitle}>The website audit tool is for Skybook staff.</p>
-      </header>
 
-      <form className={styles.signIn} onSubmit={handleSubmit}>
-        <label className={styles.sendField}>
-          <span className={styles.exportLabel}>Email address</span>
-          <input
-            className={styles.exportInput}
-            type="email"
-            name="email"
-            autoComplete="username"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            disabled={busy}
-            required
-          />
-        </label>
+          <div className={styles.authWelcome}>
+            <p className={styles.authWelcomeTitle}>Welcome back</p>
+            <p className={styles.authWelcomeText}>
+              The website audit tool is for Skybook staff. Check a website&rsquo;s speed, SEO,
+              security, and technical health.
+            </p>
+          </div>
+        </section>
 
-        <label className={styles.sendField}>
-          <span className={styles.exportLabel}>Password</span>
-          <input
-            className={styles.exportInput}
-            type="password"
-            name="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            disabled={busy}
-            required
-          />
-        </label>
+        <section className={styles.authFormSide}>
+          <span className={styles.authOrbTop} aria-hidden="true" />
+          <span className={styles.authOrbBottom} aria-hidden="true" />
 
-        <div>
-          <button className={styles.button} type="submit" disabled={busy}>
-            {busy ? "Signing in…" : "Sign in"}
-          </button>
-        </div>
+          <div className={styles.authPanel}>
+            <h1 className={styles.authTitle}>Sign in</h1>
 
-        <p className={styles.exportHint}>
-          Need an account? <a href="/register">Request one</a>
-        </p>
+            <form className={styles.authForm} onSubmit={handleSubmit}>
+              <label className={styles.authField}>
+                <span className={styles.authLabel}>Email address</span>
+                <input
+                  className={styles.authInput}
+                  type="email"
+                  name="email"
+                  autoComplete="username"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  disabled={busy}
+                  required
+                />
+              </label>
 
-        {problem !== null && (
-          <p className={styles.exportProblem} role="alert">
-            {problem}
-          </p>
-        )}
-      </form>
+              <label className={styles.authField}>
+                <span className={styles.authLabel}>Password</span>
+                <input
+                  className={styles.authInput}
+                  type="password"
+                  name="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  disabled={busy}
+                  required
+                />
+              </label>
+
+              <p className={styles.authNote}>Forgot your password? Ask a manager to set a new one.</p>
+
+              <button className={`${styles.button} ${styles.authSubmit}`} type="submit" disabled={busy}>
+                {busy ? "Signing in…" : "Sign in"}
+              </button>
+
+              {problem !== null && (
+                <p className={styles.authProblem} role="alert">
+                  {problem}
+                </p>
+              )}
+
+              <p className={styles.authNote}>
+                Need an account?{" "}
+                <a className={styles.authLink} href="/register">
+                  Request one
+                </a>
+              </p>
+            </form>
+          </div>
+        </section>
+      </div>
     </main>
   );
 }

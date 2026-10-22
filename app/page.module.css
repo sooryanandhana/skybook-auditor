@@ -3966,3 +3966,373 @@ a.quickCard:hover {
     border-color: #315a7d;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Sign-in and account-request pages
+
+   One frame for both: a large rounded card on the dashboard's pale Skybook
+   canvas, split into a Skybook-blue welcome panel and a white form panel.
+   Presentation only -- every class here is used by app/login and app/register
+   and nothing else, and no shared rule above is changed. The logo crop reuses
+   .logoMark/.logoImg and the submit button builds on .button.
+   --------------------------------------------------------------------------- */
+
+.auth {
+  flex: 1;
+  width: 100%;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2.5rem 1.5rem;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  color: var(--dash-text);
+  background:
+    radial-gradient(1100px 420px at 50% -120px, var(--dash-glow-a), transparent 70%),
+    radial-gradient(700px 360px at 85% -60px, var(--dash-glow-b), transparent 70%),
+    var(--dash-canvas);
+}
+
+.authCard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  width: 100%;
+  max-width: 1080px;
+  min-height: 600px;
+  overflow: hidden;
+  background: var(--card-bg);
+  border-radius: 28px;
+  box-shadow: 0 30px 80px rgba(16, 24, 40, 0.14);
+}
+
+/* ---------- The welcome panel ---------- */
+
+.authBrand {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  padding: 2.75rem 3.25rem;
+  overflow: hidden;
+  color: #ffffff;
+  background: linear-gradient(155deg, var(--skybook-deep) 0%, #1f5aa8 55%, var(--skybook-mid) 100%);
+}
+
+.authLogo {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.authLogoTile {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 4px 14px rgba(10, 30, 70, 0.25);
+}
+
+.authLogoTile .logoMark {
+  height: 24px;
+}
+
+.authLogoText {
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.authLogoProduct {
+  font-weight: 500;
+  opacity: 0.8;
+}
+
+/* The large, faint vertical word behind the welcome text. Decoration only. */
+.authWatermark {
+  position: absolute;
+  left: 1.75rem;
+  bottom: 2.25rem;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: clamp(5rem, 9vw, 8rem);
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.07);
+  pointer-events: none;
+  user-select: none;
+}
+
+.authWelcome {
+  position: relative;
+  z-index: 1;
+  margin: auto 0;
+}
+
+.authWelcomeTitle {
+  font-size: clamp(2.2rem, 4vw, 3.2rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.authWelcomeText {
+  margin-top: 1.1rem;
+  max-width: 36ch;
+  font-size: 0.98rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+/* ---------- The form panel ---------- */
+
+.authFormSide {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 2.5rem;
+  overflow: hidden;
+  background: var(--card-bg);
+}
+
+/* Two soft circles behind the form card. Decoration only. */
+.authOrbTop,
+.authOrbBottom {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.authOrbTop {
+  top: -90px;
+  left: -70px;
+  width: 220px;
+  height: 220px;
+  background: rgba(5, 162, 228, 0.12);
+}
+
+.authOrbBottom {
+  right: -80px;
+  bottom: -90px;
+  width: 240px;
+  height: 240px;
+  background: rgba(38, 74, 154, 0.14);
+}
+
+.authPanel {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 400px;
+  padding: 2.75rem 2.5rem;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 20px;
+  box-shadow: var(--dash-shadow);
+}
+
+.authTitle {
+  margin-bottom: 1.75rem;
+  font-size: 1.6rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--dash-heading);
+}
+
+.authForm {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.authField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.authLabel {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--dash-text);
+}
+
+.authInput {
+  width: 100%;
+  padding: 0.8rem 0.95rem;
+  font-size: 0.95rem;
+  font-family: inherit;
+  color: var(--dash-heading);
+  background: var(--dash-hover);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+}
+
+.authInput:focus-visible {
+  outline: none;
+  background: var(--card-bg);
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--dash-focus-ring);
+}
+
+.authInput:disabled {
+  opacity: 0.65;
+}
+
+.authSubmit {
+  align-self: center;
+  min-width: 170px;
+  margin-top: 0.4rem;
+  padding: 0.8rem 2rem;
+  border-radius: 999px;
+}
+
+.authSubmit:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+.authSubmit:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+}
+
+.authNote {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--dash-muted);
+}
+
+.authLink {
+  font-weight: 600;
+  color: var(--brand);
+}
+
+.authLink:hover {
+  text-decoration: underline;
+}
+
+.authLink:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.authProblem,
+.authDone {
+  padding: 0.75rem 0.95rem;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  border-radius: 10px;
+  border: 1px solid;
+}
+
+.authProblem {
+  color: #8f2a24;
+  background: #fbeceb;
+  border-color: #efc4bf;
+}
+
+.authDone {
+  color: #2f6b41;
+  background: #e6f3e9;
+  border-color: #bfe0c8;
+}
+
+@media (prefers-color-scheme: dark) {
+  .authCard {
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+  }
+
+  .authProblem {
+    color: #f3b8b2;
+    background: #2a1717;
+    border-color: #5a2a26;
+  }
+
+  .authDone {
+    color: #a9dfb7;
+    background: #13261a;
+    border-color: #2c5338;
+  }
+}
+
+/* Tablet and narrow windows: the welcome panel becomes a header above the form. */
+@media (max-width: 900px) {
+  .authCard {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    max-width: 560px;
+    min-height: 0;
+  }
+
+  .authBrand {
+    gap: 1.25rem;
+    padding: 1.75rem 2rem;
+  }
+
+  .authWatermark,
+  .authOrbTop,
+  .authOrbBottom {
+    display: none;
+  }
+
+  .authWelcome {
+    margin: 0;
+  }
+
+  .authWelcomeTitle {
+    font-size: 1.9rem;
+  }
+
+  .authFormSide {
+    padding: 2rem 1.75rem 2.25rem;
+  }
+
+  .authPanel {
+    max-width: none;
+    padding: 0;
+    border: none;
+    box-shadow: none;
+  }
+}
+
+/* Phones: the card fills the screen edge to edge. */
+@media (max-width: 480px) {
+  .auth {
+    place-items: stretch;
+    padding: 0;
+  }
+
+  .authCard {
+    min-height: 100vh;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .authBrand {
+    padding: 1.5rem 1.25rem;
+  }
+
+  .authWelcomeTitle {
+    font-size: 1.65rem;
+  }
+
+  .authFormSide {
+    align-items: start;
+    padding: 1.75rem 1.25rem 2.5rem;
+  }
+
+  .authTitle {
+    margin-bottom: 1.25rem;
+  }
+
+  .authSubmit {
+    align-self: stretch;
+  }
+}

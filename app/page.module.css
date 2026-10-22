@@ -4168,7 +4168,7 @@ a.quickCard:hover {
   font-family: inherit;
   color: var(--dash-heading);
   background: var(--dash-hover);
-  border: 1px solid var(--card-border);
+  border: 1px solid var(--dash-muted);
   border-radius: 10px;
 }
 

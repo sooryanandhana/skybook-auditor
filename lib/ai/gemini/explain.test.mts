@@ -73,6 +73,26 @@ function sdkError(name: string, status: number | null): Error {
   return error;
 }
 
+/**
+ * Google's error body, as the installed SDK carries it: the whole response,
+ * JSON-serialised into the message. An invalid key is a 400 INVALID_ARGUMENT
+ * whose ErrorInfo detail names the reason.
+ */
+const googleErrorBody = (status: number, reason: string) => ({
+  error: {
+    code: status,
+    message: "API key not valid. Please pass a valid API key.",
+    status: "INVALID_ARGUMENT",
+    details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason, domain: "googleapis.com" }],
+  },
+});
+
+function googleError(status: number, reason: string): Error {
+  const error = sdkError("ApiError", status);
+  error.message = JSON.stringify(googleErrorBody(status, reason));
+  return error;
+}
+
 /** A reply carrying text, the way the documented accessor carries it. */
 const answered = (text: string) => ({ text });
 
@@ -240,6 +260,8 @@ const FAILURES: ReadonlyArray<readonly [string, () => Recorder, string]> = [
   ["a provider fault", () => throws(sdkError("InternalServerError", 500)), "provider-error"],
   ["a bad gateway", () => throws(sdkError("APIError", 502)), "provider-error"],
   ["a malformed request", () => throws(sdkError("BadRequestError", 400)), "bad-request"],
+  ["a key Google names as invalid", () => throws(googleError(400, "API_KEY_INVALID")), "not-authorised"],
+  ["a 400 Google gives another reason for", () => throws(googleError(400, "FIELD_INVALID")), "bad-request"],
   ["an unreachable service", () => throws(sdkError("APIConnectionError", null)), "network"],
   ["a timeout", () => throws(sdkError("APIConnectionTimeoutError", null)), "timeout"],
   ["an abort", () => throws(sdkError("AbortError", null)), "timeout"],
@@ -720,6 +742,49 @@ test("real SDK errors are classified the way the fakes above assume", async () =
       },
     );
   }
+});
+
+test("a key Google rejects is reported as rejected credentials, not as our fault", async () => {
+  const cases: ReadonlyArray<readonly [string, unknown, string]> = [
+    ["the invalid-key reason", googleErrorBody(400, "API_KEY_INVALID"), "not-authorised"],
+    ["another 400 reason", googleErrorBody(400, "FIELD_INVALID"), "bad-request"],
+    ["no details at all", { error: { code: 400, message: "API key not valid", status: "INVALID_ARGUMENT" } }, "bad-request"],
+    ["details that are not a list", { error: { code: 400, details: { reason: "API_KEY_INVALID" } } }, "bad-request"],
+  ];
+
+  for (const [label, body, reason] of cases) {
+    await withStubbedFetch(
+      async () => jsonResponse(400, body),
+      async (count) => {
+        const result = await explainAudit(reportInput(), {
+          apiKey: "offline-key-for-this-test",
+          timeoutMs: 2_000,
+        });
+
+        assert.equal(count(), 1, `${label}: cost more than one request`);
+        assert.equal(result.state === "not-explained" && result.reason, reason, `${label}: misread`);
+        if (result.state !== "not-explained") return;
+
+        // Classified from the body, and nothing of the body is passed on.
+        const everything = JSON.stringify(result);
+        assert.ok(!everything.includes("API key not valid"), `${label}: quoted the provider`);
+        assert.ok(!everything.includes("API_KEY_INVALID"), `${label}: quoted the provider's reason`);
+        assert.ok(!everything.includes("offline-key-for-this-test"), `${label}: carried the key`);
+      },
+    );
+  }
+});
+
+test("a rejected key's sentence says the credentials were rejected", async () => {
+  const result = await explainAudit(reportInput(), {
+    apiKey: KEY,
+    client: throws(googleError(400, "API_KEY_INVALID")).client,
+  });
+
+  assert.equal(result.state, "not-explained");
+  if (result.state !== "not-explained") return;
+  assert.match(result.message, /rejected this server's credentials/);
+  assert.doesNotMatch(result.message, /fault in this application/);
 });
 
 test("a request that never answers times out, once, and says so", async () => {

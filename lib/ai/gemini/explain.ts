@@ -167,8 +167,10 @@ function httpStatusOf(error: unknown): number | undefined {
  * The status code and the error's own name are stable, observable and were
  * read off real errors produced by the installed version rather than guessed.
  *
- * The error object itself is never read for text. It carries the response
- * body, the response headers and the originating request.
+ * The error object is never read for text to show or record. It carries the
+ * response body, the response headers and the originating request. Its message
+ * is read only to classify -- "fetch failed", and a rejected key's structured
+ * reason -- and only the reason code leaves this function.
  */
 function classify(error: unknown): ExplanationFailureReason {
   const name = typeof (error as { name?: unknown })?.name === "string"
@@ -206,6 +208,13 @@ function classify(error: unknown): ExplanationFailureReason {
    * which is another reason nothing here quotes the message.
    */
   if (status === 200) return "unreadable-response";
+  /*
+   * A REJECTED KEY ARRIVES AS A 400, NOT A 401. Google answers an invalid key
+   * with INVALID_ARGUMENT, so without this it read as "a fault in this
+   * application" -- a false statement about our own request. Only Google's
+   * explicit, structured reason counts; any other 400 is still ours.
+   */
+  if (status === 400 && rejectsTheKey(message)) return "not-authorised";
   if (status !== null && status >= 400) return "bad-request";
 
   /*
@@ -222,6 +231,38 @@ function classify(error: unknown): ExplanationFailureReason {
    * connection error and is caught above, on evidence.
    */
   return "internal-error";
+}
+
+/** Google's reason code for a key it does not accept. */
+const INVALID_KEY_REASON = "API_KEY_INVALID";
+
+/**
+ * Whether an error body says, in Google's structured error details, that the
+ * API key was rejected.
+ *
+ * The installed SDK's `ApiError` carries the response body as its message,
+ * serialised as JSON: `{"error":{"code":400,"status":"INVALID_ARGUMENT",
+ * "details":[{"@type":"...ErrorInfo","reason":"API_KEY_INVALID",...}]}}`.
+ * This parses it and looks for that one field, exactly -- never a loose match
+ * on wording, which would let any text in a body decide the outcome. The body
+ * is read to classify and then dropped: nothing from it is returned, shown or
+ * logged.
+ */
+function rejectsTheKey(message: string): boolean {
+  let body: unknown;
+  try {
+    body = JSON.parse(message);
+  } catch {
+    return false;
+  }
+  const details = (body as { error?: { details?: unknown } } | null)?.error?.details;
+  if (!Array.isArray(details)) return false;
+  return details.some(
+    (detail) =>
+      detail !== null &&
+      typeof detail === "object" &&
+      (detail as { reason?: unknown }).reason === INVALID_KEY_REASON,
+  );
 }
 
 /**

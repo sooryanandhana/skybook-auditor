@@ -10,6 +10,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import dns from "node:dns";
+import { syncBuiltinESMExports } from "node:module";
 import {
   matchHostname,
   describeCertificate,
@@ -536,9 +538,28 @@ test("refuses to open a TLS connection to a private address", async () => {
 });
 
 test("refuses a public name that resolves to a private address", async () => {
-  // localtest.me looks ordinary and points at 127.0.0.1.
-  const result = await runSslChecks("localtest.me", true, createDeadline(5_000));
-  assert.equal(result.status, "blocked");
+  // An ordinary-looking name whose address is 127.0.0.1, stubbed the way
+  // corpus.fixture.mts does it. The message matters: a name that cannot be
+  // found is ALSO "blocked", so status alone would not prove this refusal.
+  const asked: string[] = [];
+  const originalLookup = dns.promises.lookup;
+  Reflect.set(dns.promises, "lookup", (hostname: string) => {
+    asked.push(hostname);
+    return Promise.resolve([{ address: "127.0.0.1", family: 4 }]);
+  });
+  syncBuiltinESMExports();
+
+  try {
+    const result = await runSslChecks("points-private.example", true, createDeadline(5_000));
+
+    assert.deepEqual(asked, ["points-private.example"], "the refusal came from a DNS answer");
+    assert.equal(result.status, "blocked");
+    assert.equal(result.certificate, null);
+    assert.match(result.message, /private or internal/i);
+  } finally {
+    Reflect.set(dns.promises, "lookup", originalLookup);
+    syncBuiltinESMExports();
+  }
 });
 
 test("does not check a certificate for a site served over plain HTTP", async () => {

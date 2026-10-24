@@ -21,6 +21,7 @@ import {
   readPolicyTag,
 } from "./dnsChecks.ts";
 import { createDeadline } from "./deadline.ts";
+import dns from "node:dns";
 import { Resolver } from "node:dns/promises";
 import type { DnsRecordSet } from "@/lib/types";
 
@@ -153,6 +154,42 @@ test("normalises capitalisation and a trailing dot", () => {
 // The safety guard, including on the derived DMARC hostname
 // ---------------------------------------------------------------------------
 
+/**
+ * Answers the collector's own Resolver from a table, for the length of `work`.
+ *
+ * `runDnsChecks` builds its resolver internally, so the stand-in goes on the
+ * shared prototype — the same door `realAudit.fixture.mts` closes — and is put
+ * back in `finally`. A name missing from the table gets ENOTFOUND, which reads
+ * as "absent": a stub that failed to install would fail these tests, not pass.
+ */
+async function withStubbedResolver<T>(
+  answers: Record<string, unknown>,
+  work: (asked: string[]) => Promise<T>,
+): Promise<T> {
+  const asked: string[] = [];
+  const prototype = dns.promises.Resolver.prototype;
+  const kinds = { resolve4: "4", resolve6: "6", resolveMx: "mx", resolveNs: "ns", resolveTxt: "txt" };
+  const originals = new Map<string, unknown>();
+
+  for (const [method, kind] of Object.entries(kinds)) {
+    originals.set(method, Reflect.get(prototype, method));
+    Reflect.set(prototype, method, (name: string) => {
+      asked.push(`${kind}:${name}`);
+      const value = answers[`${kind}:${name}`];
+      if (value === undefined) {
+        return Promise.reject(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" }));
+      }
+      return Promise.resolve(value);
+    });
+  }
+
+  try {
+    return await work(asked);
+  } finally {
+    for (const [method, original] of originals) Reflect.set(prototype, method, original);
+  }
+}
+
 test("refuses to look up a private address", async () => {
   const result = await runDnsChecks("127.0.0.1", createDeadline(5_000));
 
@@ -165,9 +202,15 @@ test("refuses to look up a private address", async () => {
 });
 
 test("refuses a public name that resolves to a private address", async () => {
-  const result = await runDnsChecks("localtest.me", createDeadline(5_000));
-  assert.equal(result.a.status, "error");
-  assert.match(result.a.error ?? "", /private or internal/i);
+  // An ordinary-looking name whose A record is 127.0.0.1. Stubbed, because a
+  // reserved .example name never resolves publicly.
+  await withStubbedResolver({ "4:points-private.example": ["127.0.0.1"] }, async (asked) => {
+    const result = await runDnsChecks("points-private.example", createDeadline(5_000));
+
+    assert.ok(asked.includes("4:points-private.example"), "the refusal came from a DNS answer");
+    assert.equal(result.a.status, "error");
+    assert.match(result.a.error ?? "", /private or internal/i);
+  });
 });
 
 test("builds the DMARC hostname from the mail domain", async () => {
@@ -194,13 +237,30 @@ test("checks the DERIVED DMARC hostname in its own right", async () => {
    * <domain>, and can resolve somewhere different. It gets its own safety
    * check rather than inheriting the original's result.
    *
-   * "_dmarc.localtest.me" resolves to 127.0.0.1 just as localtest.me does,
-   * so a lookup that skipped the derived check would reach a private address.
+   * Here the site's own name is public and passes; only "_dmarc.mail.example"
+   * points at 127.0.0.1. So the refusal can only come from the derived name's
+   * own check — a site name refused as a whole never reaches the DMARC lookup.
    */
-  const result = await runDnsChecks("localtest.me", createDeadline(5_000));
-  assert.equal(result.dmarc.status, "error");
-  assert.notEqual(result.dmarc.status, "absent", "being refused is not being absent");
-  assert.match(result.dmarc.error ?? "", /private or internal|could not be found/i);
+  const answers = {
+    "4:mail.example": ["93.184.216.34"],
+    "mx:mail.example": [{ exchange: "mx.mail.example", priority: 10 }],
+    "ns:mail.example": ["ns1.mail.example"],
+    "txt:mail.example": [["v=spf1 -all"]],
+    "4:_dmarc.mail.example": ["127.0.0.1"],
+  };
+
+  await withStubbedResolver(answers, async (asked) => {
+    const result = await runDnsChecks("mail.example", createDeadline(5_000));
+
+    assert.equal(result.a.status, "found", "the site's own name passed its check");
+    assert.deepEqual(result.a.records, ["93.184.216.34"]);
+    assert.ok(asked.includes("4:_dmarc.mail.example"), "the derived name was checked itself");
+    assert.equal(result.dmarc.hostname, "_dmarc.mail.example");
+    assert.equal(result.dmarc.status, "error");
+    assert.notEqual(result.dmarc.status, "absent", "being refused is not being absent");
+    assert.match(result.dmarc.error ?? "", /private or internal/i);
+    assert.ok(!asked.includes("txt:_dmarc.mail.example"), "refused before any TXT query");
+  });
 });
 
 test("reports everything as unknown when the audit is out of time", async () => {

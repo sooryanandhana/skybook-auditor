@@ -122,7 +122,37 @@ function notInspected(speed: Extract<PdfSpeed, { measured: true }>, labels: PdfL
 }
 
 /** The whole section, in whichever of its two shapes applies. */
-export function speedHtml(speed: PdfSpeed, labels: PdfLabels): string {
+/**
+ * The speed section. With a desktop result, mobile and desktop are drawn as two
+ * separate, labelled parts; without one, the section is exactly the mobile-only
+ * section it has always been.
+ */
+export function speedHtml(speed: PdfSpeed, labels: PdfLabels, desktop: PdfSpeed | null = null): string {
+  if (desktop === null) return mobileOnlyHtml(speed, labels);
+  return (
+    `<section class="speed">` +
+    `<h2>${SPEED_HEADING}</h2>` +
+    `<p class="lead">${DEVICES_LEAD}</p>` +
+    `<div class="speed-device"><h3 class="sub">Mobile</h3>${deviceBody(speed, labels)}</div>` +
+    `<div class="speed-device"><h3 class="sub">Desktop</h3>${deviceBody(desktop, labels)}</div>` +
+    `</section>`
+  );
+}
+
+/** What the two kinds of speed result mean, said once above both devices. */
+const DEVICES_LEAD =
+  "Mobile and desktop speed are measured separately and can differ. Real-visitor results come from Google's records of real visits. " +
+  "The simulated score comes from a single test load, which Google classes as good (90–100), needs improvement (50–89) or poor (below 50); " +
+  "it helps to find problems but does not measure every visitor's experience.";
+
+/** One device's results, or the sentence saying why there are none. */
+function deviceBody(speed: PdfSpeed, labels: PdfLabels): string {
+  return speed.measured
+    ? fieldBlock(speed, labels) + labBlock(speed, labels) + notInspected(speed, labels)
+    : html`<p class="lead">${speed.message}</p>`;
+}
+
+function mobileOnlyHtml(speed: PdfSpeed, labels: PdfLabels): string {
   const body = speed.measured
     ? fieldBlock(speed, labels) + labBlock(speed, labels) + notInspected(speed, labels)
     : /*

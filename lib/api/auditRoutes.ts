@@ -253,15 +253,24 @@ export async function performanceRoute(
     const performance = await measure(url.url, createDeadline(PERFORMANCE_BUDGET_MS), { strategy });
 
     /*
-     * DESKTOP IS DISPLAY-ONLY, AND THIS IS WHERE THAT IS ENFORCED.
+     * DESKTOP IS NEVER GRADED, AND THIS IS WHERE THAT IS ENFORCED.
      *
-     * A desktop measurement is never graded and never filed against the job, so
-     * it cannot reach `result.score`: the scorer reads only the mobile speed
-     * result that was attached below. Desktop is handed back for its own panel
-     * with no findings — the browser displays it and nothing else does. Mobile
-     * alone continues to feed the score, exactly as before.
+     * A desktop measurement produces no findings and is never filed in the
+     * job's graded `attached` slot, so it cannot reach `result.score`: the
+     * scorer reads only the mobile speed result attached below. Mobile alone
+     * continues to feed the score, exactly as before.
+     *
+     * It IS kept, ungraded, in the job's separate desktop slot when the caller
+     * names its own audit, so the PDF can report desktop alongside mobile from
+     * the server's copy rather than from anything a browser sends back. Same
+     * best-effort, owner-only rule as the mobile attachment below.
      */
     if (strategy === "desktop") {
+      const desktopJobId = jobIdFrom(request);
+      if (desktopJobId !== "" && deps.userId !== undefined) {
+        const store = deps.store ?? auditJobs();
+        if (ownedBy(store.get(desktopJobId), deps.userId) !== null) store.attachDesktop(desktopJobId, performance);
+      }
       return {
         status: 200,
         body: { ok: true, data: performance, findings: [], skippedChecks: [] },

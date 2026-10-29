@@ -36,6 +36,7 @@ import { runSecurityChecks } from "../collector/securityChecks.ts";
 import type { AuditResult, PerformanceData, SiteAuditResult, SpeedResult } from "../types.ts";
 import { withSpeed } from "../audit/withSpeed.ts";
 import { buildAIReportInput } from "../ai/buildReportInput.ts";
+import { scoreAudit } from "../scoring/score.ts";
 
 /** The account every request in this file is signed in as, and the owner of the jobs it makes. */
 const OWNER = "owner-account";
@@ -746,7 +747,7 @@ function storedAudit(): SiteAuditResult {
 
 /** A store holding one finished audit, ready to receive a speed result. */
 function storeWithFinishedAudit(owner: string | null = OWNER) {
-  const store = createJobStore<SiteAuditResult, SpeedResult>();
+  const store = createJobStore<SiteAuditResult, SpeedResult, never, PerformanceData>();
   const job = store.create("https://example.com", owner);
   store.finish(job.id, "completed", storedAudit());
   return { store, jobId: job.id };
@@ -1468,4 +1469,71 @@ test("ownership: an audit started through the route is readable by its starter a
 
   assert.equal(statusRouteAs(getWith(`jobId=${jobId}`), { store, userId: OWNER }).status, 200);
   assert.equal(statusRouteAs(getWith(`jobId=${jobId}`), { store, userId: STRANGER }).status, 404);
+});
+
+// ---------------------------------------------------------------------------
+// Desktop speed: kept for the PDF, never graded
+// ---------------------------------------------------------------------------
+
+const desktopRequestFor = (jobId: string | null, url = "https://example.com") =>
+  new Request(
+    `https://audit.test/api/audit/performance?strategy=desktop${jobId === null ? "" : `&jobId=${encodeURIComponent(jobId)}`}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) },
+  );
+
+test("performance (desktop): the owner's result is kept in the desktop slot, ungraded", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  const answer = await ownersSpeedCheck(desktopRequestFor(jobId), {
+    measure: async () => measured({ strategy: "desktop" }),
+    store,
+  });
+
+  assert.equal(answer.status, 200);
+  assert.ok(answer.body.ok);
+  if (!answer.body.ok) return;
+  assert.deepEqual(answer.body.findings, [], "desktop is never graded");
+  const job = store.get(jobId);
+  assert.equal(job?.desktop?.strategy, "desktop", "kept for the PDF");
+  assert.equal(job?.attached, null, "never in the graded slot");
+});
+
+test("performance (desktop): it never changes the audit's score", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+  const before = store.get(jobId);
+  assert.ok(before?.result);
+  const scoreBefore = JSON.stringify(scoreAudit(withSpeed(before.result, before.attached)));
+
+  await ownersSpeedCheck(desktopRequestFor(jobId), {
+    measure: async () => measured({ strategy: "desktop" }),
+    store,
+  });
+
+  const after = store.get(jobId);
+  assert.ok(after?.result);
+  assert.equal(JSON.stringify(scoreAudit(withSpeed(after.result, after.attached))), scoreBefore);
+});
+
+test("performance (desktop): somebody else's audit, or none named, keeps nothing", async () => {
+  const theirs = storeWithFinishedAudit("another-account");
+  await ownersSpeedCheck(desktopRequestFor(theirs.jobId), {
+    measure: async () => measured({ strategy: "desktop" }),
+    store: theirs.store,
+  });
+  assert.equal(theirs.store.get(theirs.jobId)?.desktop, null, "not filed against another account's audit");
+
+  const mine = storeWithFinishedAudit();
+  const answer = await ownersSpeedCheck(desktopRequestFor(null), {
+    measure: async () => measured({ strategy: "desktop" }),
+    store: mine.store,
+  });
+  assert.equal(answer.status, 200, "the measurement is still returned");
+  assert.equal(mine.store.get(mine.jobId)?.desktop, null);
+});
+
+test("performance (desktop): a mobile check still fills only the graded slot", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+  await ownersSpeedCheck(speedRequestFor(jobId), { measure: async () => measured(), store });
+  assert.ok(store.get(jobId)?.attached);
+  assert.equal(store.get(jobId)?.desktop, null);
 });

@@ -84,7 +84,7 @@ export const EMPTY_PROGRESS: JobProgress = {
   complete: false,
 };
 
-export interface Job<TResult, TAttached = never, TExplanation = never> {
+export interface Job<TResult, TAttached = never, TExplanation = never, TDesktop = never> {
   id: string;
   /** The address the audit was asked about, as submitted. */
   requestedUrl: string;
@@ -136,6 +136,16 @@ export interface Job<TResult, TAttached = never, TExplanation = never> {
    */
   explanation: TExplanation | null;
   /**
+   * A DESKTOP speed measurement, kept beside the audit for the PDF.
+   *
+   * A THIRD SLOT, AND DELIBERATELY NOT `attached`. The mobile check fills
+   * `attached`, and that is what the score reads; desktop is measured in its own
+   * request and is never graded. Keeping it apart means it can never reach the
+   * score, and the two checks can arrive in either order without one locking
+   * the other out. Same first-write-wins rule, same "finished jobs only" rule.
+   */
+  desktop: TDesktop | null;
+  /**
    * True once somebody has taken responsibility for producing the explanation.
    *
    * THIS IS WHAT MAKES ONE AUDIT COST ONE REQUEST. Asking a model is slow and
@@ -154,11 +164,11 @@ export interface Job<TResult, TAttached = never, TExplanation = never> {
   expiresAt: number;
 }
 
-export interface JobStore<TResult, TAttached = never, TExplanation = never> {
+export interface JobStore<TResult, TAttached = never, TExplanation = never, TDesktop = never> {
   /** A new queued job, owned by `ownerId` when one is named. */
-  create(requestedUrl: string, ownerId?: string | null): Job<TResult, TAttached, TExplanation>;
+  create(requestedUrl: string, ownerId?: string | null): Job<TResult, TAttached, TExplanation, TDesktop>;
   /** The job, or null if it never existed or has expired. */
-  get(id: string): Job<TResult, TAttached, TExplanation> | null;
+  get(id: string): Job<TResult, TAttached, TExplanation, TDesktop> | null;
   /** Records progress. Ignored once the job is terminal. */
   setProgress(id: string, progress: JobProgress): void;
   /** Moves a job to "running". Ignored if it is already terminal. */
@@ -201,6 +211,13 @@ export interface JobStore<TResult, TAttached = never, TExplanation = never> {
    * audit cannot change what the audit found.
    */
   setExplanation(id: string, value: TExplanation): void;
+  /**
+   * Files a desktop speed measurement against a FINISHED job. THE FIRST WRITE
+   * WINS. Never touches `status`, `result`, `error`, `attached` or
+   * `explanation`: a desktop reading cannot change what the audit found or how
+   * it was graded.
+   */
+  attachDesktop(id: string, value: TDesktop): void;
   /** Drops expired jobs. Called on every access; exposed for tests. */
   sweep(): void;
   readonly size: number;
@@ -227,14 +244,14 @@ export interface JobStoreOptions {
   newId?: () => string;
 }
 
-export function createJobStore<TResult, TAttached = never, TExplanation = never>(
+export function createJobStore<TResult, TAttached = never, TExplanation = never, TDesktop = never>(
   options: JobStoreOptions = {},
-): JobStore<TResult, TAttached, TExplanation> {
+): JobStore<TResult, TAttached, TExplanation, TDesktop> {
   const ttlMs = options.ttlMs ?? JOB_TTL_MS;
   const now = options.now ?? Date.now;
   const newId = options.newId ?? randomUUID;
 
-  const jobs = new Map<string, Job<TResult, TAttached, TExplanation>>();
+  const jobs = new Map<string, Job<TResult, TAttached, TExplanation, TDesktop>>();
 
   /*
    * Expiry is swept on access rather than on a timer.
@@ -250,7 +267,7 @@ export function createJobStore<TResult, TAttached = never, TExplanation = never>
     }
   };
 
-  const live = (id: string): Job<TResult, TAttached, TExplanation> | null => {
+  const live = (id: string): Job<TResult, TAttached, TExplanation, TDesktop> | null => {
     const job = jobs.get(id);
     if (job === undefined) return null;
     if (job.expiresAt <= now()) {
@@ -269,13 +286,13 @@ export function createJobStore<TResult, TAttached = never, TExplanation = never>
    * cheap and the guarantee is absolute.
    */
   const snapshot = (
-    job: Job<TResult, TAttached, TExplanation>,
-  ): Job<TResult, TAttached, TExplanation> => ({
+    job: Job<TResult, TAttached, TExplanation, TDesktop>,
+  ): Job<TResult, TAttached, TExplanation, TDesktop> => ({
     ...job,
     progress: { ...job.progress },
   });
 
-  const touch = (job: Job<TResult, TAttached, TExplanation>): void => {
+  const touch = (job: Job<TResult, TAttached, TExplanation, TDesktop>): void => {
     job.updatedAt = now();
     // A job being worked on should not expire out from under its own crawl.
     job.expiresAt = job.updatedAt + ttlMs;
@@ -285,7 +302,7 @@ export function createJobStore<TResult, TAttached = never, TExplanation = never>
     create(requestedUrl, ownerId = null) {
       sweep();
       const at = now();
-      const job: Job<TResult, TAttached, TExplanation> = {
+      const job: Job<TResult, TAttached, TExplanation, TDesktop> = {
         id: newId(),
         requestedUrl,
         ownerId,
@@ -295,6 +312,7 @@ export function createJobStore<TResult, TAttached = never, TExplanation = never>
         error: null,
         attached: null,
         explanation: null,
+        desktop: null,
         explanationClaimed: false,
         createdAt: at,
         updatedAt: at,
@@ -373,6 +391,15 @@ export function createJobStore<TResult, TAttached = never, TExplanation = never>
       if (!isTerminal(job.status) || job.result === null) return;
       if (job.explanation !== null) return;
       job.explanation = value;
+      touch(job);
+    },
+
+    attachDesktop(id, value) {
+      const job = live(id);
+      if (job === null) return;
+      if (!isTerminal(job.status) || job.result === null) return;
+      if (job.desktop !== null) return;
+      job.desktop = value;
       touch(job);
     },
 

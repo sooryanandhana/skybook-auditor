@@ -140,6 +140,63 @@ function commentary(finding: PdfFinding, labels: PdfLabels): string {
  * different sentence and is kept, because dropping something the model really
  * did add would be worse than printing a near-repeat.
  */
+/**
+ * What the finding means, why it matters and what may follow, in plain words.
+ * Placed after the measured evidence, so the reader meets the fact first.
+ */
+function meaning(finding: PdfFinding): string {
+  const written = finding.explainer;
+  if (written === null) return "";
+  return (
+    `<div class="explainer">` +
+    `<p class="explainer-label">What it means</p>` +
+    html`<p>${written.whatItMeans}</p>` +
+    `<p class="explainer-label">Why it matters</p>` +
+    html`<p>${written.whyItMatters}</p>` +
+    `<p class="explainer-label">Possible impact</p>` +
+    html`<p>${written.possibleImpact}</p>` +
+    `</div>`
+  );
+}
+
+/** The practical steps and who normally does the work, after the recommended action. */
+function howToFix(finding: PdfFinding): string {
+  const written = finding.explainer;
+  if (written === null) return "";
+  return (
+    `<div class="explainer explainer-steps">` +
+    `<p class="explainer-label">Steps</p>` +
+    `<ol>` +
+    written.steps.map((step) => html`<li>${step}</li>`).join("") +
+    `</ol>` +
+    html`<p class="who-fixes"><span class="explainer-label">Who should fix it:</span> ${written.whoFixes}</p>` +
+    `</div>`
+  );
+}
+
+/**
+ * The measured rows behind the finding, as a small table. The same rows, from
+ * the same builders, as the measured-facts tables, so the two cannot disagree.
+ */
+function evidencePanel(finding: PdfFinding): string {
+  const panel = finding.evidencePanel;
+  if (panel === null || panel.facts.length === 0) return "";
+  const rows = panel.facts
+    .map(
+      (fact) =>
+        html`<tr><th scope="row">${fact.label}</th><td>${fact.value}` +
+        (fact.note === undefined || fact.note === "" ? "" : html`<span class="evidence-note">${fact.note}</span>`) +
+        `</td></tr>`,
+    )
+    .join("");
+  return (
+    `<div class="evidence-panel">` +
+    html`<p class="explainer-label">Evidence · ${panel.heading}</p>` +
+    `<table class="facts evidence-facts"><tbody>${rows}</tbody></table>` +
+    `</div>`
+  );
+}
+
 function comparable(text: string): string {
   return text.replace(/\s+/g, " ").trim().replace(/\.$/, "").toLowerCase();
 }
@@ -168,6 +225,7 @@ function findingCard(finding: PdfFinding, labels: PdfLabels): string {
      */
     `<p class="finding-eyebrow">Measured</p>` +
     html`<p class="evidence">${finding.evidence}</p>` +
+    meaning(finding) +
     /*
      * The rule's own action, not a model's. Labelled and set apart because on
      * screen the evidence and the action were once two grey paragraphs of the
@@ -178,6 +236,8 @@ function findingCard(finding: PdfFinding, labels: PdfLabels): string {
     html`<p class="remediation-label">${labels.remediation}</p>` +
     html`<p>${finding.remediation}</p>` +
     `</div>` +
+    howToFix(finding) +
+    evidencePanel(finding) +
     affected(finding, finding.affected) +
     commentary(finding, labels) +
     `</article>`

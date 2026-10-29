@@ -1273,6 +1273,17 @@ export function certificateProblemLabel(problem: CertificateProblem): string {
 }
 
 /**
+ * The labels of the security rows other code picks out (the PDF's evidence
+ * panels). One constant used by the builder and by its readers, so rewording a
+ * label rewords it everywhere at once rather than silently breaking a match.
+ */
+export const SECURITY_FACT_LABELS = {
+  hsts: "HTTPS protection (HSTS)",
+  csp: "Content-Security-Policy",
+  cookies: "Cookies set by this page",
+} as const;
+
+/**
  * The security section, as rows.
  *
  * MOVED HERE WHOLE rather than label by label. The results page built these
@@ -1292,13 +1303,13 @@ export function certificateProblemLabel(problem: CertificateProblem): string {
 export function securityFacts(security: SecurityData): SecurityFactRow[] {
   const rows: SecurityFactRow[] = [
     {
-      label: "HTTPS protection (HSTS)",
+      label: SECURITY_FACT_LABELS.hsts,
       value: hstsSummary(security.hsts, security.strictTransportSecurity.present),
       note: security.strictTransportSecurity.value ?? undefined,
       rawHeaderNote: true,
     },
     {
-      label: "Content-Security-Policy",
+      label: SECURITY_FACT_LABELS.csp,
       value: cspSummary(security),
       note:
         security.contentSecurityPolicy.value ??
@@ -1316,7 +1327,7 @@ export function securityFacts(security: SecurityData): SecurityFactRow[] {
       rawHeaderNote: true,
     },
     {
-      label: "Cookies set by this page",
+      label: SECURITY_FACT_LABELS.cookies,
       value: cookieSummary(security.cookies),
       // Names and flags. A cookie's value is never captured, so none is here.
       note:

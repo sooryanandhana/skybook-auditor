@@ -23,6 +23,14 @@
  */
 import { withSpeed } from "./withSpeed.ts";
 import { withoutCredentials } from "../collector/url.ts";
+import { EVIDENCE_PANEL_HEADINGS, explainerFor, whoFixesLabel } from "../report/findingExplainers.ts";
+import { buildOverallSummary, type OverallSummary } from "../report/overallSummary.ts";
+
+/*
+ * The summary's shape, passed through for the renderer. The renderer imports
+ * only from this file, so the report layer's types reach it from here.
+ */
+export type { OverallSummary, SummaryArea, SummaryPriority } from "../report/overallSummary.ts";
 import type { AuditJobStore } from "../jobs/auditJobs.ts";
 import { MAX_EXPLAINED_FINDINGS } from "../ai/contract.ts";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
@@ -51,6 +59,7 @@ import {
   SPEED_NOT_INSPECTED_HEADING,
   readableTimestamp,
   robotsFacts,
+  SECURITY_FACT_LABELS,
   securityFacts,
   severityCounts,
   severityLabel,
@@ -343,6 +352,21 @@ export interface PdfAffectedPage {
   readonly evidence: string;
 }
 
+/**
+ * The plain-language explanation of a rule, from `findingExplainers.ts`.
+ *
+ * WRITTEN IN OUR SOURCE, NOT BY A MODEL, so it is present whether or not the AI
+ * layer answered and it says the same thing in every report.
+ */
+export interface PdfExplainer {
+  readonly whatItMeans: string;
+  readonly whyItMatters: string;
+  readonly possibleImpact: string;
+  readonly steps: readonly string[];
+  /** "Website developer, Hosting or server administrator". */
+  readonly whoFixes: string;
+}
+
 export interface PdfFinding {
   /** The rule that produced it. Needed to match commentary and to key a list. */
   readonly ruleId: string;
@@ -362,6 +386,25 @@ export interface PdfFinding {
   /** Said aloud when the sample is shorter than the true total. */
   readonly affectedNote: string | null;
   readonly commentary: PdfCommentary | null;
+  /**
+   * What the finding means, why it matters, what may follow, the steps and who
+   * fixes it. Null for a passing ("good") finding, which is not a problem to
+   * fix, and for a rule with no written explanation.
+   */
+  readonly explainer: PdfExplainer | null;
+  /**
+   * The measured rows this finding rests on, taken from the same fact builders
+   * as the measured-facts section (response headers already removed). Null when
+   * the finding's own evidence and affected pages already say everything.
+   */
+  readonly evidencePanel: PdfEvidencePanel | null;
+}
+
+/** Measured rows shown under a finding, so its evidence sits beside it. */
+export interface PdfEvidencePanel {
+  /** "Measured for the whole site" or "Measured on the main page checked". */
+  readonly heading: string;
+  readonly facts: readonly PdfFact[];
 }
 
 export interface PdfFindingGroup {
@@ -440,11 +483,23 @@ export interface PdfDocument {
    * no second model call is made for the PDF (7A §9).
    */
   readonly clientSummary: ClientAiSummary;
+  /**
+   * The overall summary, written by code from the verified audit: scope, each
+   * area's condition, strengths, priorities, limitations, what this audit does
+   * not check, and how Skybook can help. Present with or without an AI answer.
+   * Null only for the certificate-failure document, which explains its own case.
+   */
+  readonly overallSummary: OverallSummary | null;
   readonly siteFindings: PdfFindingSection;
   readonly pageFindings: PdfFindingSection;
   /** Null when nothing was skipped, which is when the panel is not shown. */
   readonly skipped: PdfSkipped | null;
   readonly speed: PdfSpeed;
+  /**
+   * The separately measured DESKTOP speed, when one was filed against this
+   * audit. Never graded and never part of the score; shown beside mobile.
+   */
+  readonly desktopSpeed: PdfSpeed | null;
   /** The measured facts, in the order the results page shows them. */
   readonly measured: readonly PdfFactSection[];
   readonly coverageDetail: readonly PdfFactSection[];
@@ -519,6 +574,7 @@ function toFinding(
   finding: Finding,
   scope: FindingScope,
   commentary: ReadonlyMap<string, PdfCommentary>,
+  panels: ReadonlyMap<string, PdfEvidencePanel>,
 ): PdfFinding {
   const reach = affectedView(finding);
 
@@ -537,6 +593,58 @@ function toFinding(
     affected: reach.pages.map((page) => ({ url: page.url, evidence: page.evidence })),
     affectedNote: reach.sample,
     commentary: commentary.get(finding.id) ?? null,
+    explainer: explainerView(finding),
+    evidencePanel: finding.severity === "good" ? null : (panels.get(finding.id) ?? null),
+  };
+}
+
+/**
+ * The measured rows behind each kind of finding, built once per document.
+ *
+ * SAME BUILDERS AS THE MEASURED-FACTS SECTION, so a value under a finding can
+ * never disagree with the same value in the tables. Security rows come from
+ * `securitySection`, which has already taken the response headers back out:
+ * a document that leaves the building never prints a raw header.
+ *
+ * Only for findings whose evidence lives in a site-level or main-page
+ * measurement. Page findings about content keep their per-page evidence in the
+ * affected-pages list, and speed findings have the speed section.
+ */
+function evidencePanels(
+  data: AuditData,
+  crawl: SiteAuditResult["crawl"],
+): ReadonlyMap<string, PdfEvidencePanel> {
+  const site = EVIDENCE_PANEL_HEADINGS.site;
+  const mainPage = EVIDENCE_PANEL_HEADINGS.mainPage;
+  const security = securitySection(data.security).facts;
+  const securityRow = (label: string) => security.filter((row) => row.label === label);
+
+  const panels = new Map<string, PdfEvidencePanel>();
+  const add = (ids: readonly string[], heading: string, facts: readonly PdfFact[]) => {
+    if (facts.length === 0) return;
+    for (const id of ids) panels.set(id, { heading, facts });
+  };
+  add(["security.ssl.expired", "security.ssl.hostname", "security.ssl.untrusted"], site, certificateFacts(data.ssl));
+  add(["security.dns.spf"], site, spfFacts(data.dns));
+  add(["security.dns.dmarc"], site, dmarcFacts(data.dns));
+  add(["technical.robots.blocks-all"], site, robotsFacts(crawl, data.technical));
+  add(["security.headers.hsts"], mainPage, securityRow(SECURITY_FACT_LABELS.hsts));
+  add(["security.headers.csp"], mainPage, securityRow(SECURITY_FACT_LABELS.csp));
+  add(["security.cookies.secure", "security.cookies.httponly"], mainPage, securityRow(SECURITY_FACT_LABELS.cookies));
+  return panels;
+}
+
+/** The written explanation for a problem finding. Passing checks get none. */
+function explainerView(finding: Finding): PdfExplainer | null {
+  if (finding.severity === "good") return null;
+  const entry = explainerFor(finding.id);
+  if (entry === null) return null;
+  return {
+    whatItMeans: entry.whatItMeans,
+    whyItMatters: entry.whyItMatters,
+    possibleImpact: entry.possibleImpact,
+    steps: entry.steps,
+    whoFixes: whoFixesLabel(entry),
   };
 }
 
@@ -553,6 +661,7 @@ function toSection(
   heading: string,
   intro: string,
   commentary: ReadonlyMap<string, PdfCommentary>,
+  panels: ReadonlyMap<string, PdfEvidencePanel> = new Map(),
 ): PdfFindingSection {
   return {
     heading,
@@ -561,7 +670,7 @@ function toSection(
     groups: groupByCategory(findings).map((group) => ({
       category: group.category,
       label: group.label,
-      findings: group.findings.map((finding) => toFinding(finding, scope, commentary)),
+      findings: group.findings.map((finding) => toFinding(finding, scope, commentary, panels)),
     })),
   };
 }
@@ -764,6 +873,7 @@ function certificateFailureDocument(
     // No commentary was produced for a certificate failure, so the client
     // summary carries only its derived sections.
     clientSummary: buildClientAiSummary(findings, commentary, null),
+    overallSummary: null,
 
     siteFindings: toSection(site, "site", SITE_FINDINGS_HEADING, SITE_FINDINGS_INTRO, commentary),
     // Empty, and the renderer draws nothing for it. No page was read, so
@@ -788,6 +898,7 @@ function certificateFailureDocument(
       status: "not-requested",
       message: SPEED_NOT_MEASURED_WITHOUT_PAGE,
     },
+    desktopSpeed: null,
 
     measured: [
       {
@@ -961,6 +1072,7 @@ export function buildPdfDocument(
   const { site, page } = partitionByScope(findings);
 
   const commentary = commentaryFor(job.explanation);
+  const panels = evidencePanels(data, crawl);
   const state = findingsState(findings.length, skippedChecks.length);
   const coverage = crawlView(crawl);
 
@@ -976,6 +1088,15 @@ export function buildPdfDocument(
       : null;
 
   const labels = documentLabels();
+
+  /*
+   * THE GRADE, TAKEN FROM THE WHOLE AUDIT EXACTLY AS THE DASHBOARD TAKES IT.
+   * `whole` is already `withSpeed(job.result, job.attached)`, so scoring it
+   * here gives the identical `ScoreResult` the result endpoint attaches and
+   * the dashboard shows. Nothing is recomputed differently for the PDF, and the
+   * overall summary quotes this same grade rather than working out its own.
+   */
+  const score = toScore(scoreAudit(whole), findings);
 
   return {
     ok: true,
@@ -1010,13 +1131,7 @@ export function buildPdfDocument(
         facts: coverage.facts.map((fact) => ({ label: fact.label, value: fact.value })),
       },
 
-      /*
-       * THE GRADE, TAKEN FROM THE WHOLE AUDIT EXACTLY AS THE DASHBOARD TAKES IT.
-       * `whole` is already `withSpeed(job.result, job.attached)`, so scoring it
-       * here gives the identical `ScoreResult` the result endpoint attaches and
-       * the dashboard shows. Nothing is recomputed differently for the PDF.
-       */
-      score: toScore(scoreAudit(whole), findings),
+      score,
 
       summary: {
         severityCounts: severityCounts(findings).map((entry) => ({
@@ -1037,12 +1152,26 @@ export function buildPdfDocument(
        */
       clientSummary: buildClientAiSummary(findings, commentary, aiSummary?.executiveSummary ?? null),
 
+      overallSummary: buildOverallSummary({
+        auditedUrl: withoutCredentials(data.fetch.finalUrl),
+        checkedAt: readableTimestamp(data.website.checkedAt),
+        data,
+        crawl,
+        findings,
+        skippedChecks,
+        ranRules: whole.site.ranRules ?? null,
+        grade: score.grade,
+        gradeLabel: score.bandLabel,
+        desktop: job.desktop,
+      }),
+
       siteFindings: toSection(
         site,
         "site",
         SITE_FINDINGS_HEADING,
         SITE_FINDINGS_INTRO,
         commentary,
+        panels,
       ),
       pageFindings: toSection(
         page,
@@ -1050,6 +1179,7 @@ export function buildPdfDocument(
         PAGE_FINDINGS_HEADING,
         PAGE_FINDINGS_INTRO,
         commentary,
+        panels,
       ),
 
       skipped: showsSkippedPanel(state)
@@ -1065,6 +1195,7 @@ export function buildPdfDocument(
         : null,
 
       speed: toSpeed(data.performance),
+      desktopSpeed: job.desktop === null ? null : toSpeed(job.desktop),
 
       measured: [
         contentSection(data),

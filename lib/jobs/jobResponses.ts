@@ -45,9 +45,9 @@ export interface Answer<TBody> {
  * told apart — an expired job is deleted. Guessing would mean telling someone
  * their audit expired when they had simply mistyped an id.
  */
-export function statusAnswer<TAttached, TExplanation>(
+export function statusAnswer<TAttached, TExplanation, TDesktop = never>(
   jobId: string,
-  job: Job<AuditResult, TAttached, TExplanation> | null,
+  job: Job<AuditResult, TAttached, TExplanation, TDesktop> | null,
 ): Answer<AuditStatusResponse> {
   if (jobId === "") return { status: 400, body: { ok: false, error: NO_JOB_ID } };
   if (job === null) return { status: 404, body: { ok: false, error: JOB_NOT_FOUND } };
@@ -91,9 +91,9 @@ export function statusAnswer<TAttached, TExplanation>(
  * way, and says what it is in its own `kind`. Withholding it would throw away
  * a certificate that was read and graded.
  */
-export function resultAnswer<TExplanation>(
+export function resultAnswer<TExplanation, TDesktop = never>(
   jobId: string,
-  job: Job<AuditResult, SpeedResult, TExplanation> | null,
+  job: Job<AuditResult, SpeedResult, TExplanation, TDesktop> | null,
 ): Answer<AuditResultResponse> {
   if (jobId === "") return { status: 400, body: { ok: false, error: NO_JOB_ID } };
   if (job === null) return { status: 404, body: { ok: false, error: JOB_NOT_FOUND } };

@@ -518,3 +518,60 @@ test("an unfinished job stores no explanation even if one is offered", () => {
 
   assert.equal(store.get(job.id)?.explanation, null);
 });
+
+// ---------------------------------------------------------------------------
+// The desktop slot: separate from the graded attachment
+// ---------------------------------------------------------------------------
+
+function desktopStore() {
+  let counter = 0;
+  return createJobStore<{ tag: string }, { speed: string }, never, { desktop: string }>({
+    newId: () => `job-${++counter}`,
+  });
+}
+
+test("a finished job keeps a desktop measurement in its own slot", () => {
+  const store = desktopStore();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "completed", { tag: "audit" });
+
+  store.attachDesktop(job.id, { desktop: "measured" });
+
+  const after = store.get(job.id);
+  assert.deepEqual(after?.desktop, { desktop: "measured" });
+  assert.equal(after?.attached, null, "the graded slot is untouched");
+  assert.deepEqual(after?.result, { tag: "audit" });
+});
+
+test("the desktop slot and the graded slot do not lock each other out", () => {
+  const store = desktopStore();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "completed", { tag: "audit" });
+
+  store.attachDesktop(job.id, { desktop: "measured" });
+  store.attach(job.id, { speed: "mobile" });
+
+  assert.deepEqual(store.get(job.id)?.attached, { speed: "mobile" });
+  assert.deepEqual(store.get(job.id)?.desktop, { desktop: "measured" });
+});
+
+test("desktop: unfinished or failed jobs accept nothing, and the first write wins", () => {
+  const store = desktopStore();
+  const running = store.create("https://example.com");
+  store.markRunning(running.id);
+  store.attachDesktop(running.id, { desktop: "early" });
+  assert.equal(store.get(running.id)?.desktop, null);
+
+  const failed = store.create("https://example.com");
+  store.fail(failed.id, "It failed.");
+  store.attachDesktop(failed.id, { desktop: "orphan" });
+  assert.equal(store.get(failed.id)?.desktop, null);
+
+  const done = store.create("https://example.com");
+  store.finish(done.id, "completed", { tag: "audit" });
+  store.attachDesktop(done.id, { desktop: "first" });
+  store.attachDesktop(done.id, { desktop: "second" });
+  assert.deepEqual(store.get(done.id)?.desktop, { desktop: "first" });
+
+  store.attachDesktop("no-such-job", { desktop: "x" });
+});

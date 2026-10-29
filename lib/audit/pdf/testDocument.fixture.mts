@@ -132,6 +132,9 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
         "Resolve the medium-priority issue: No meta description.",
       ],
     },
+    // Off by default so the long-standing renderer tests see the document they
+    // were written against; the overall summary has its own tests.
+    overallSummary: null,
     siteFindings: {
       heading: "Site-wide issues",
       intro: "These apply to the whole website.",
@@ -157,6 +160,8 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
               affected: [],
               affectedNote: null,
               commentary: null,
+              explainer: null,
+              evidencePanel: null,
             },
           ],
         },
@@ -193,6 +198,8 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
                 businessImpact: "The snippet a customer reads is chosen for you.",
                 recommendation: "Write a description for each page.",
               },
+              explainer: null,
+              evidencePanel: null,
             },
           ],
         },
@@ -204,6 +211,7 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
       status: "not-requested",
       message: "Speed was not measured. It is an optional extra check.",
     },
+    desktopSpeed: null,
     measured: [
       { heading: `Measured facts ${SENTINEL}`, facts: [{ label: "Page title", value: HOSTILE }] },
     ],

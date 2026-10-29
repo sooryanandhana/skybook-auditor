@@ -363,3 +363,24 @@ test("the about section is the same in every document", () => {
 test("the about section takes its own page", () => {
   assert.ok(aboutHtml().startsWith('<section class="about">'));
 });
+
+// ---------------------------------------------------------------------------
+// Speed with a desktop result
+// ---------------------------------------------------------------------------
+
+test("speed with a desktop result draws mobile and desktop as separate parts", () => {
+  const doc = testDocument();
+  const desktop = { measured: false as const, status: "error" as const, message: "DESKTOP-NOT-MEASURED" };
+  const out = speedHtml(doc.speed, doc.labels, desktop);
+  const mobileAt = out.indexOf('<h3 class="sub">Mobile</h3>');
+  const desktopAt = out.indexOf('<h3 class="sub">Desktop</h3>');
+  assert.ok(mobileAt >= 0 && desktopAt > mobileAt, "mobile, then desktop");
+  assert.ok(out.includes("DESKTOP-NOT-MEASURED"), "desktop's own state is shown, not mobile's");
+  assert.ok(out.includes("measured separately and can differ"));
+});
+
+test("speed without a desktop result is the section it has always been", () => {
+  const doc = testDocument();
+  assert.equal(speedHtml(doc.speed, doc.labels, null), speedHtml(doc.speed, doc.labels));
+  assert.ok(!speedHtml(doc.speed, doc.labels).includes("speed-device"));
+});

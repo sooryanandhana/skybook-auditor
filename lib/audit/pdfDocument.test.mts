@@ -145,13 +145,13 @@ function deepFreeze<T>(value: T): T {
   return Object.freeze(value);
 }
 
-type Store = ReturnType<typeof createJobStore<SiteAuditResult, SpeedResult, ExplainResult>>;
+type Store = ReturnType<typeof createJobStore<SiteAuditResult, SpeedResult, ExplainResult, SpeedResult["data"]>>;
 
 function jobWith(
   status: "completed" | "partial" = "completed",
   audit: SiteAuditResult = storedAudit(),
 ): { store: Store; jobId: string } {
-  const store = createJobStore<SiteAuditResult, SpeedResult, ExplainResult>();
+  const store = createJobStore<SiteAuditResult, SpeedResult, ExplainResult, SpeedResult["data"]>();
   const job = store.create("https://example.com");
   store.finish(job.id, status, deepFreeze(audit));
   return { store, jobId: job.id };
@@ -1293,4 +1293,159 @@ test("a small audit says nothing about coverage, because nothing was left out", 
   store.setExplanation(jobId, explained());
 
   assert.equal(documentFor(store, jobId).summary.ai?.coverageNote, null);
+});
+
+// ---------------------------------------------------------------------------
+// The plain-language explanation, written in our source
+// ---------------------------------------------------------------------------
+
+test("a problem finding carries its written explanation, with no AI answer at all", () => {
+  const { store, jobId } = jobWith();
+  const doc = documentFor(store, jobId);
+  const meta = doc.pageFindings.groups[0].findings[0];
+
+  assert.equal(meta.ruleId, META);
+  assert.equal(meta.commentary, null, "no AI answer was stored");
+  assert.ok(meta.explainer !== null, "the written explanation does not depend on the AI");
+  assert.match(meta.explainer.whatItMeans, /meta description/i);
+  assert.ok(meta.explainer.steps.length >= 2);
+  assert.equal(meta.explainer.whoFixes, "SEO or content specialist");
+});
+
+test("a rule with no written explanation gets none rather than a borrowed one", () => {
+  const { store, jobId } = jobWith();
+  const doc = documentFor(store, jobId);
+  assert.equal(doc.siteFindings.groups[0].findings[0].ruleId, SPF_RULE);
+  assert.equal(doc.siteFindings.groups[0].findings[0].explainer, null);
+});
+
+test("a passing check is never explained as a problem to fix", () => {
+  const passing = [{ ...findings[1], severity: "good" }] as unknown as Finding[];
+  const { store, jobId } = jobWith(
+    "completed",
+    storedAudit({ site: { findings: passing, skippedChecks: [], evaluatedPages: 128 } }),
+  );
+  const doc = documentFor(store, jobId);
+  const all = [...doc.siteFindings.groups, ...doc.pageFindings.groups].flatMap((group) => group.findings);
+
+  assert.equal(all.length, 1);
+  assert.equal(all[0].severity, "good");
+  assert.equal(all[0].explainer, null);
+});
+
+// ---------------------------------------------------------------------------
+// The overall summary, written by code
+// ---------------------------------------------------------------------------
+
+test("the overall summary is present and complete with no AI answer at all", () => {
+  const { store, jobId } = jobWith();
+  const doc = documentFor(store, jobId);
+
+  assert.equal(doc.summary.ai, null, "no AI answer was stored");
+  assert.ok(doc.overallSummary !== null);
+  assert.deepEqual(
+    doc.overallSummary.areas.map((area) => area.key),
+    ["speed", "seo", "security", "certificate", "domain", "site"],
+  );
+  assert.match(doc.overallSummary.overview.join(" "), /https:\/\/example\.com\//);
+  assert.ok(doc.overallSummary.help.items.length >= 1);
+});
+
+test("the overall summary quotes the document's own grade, never its own", () => {
+  const { store, jobId } = jobWith();
+  const doc = documentFor(store, jobId);
+  const overview = doc.overallSummary?.overview.join(" ") ?? "";
+  if (doc.score.grade === null) {
+    assert.match(overview, /not enough completed checks/);
+  } else {
+    assert.ok(overview.includes(`grade of ${doc.score.grade}`));
+  }
+});
+
+test("the summary describes this fixture's failed mail-server lookup as undetermined", () => {
+  const { store, jobId } = jobWith();
+  const doc = documentFor(store, jobId);
+  const domain = doc.overallSummary?.areas.find((area) => area.key === "domain")?.paragraphs.join(" ") ?? "";
+  assert.match(domain, /mail servers failed, so they could not be determined/);
+  assert.match(domain, /No SPF record was found/);
+});
+
+// ---------------------------------------------------------------------------
+// Desktop speed in the PDF
+// ---------------------------------------------------------------------------
+
+const desktopMeasured = {
+  status: "checked", strategy: "desktop", requestedUrl: "https://example.com/", failureReason: null,
+  field: { status: "absent", measuredUrl: null, scope: null, overall: null, lcp: null, inp: null, cls: null, fcp: null, ttfb: null, error: null },
+  lab: { status: "found", measuredUrl: "https://example.com/", score: 93, lcpMs: 900, fcpMs: 500, tbtMs: 20, speedIndexMs: 800, cls: 0.01, error: null },
+  notInspected: [],
+  message: null,
+} as unknown as SpeedResult["data"];
+
+function jobWithDesktop() {
+  const store = createJobStore<SiteAuditResult, SpeedResult, ExplainResult, SpeedResult["data"]>();
+  const job = store.create("https://example.com");
+  store.finish(job.id, "completed", deepFreeze(storedAudit()));
+  return { store, jobId: job.id };
+}
+
+test("with no desktop measurement the PDF shows none and says it was not measured", () => {
+  const { store, jobId } = jobWithDesktop();
+  const doc = documentFor(store, jobId);
+  assert.equal(doc.desktopSpeed, null);
+  const speed = doc.overallSummary?.areas.find((area) => area.key === "speed")?.paragraphs.join(" ") ?? "";
+  assert.match(speed, /Desktop: speed was not measured for this report/);
+});
+
+test("a desktop measurement reaches the PDF beside mobile, and the score is unchanged", () => {
+  const { store, jobId } = jobWithDesktop();
+  const before = documentFor(store, jobId);
+  store.attachDesktop(jobId, desktopMeasured);
+  const after = documentFor(store, jobId);
+
+  assert.ok(after.desktopSpeed !== null && after.desktopSpeed.measured);
+  if (!after.desktopSpeed.measured) return;
+  assert.equal(after.desktopSpeed.labScore, 93);
+  assert.deepEqual(after.score, before.score, "desktop never reaches the grade");
+  const speed = after.overallSummary?.areas.find((area) => area.key === "speed")?.paragraphs.join(" ") ?? "";
+  assert.match(speed, /Desktop, simulated test: the page scored 93 out of 100, which Google classes as good/);
+});
+
+// ---------------------------------------------------------------------------
+// Evidence panels come from the same builders as the measured facts
+// ---------------------------------------------------------------------------
+
+test("a site finding's evidence panel is the matching measured-facts rows", () => {
+  const spf = { ...findings[0], id: "security.dns.spf" } as unknown as Finding;
+  const { store, jobId } = jobWith(
+    "completed",
+    storedAudit({ site: { findings: [spf, findings[1]], skippedChecks: [], evaluatedPages: 128 } }),
+  );
+  const doc = documentFor(store, jobId);
+  const card = doc.siteFindings.groups[0].findings[0];
+  assert.equal(card.ruleId, "security.dns.spf");
+  assert.ok(card.evidencePanel !== null);
+  assert.equal(card.evidencePanel.heading, "Measured for the whole site");
+  const domainFacts = doc.measured.find((section) => section.heading === "Domain and email records")?.facts ?? [];
+  const spfRow = domainFacts.find((row) => row.label === "SPF");
+  assert.deepEqual(card.evidencePanel.facts, [spfRow], "the same row the tables print");
+});
+
+test("a content finding keeps its per-page evidence and gets no panel", () => {
+  const { store, jobId } = jobWith();
+  const doc = documentFor(store, jobId);
+  assert.equal(doc.pageFindings.groups[0].findings[0].evidencePanel, null);
+});
+
+test("no evidence panel ever carries a raw response header", () => {
+  const csp = { ...findings[1], id: "security.headers.csp", category: "security" } as unknown as Finding;
+  const { store, jobId } = jobWith(
+    "completed",
+    storedAudit({ site: { findings: [csp], skippedChecks: [], evaluatedPages: 128 } }),
+  );
+  const doc = documentFor(store, jobId);
+  const panel = doc.pageFindings.groups[0].findings[0].evidencePanel;
+  assert.ok(panel !== null);
+  const securityFacts = doc.measured.find((section) => section.heading === "Security")?.facts ?? [];
+  for (const row of panel.facts) assert.ok(securityFacts.includes(row) || securityFacts.some((s) => JSON.stringify(s) === JSON.stringify(row)), "only the document's own sanitised rows");
 });

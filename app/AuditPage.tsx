@@ -512,10 +512,10 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
            * Desktop runs LAST and SEPARATELY. Mobile has already answered — its
            * results, the score and the commentary are on their way — so the
            * desktop panel fills in afterwards without holding any of them up.
-           * It is display-only and carries no jobId, so it can never be filed
-           * against the audit or reach the score.
+           * It carries the jobId only so the server can keep it, ungraded, for
+           * the PDF; it is never graded and can never reach the score.
            */
-          void startPerformanceDesktop(finalUrl, runId);
+          void startPerformanceDesktop(finalUrl, runId, jobId);
         });
       } else {
         void startExplanation(jobId, runId);
@@ -619,19 +619,20 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
   /**
    * Asks the server for the DESKTOP speed figures, as its own request.
    *
-   * DISPLAY-ONLY, AND KEPT OFF THE SCORE. It sends `strategy=desktop` and no
-   * job id, so the server neither grades it nor files it against the audit —
-   * the desktop result reaches this panel and nowhere else. It mirrors the
-   * mobile check's run-tracking and abort handling, but touches none of the
-   * findings, score or commentary state: mobile alone feeds those.
+   * KEPT OFF THE SCORE. It sends `strategy=desktop`, so the server never grades
+   * it. The job id lets the server keep the result, ungraded and in a separate
+   * slot, so the PDF can show desktop beside mobile; on this page it reaches
+   * this panel and nowhere else. It mirrors the mobile check's run-tracking and
+   * abort handling, but touches none of the findings, score or commentary
+   * state: mobile alone feeds those.
    */
-  async function startPerformanceDesktop(finalUrl: string, runId: number) {
+  async function startPerformanceDesktop(finalUrl: string, runId: number, jobId: string) {
     const controller = new AbortController();
     performanceDesktopAbortRef.current = controller;
     setPerformanceDesktopRunning(true);
 
     try {
-      const response = await fetch("/api/audit/performance?strategy=desktop", {
+      const response = await fetch(`/api/audit/performance?strategy=desktop&jobId=${encodeURIComponent(jobId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: finalUrl }),

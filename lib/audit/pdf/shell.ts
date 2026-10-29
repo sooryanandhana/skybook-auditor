@@ -32,6 +32,7 @@ import { skippedHtml } from "./skipped.ts";
 import { speedHtml } from "./speed.ts";
 import { executiveSummaryHtml } from "./executiveSummary.ts";
 import { clientSummaryHtml } from "./clientSummary.ts";
+import { overallSummaryHtml } from "./overallSummary.ts";
 import { finalAssessmentHtml } from "./finalAssessment.ts";
 import { STYLESHEET } from "./styles.ts";
 import { runningHeadFootCss } from "./runningHeadFoot.ts";
@@ -109,12 +110,18 @@ export function documentHtml(document: PdfDocument): string {
       siteFindings: document.siteFindings,
       pageFindings: document.pageFindings,
     }) +
+    /*
+     * THE OVERALL SUMMARY, WRITTEN BY CODE. It follows the executive summary
+     * and comes before the AI summary, so the plain-language account of every
+     * area is in the report whether or not a model answered.
+     */
+    overallSummaryHtml(document.overallSummary) +
     clientSummaryHtml(document.clientSummary, labels, aiNote) +
     coverageHtml(document.coverage) +
     findingsHtml(document.siteFindings, labels) +
     findingsHtml(document.pageFindings, labels) +
     skippedHtml(document.skipped) +
-    speedHtml(document.speed, labels) +
+    speedHtml(document.speed, labels, document.desktopSpeed) +
     finalAssessmentHtml(document.score) +
     factSectionsHtml(MEASURED_HEADING, document.measured, "measured") +
     factSectionsHtml(COVERAGE_DETAIL_HEADING, document.coverageDetail, "coverage-detail") +

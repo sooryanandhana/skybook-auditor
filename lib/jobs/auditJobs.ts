@@ -13,7 +13,7 @@ import {
   type SiteAuditOptions,
 } from "../audit/siteAudit.ts";
 import { isCertificateFailureAudit } from "../report/siteFindingsView.ts";
-import type { AuditResult, SpeedResult } from "../types";
+import type { AuditResult, PerformanceData, SpeedResult } from "../types";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
 import { describeError, elapsedMs, logOutcome, type ReliabilityEvent } from "../log/reliabilityLog.ts";
 
@@ -53,8 +53,10 @@ const GLOBAL_KEY = "__skybookAuditJobs";
  * The third slot holds the AI commentary, which is written later still --
  * from the audit and that measurement together. A TYPE-ONLY import, so the
  * provider it came from is erased at build time and nothing here loads an SDK.
+ *
+ * Desktop speed travels in its own slot (`PerformanceData`), never in the graded `attached` one.
  */
-export type AuditJobStore = JobStore<AuditResult, SpeedResult, ExplainResult>;
+export type AuditJobStore = JobStore<AuditResult, SpeedResult, ExplainResult, PerformanceData>;
 
 type GlobalWithJobs = typeof globalThis & {
   [GLOBAL_KEY]?: AuditJobStore;
@@ -62,7 +64,7 @@ type GlobalWithJobs = typeof globalThis & {
 
 export function auditJobs(): AuditJobStore {
   const holder = globalThis as GlobalWithJobs;
-  holder[GLOBAL_KEY] ??= createJobStore<AuditResult, SpeedResult, ExplainResult>();
+  holder[GLOBAL_KEY] ??= createJobStore<AuditResult, SpeedResult, ExplainResult, PerformanceData>();
   return holder[GLOBAL_KEY];
 }
 

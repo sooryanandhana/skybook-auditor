@@ -179,7 +179,9 @@ export const STYLESHEET: string =
   p { margin: 0 0 3mm; max-width: 72ch; }
 
   h1 { font-family: ${SERIF}; font-size: 30pt; font-weight: 600; line-height: 1.15; margin: 0; }
-  h2 { font-family: ${SERIF}; font-size: 22pt; font-weight: 600; line-height: 1.15; margin: 0 0 6mm; }
+  /* A major section heading: the largest type after the cover, in the serif's
+     heaviest bundled weight (SemiBold -- no heavier face ships with the report). */
+  h2 { font-family: ${SERIF}; font-size: 24pt; font-weight: 600; line-height: 1.15; color: ${INK}; margin: 0 0 6mm; }
   /* The small spaced label: a group of findings, a table, a list of notes. */
   h3 {
     font-size: 7.5pt; font-weight: 600; line-height: 1.3;
@@ -188,7 +190,7 @@ export const STYLESHEET: string =
   }
   /* A sub-heading inside a section, in the body's own face. */
   h3.sub {
-    font-size: 11.5pt; letter-spacing: 0; text-transform: none; color: ${INK};
+    font-size: 12pt; letter-spacing: 0; text-transform: none; color: ${INK};
     margin: 0 0 2.5mm;
   }
   .finding-title { font-family: ${SERIF}; font-size: 12.5pt; font-weight: 600; line-height: 1.3; }
@@ -424,13 +426,16 @@ export const STYLESHEET: string =
    * so the colour that remains always means something.
    */
   section { margin: 0 0 11mm; }
+  /* A little more air before each major section, so one ends visibly before the
+     next begins. Modest on purpose: a page break still starts at the top. */
+  section + section { margin-top: 4mm; }
   section > h2 { counter-increment: section; }
   /* The numbered label above a section's title. Drawn by the page, not written. */
   section > h2::before {
     content: "Section " counter(section, decimal-leading-zero);
     display: block;
     font-family: ${SANS};
-    font-size: 7.5pt; font-weight: 400; line-height: 1.3;
+    font-size: 8pt; font-weight: 600; line-height: 1.3;
     letter-spacing: .28em; text-transform: uppercase;
     color: ${SKYBOOK_DEEP};
     margin: 0 0 2.5mm;
@@ -439,13 +444,13 @@ export const STYLESHEET: string =
   section > h2::after {
     content: "";
     display: block;
-    width: 16mm; height: .8mm;
+    width: 20mm; height: 1mm;
     margin: 4.5mm 0 0;
     background: ${SKYBOOK_DEEP};
   }
   .lead { font-size: 10.5pt; color: ${INK_SOFT}; max-width: 72ch; }
   .group + .group { margin-top: 6mm; }
-  .group h3 { margin-top: 0; }
+  .group h3 { margin-top: 0; font-size: 8pt; color: ${INK_SOFT}; }
 
   ul, ol { margin: 0 0 3mm; padding-left: 5mm; }
   li { margin: 0 0 1.2mm; max-width: 72ch; }
@@ -691,6 +696,66 @@ export const STYLESHEET: string =
     text-transform: uppercase; color: ${SKYBOOK_DEEP}; margin: 0 0 .8mm;
   }
   .remediation p:last-child { margin: 0; max-width: 72ch; }
+
+  /*
+   * THE PLAIN-LANGUAGE EXPLANATION: what it means, why it matters, what may
+   * follow, then the steps and who fixes it. Written in our source, so it takes
+   * the body's own type rather than the AI note's quieter one. Each block is
+   * kept whole, so a label never ends a page without its paragraph; the card
+   * itself may still break between blocks, because a long card must.
+   */
+  .explainer { margin: 0 0 3mm; break-inside: avoid; }
+  .explainer p { max-width: 72ch; margin: 0 0 1.6mm; }
+  .explainer-label {
+    font-size: 6.8pt; font-weight: 600; letter-spacing: .16em;
+    text-transform: uppercase; color: ${INK_FAINT}; margin: 2mm 0 .6mm;
+  }
+  .explainer > .explainer-label:first-child { margin-top: 0; }
+  .explainer-steps ol { margin: 0 0 2mm; padding-left: 5mm; max-width: 72ch; }
+  .explainer-steps li { margin: 0 0 .8mm; break-inside: avoid; }
+  .who-fixes { font-size: 9pt; color: ${INK_SOFT}; }
+  .who-fixes .explainer-label { display: inline; margin: 0 1.5mm 0 0; }
+
+  /* ---------- the overall summary ----------
+     Written by code from the verified audit, so it takes the body's own type.
+     It starts a fresh page after the one-page executive summary, then flows; each
+     area and each list is kept whole so a heading never ends a page alone. The
+     status word carries the verdict, and its colour is emphasis only. */
+  .overall-summary { break-before: page; }
+  .summary-overview p { max-width: 72ch; font-size: 10pt; line-height: 1.55; color: ${INK}; }
+  .summary-area {
+    border-top: .25mm solid ${HAIRLINE};
+    padding: 3.5mm 0 1mm;
+    break-inside: avoid;
+  }
+  .summary-area-head { display: flex; align-items: baseline; justify-content: space-between; gap: 4mm; }
+  .summary-area-head h3 { font-size: 12pt; letter-spacing: 0; text-transform: none; color: ${INK}; margin: 0 0 1.5mm; }
+  .summary-area p { max-width: 72ch; font-size: 9.5pt; line-height: 1.5; margin: 0 0 1.4mm; }
+  .area-status {
+    flex-shrink: 0; font-size: 6.8pt; font-weight: 600; letter-spacing: .14em;
+    text-transform: uppercase; white-space: nowrap; color: ${INK_SOFT};
+  }
+  .area-status-good { color: ${SEVERITY.good}; }
+  .area-status-improve { color: ${SEVERITY.medium}; }
+  .area-status-attention { color: ${SEVERITY.high}; }
+  .summary-block { margin: 5mm 0 0; break-inside: avoid; }
+  .summary-block ul, .summary-block ol { margin: 0; padding-left: 5mm; max-width: 72ch; }
+  .summary-block li { font-size: 9.5pt; line-height: 1.5; margin: 0 0 1.2mm; break-inside: avoid; }
+  .summary-priorities li p { margin: 0 0 .6mm; }
+  .priority-title { font-weight: 600; color: ${INK}; }
+  .priority-meta, .priority-who { font-size: 8.5pt; color: ${INK_SOFT}; }
+  .summary-help { background: ${PANEL}; border-left: .8mm solid ${SKYBOOK_DEEP}; padding: 4mm 5mm; }
+  .summary-help p { max-width: 72ch; }
+  .summary-help p:last-child { margin-bottom: 0; }
+
+  /* A finding's evidence rows: the fact-table style, smaller, kept whole. */
+  .evidence-panel { margin: 0 0 3mm; break-inside: avoid; }
+  .evidence-facts { font-size: 8.5pt; margin: 0; }
+  .evidence-note { display: block; font-size: 7.5pt; color: ${INK_FAINT}; overflow-wrap: anywhere; }
+
+  /* Mobile and desktop speed, one after the other, each under its own label. */
+  .speed-device { margin: 0 0 5mm; }
+  .speed-device + .speed-device { border-top: .25mm solid ${HAIRLINE}; padding-top: 4mm; }
 
   /*
    * The affected pages, run together rather than stacked. Fifty addresses on

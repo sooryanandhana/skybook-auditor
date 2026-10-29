@@ -469,3 +469,101 @@ test("the labels are the document's, so the screen and the PDF cannot drift", ()
   }
   assert.ok(!out.includes("What to do"), "and nothing is hard-coded here");
 });
+
+// ---------------------------------------------------------------------------
+// The plain-language explanation
+// ---------------------------------------------------------------------------
+
+/** The page section with its one finding given an explanation. */
+function withExplainer(explainer: PdfFinding["explainer"]): PdfFindingSection {
+  const section = pageSection();
+  return {
+    ...section,
+    groups: section.groups.map((group) => ({
+      ...group,
+      findings: group.findings.map((finding) => ({ ...finding, explainer })),
+    })),
+  };
+}
+
+const EXPLAINER = {
+  whatItMeans: "MEANS-TEXT",
+  whyItMatters: "MATTERS-TEXT",
+  possibleImpact: "IMPACT-TEXT",
+  steps: ["STEP-ONE", "STEP-TWO"],
+  whoFixes: "WHO-TEXT",
+};
+
+test("an explanation appears in reading order: measured, meaning, action, steps, pages, AI", () => {
+  const out = findingsHtml(withExplainer(EXPLAINER), LABELS);
+  const order = [
+    "No meta description tag was found",
+    "What it means",
+    "MEANS-TEXT",
+    "Why it matters",
+    "MATTERS-TEXT",
+    "Possible impact",
+    "IMPACT-TEXT",
+    "Write a description of about 155 characters.",
+    "STEP-ONE",
+    "STEP-TWO",
+    "Who should fix it",
+    "WHO-TEXT",
+    "https://example.com/about",
+    "Search engines write their own summary",
+  ];
+  let at = -1;
+  for (const marker of order) {
+    const next = out.indexOf(marker, at + 1);
+    assert.ok(next > at, `"${marker}" comes after the part before it`);
+    at = next;
+  }
+  assert.ok(out.includes("<ol><li>STEP-ONE</li><li>STEP-TWO</li></ol>"), "the steps are an ordered list");
+});
+
+test("a finding without an explanation renders no explanation markup", () => {
+  const out = findingsHtml(withExplainer(null), LABELS);
+  assert.ok(!out.includes("explainer"));
+  assert.ok(!out.includes("What it means"));
+  assert.ok(!out.includes("Who should fix it"));
+});
+
+test("explanation text is escaped like every other document value", () => {
+  const out = findingsHtml(
+    withExplainer({ ...EXPLAINER, whatItMeans: HOSTILE, steps: [HOSTILE, "fine"], whoFixes: HOSTILE }),
+    LABELS,
+  );
+  assert.ok(!out.includes("<script>"), "no element was injected");
+  assert.ok(out.includes("&lt;script&gt;"), "the text was kept, escaped");
+});
+
+// ---------------------------------------------------------------------------
+// The evidence panel
+// ---------------------------------------------------------------------------
+
+function withPanel(panel: PdfFinding["evidencePanel"]): PdfFindingSection {
+  const section = siteSection();
+  return {
+    ...section,
+    groups: section.groups.map((group) => ({
+      ...group,
+      findings: group.findings.map((finding) => ({ ...finding, evidencePanel: panel })),
+    })),
+  };
+}
+
+test("an evidence panel shows its measured rows under the finding, escaped", () => {
+  const out = findingsHtml(
+    withPanel({ heading: "Measured for the whole site", facts: [{ label: "SPF", value: "Not found", note: HOSTILE }] }),
+    LABELS,
+  );
+  assert.ok(out.includes("Evidence · Measured for the whole site"));
+  assert.ok(out.includes("<th scope=\"row\">SPF</th><td>Not found"));
+  assert.ok(!out.includes("<script>"), "a measured value cannot inject markup");
+  assert.ok(out.indexOf("Evidence ·") > out.indexOf("Publish an SPF record"), "evidence follows the recommended action");
+});
+
+test("no evidence panel, no evidence markup", () => {
+  const out = findingsHtml(withPanel(null), LABELS);
+  assert.ok(!out.includes("evidence-panel"));
+});

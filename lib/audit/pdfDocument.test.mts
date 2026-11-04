@@ -2046,3 +2046,123 @@ test("F13 G4: a certificate failure carries its own technical file states, or nu
   audit.technical = null;
   assert.equal(documentOfAny(audit).technicalFiles, null);
 });
+
+// ---------------------------------------------------------------------------
+// CP3 step 2: the coverage hand-off to the overall summary (Q11)
+// ---------------------------------------------------------------------------
+
+/** Every page-level reach figure the overall summary prints, from its text and priorities. */
+const summaryReach = (doc: PdfDocument) => JSON.stringify(doc.overallSummary).match(/\d+ of \d+ evaluated pages?/g) ?? [];
+
+test("Q11 agreement: the overall summary shows a reach exactly when the document's own check passed", async () => {
+  const { valid, failing } = await coverageFixtures;
+
+  const shown = documentOf(valid);
+  assert.equal(shown.coverageCheck?.valid, true);
+  assert.ok(summaryReach(shown).length > 0, "valid counts: the summary names how far findings reached");
+  for (const priority of shown.overallSummary!.priorities.filter((p) => p.reach !== "Site-wide")) {
+    assert.match(priority.reach, /^\d+ of \d+ evaluated pages?$/, priority.title);
+  }
+
+  for (const [name, audit] of Object.entries(failing)) {
+    const doc = documentOf(audit);
+    assert.equal(doc.coverageCheck?.valid, false, name);
+    assert.deepEqual(summaryReach(doc), [], `${name}: no reach figure in the summary`);
+  }
+});
+
+test("Q11 no contradiction: when the check fails, the summary hides what the cards hide, and calls no page finding site-wide", async () => {
+  const { failing } = await coverageFixtures;
+  for (const [name, audit] of Object.entries(failing)) {
+    const doc = documentOf(audit);
+    const pageTitles = new Set(doc.pageFindings.groups.flatMap((group) => group.findings).map((card) => card.title));
+    for (const card of allCards(doc)) assert.equal(card.reach, null, `${name}: the card hides it`);
+    for (const priority of doc.overallSummary!.priorities) {
+      if (pageTitles.has(priority.title)) {
+        assert.equal(priority.reach, "Page-level", `${name}: ${priority.title} keeps its own scope`);
+      }
+    }
+    for (const area of doc.overallSummary!.areas) {
+      for (const title of pageTitles) {
+        assert.ok(!area.paragraphs.join(" ").includes(`${title} (site-wide)`), `${name}: ${title} is not called site-wide`);
+      }
+    }
+  }
+});
+
+test("Q11 source: the overall summary never checks the crawl's counts itself", () => {
+  const source = fs.readFileSync(new URL("../report/overallSummary.ts", import.meta.url), "utf8");
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  assert.ok(!/\bcoverageCheck\b/.test(code), "no coverageCheck import or call");
+  assert.ok(!/from "\.\/coverageCheck(\.ts)?"/.test(code), "no import of the check's own module");
+  assert.match(code, /coverage: CoverageCheck \| null/, "it takes the result it is given");
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 2: an IP address is not a domain (O4 b)
+// ---------------------------------------------------------------------------
+
+/** The scope domain printed on each of three site cards, for the given measured values. */
+function domainsFor(values: { emailDomain?: string; certificateHost?: string; finalUrl?: string }) {
+  const base = storedAudit();
+  const doc = documentOf(
+    storedAudit({
+      data: {
+        ...base.data,
+        dns: { ...base.data.dns, emailDomain: values.emailDomain ?? "example.com" },
+        ssl: { ...base.data.ssl, hostname: values.certificateHost ?? "example.com" },
+        fetch: { ...base.data.fetch, finalUrl: values.finalUrl ?? "https://example.com/" },
+      },
+      site: {
+        findings: [
+          problem("security.dns.spf", "No SPF record published", "site"),
+          problem("security.ssl.expired", "TLS certificate has expired", "site"),
+          problem("technical.robots.blocks-all", "robots.txt blocks all search engines", "site"),
+        ],
+        skippedChecks: [],
+        evaluatedPages: 128,
+      },
+    }),
+  );
+  const of = (id: string) => allCards(doc).find((card) => card.ruleId === id)!.scopeDomain;
+  return { email: of("security.dns.spf"), certificate: of("security.ssl.expired"), site: of("technical.robots.blocks-all") };
+}
+
+test("O4(b): an IPv4 address in any measured field is treated as an unknown domain", () => {
+  assert.equal(domainsFor({ emailDomain: "1.2.3.4" }).email, null, "email domain");
+  assert.equal(domainsFor({ certificateHost: "93.184.216.34" }).certificate, null, "certificate host");
+  assert.equal(domainsFor({ finalUrl: "https://1.2.3.4/" }).site, null, "audited address");
+  assert.equal(domainsFor({ emailDomain: "1.2.3.4." }).email, null, "with a trailing dot");
+  // A shortened form: the address parser expands it to a dotted quad, which is still an IP.
+  assert.equal(domainsFor({ finalUrl: "http://1.2.3/" }).site, null, "shortened IPv4");
+  assert.equal(domainsFor({ certificateHost: "1234" }).certificate, null, "a single number");
+});
+
+test("O4(b): an IPv6 address is treated as an unknown domain", () => {
+  assert.equal(domainsFor({ finalUrl: "https://[2001:db8::1]/" }).site, null, "audited address");
+  assert.equal(domainsFor({ certificateHost: "2001:db8::1" }).certificate, null, "certificate host");
+  assert.equal(domainsFor({ emailDomain: "::1" }).email, null, "email domain");
+});
+
+test("O4(b): real domain names are kept, including ones with numeric labels and a trailing dot", () => {
+  assert.deepEqual(
+    domainsFor({ emailDomain: "example.com", certificateHost: "123.example.com", finalUrl: "https://www.example.com/" }),
+    { email: "example.com", certificate: "123.example.com", site: "www.example.com" },
+  );
+  assert.equal(domainsFor({ emailDomain: "example.com." }).email, "example.com.");
+  assert.equal(domainsFor({ certificateHost: "1.example.2" }).certificate, "1.example.2", "only all-numeric names are rejected");
+});
+
+test("O4(b): a certificate failure at an IP address has no domain for its site cards", async () => {
+  const audit = await certificateFailureAudit();
+  audit.failedUrl = "https://1.2.3.4/";
+  audit.ssl.hostname = "1.2.3.4";
+  audit.dns.emailDomain = "mail.example.org";
+  audit.site.findings.push(problem("technical.robots.blocks-all", "robots.txt blocks all search engines", "site"));
+
+  const doc = documentOfAny(audit);
+  const of = (id: string) => allCards(doc).find((card) => card.ruleId === id)!.scopeDomain;
+  assert.equal(of("technical.robots.blocks-all"), null);
+  assert.equal(of("security.ssl.expired"), null);
+  assert.equal(of("security.dns.dmarc"), "mail.example.org", "a real domain beside it is unaffected");
+});

@@ -16,6 +16,7 @@ const SUMMARY: OverallSummary = {
     { key: "speed", heading: "Website speed and performance", status: "improve", statusLabel: "Room for improvement", paragraphs: ["SPEED-TEXT"] },
     { key: "domain", heading: "Domain and email records", status: "incomplete", statusLabel: "Partly checked", paragraphs: [`NS ${HOSTILE}`] },
   ],
+  securityStatus: "incomplete",
   strengths: ["STRENGTH-ONE"],
   priorities: [
     { title: "PRIORITY-TITLE", severityLabel: "Critical", reach: "Site-wide", whyItMatters: "WHY-TEXT", whoFixes: "Hosting or server administrator" },

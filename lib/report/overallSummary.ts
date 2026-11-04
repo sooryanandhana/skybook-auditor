@@ -36,7 +36,7 @@ import type {
 } from "../types.ts";
 import { explainerFor, whoFixesLabel } from "./findingExplainers.ts";
 import { fieldShiftText, metricDurationText } from "./measurementsView.ts";
-import { affectedView, crawlView } from "./siteFindingsView.ts";
+import { affectedViewFor, crawlView, findingScope, scopeLabel, type CoverageCheck } from "./siteFindingsView.ts";
 
 // ---------------------------------------------------------------------------
 // The model
@@ -80,6 +80,11 @@ export interface OverallSummary {
   /** Scope and overall condition, in plain sentences. */
   readonly overview: readonly string[];
   readonly areas: readonly SummaryArea[];
+  /**
+   * The Security status: the most serious of the security, certificate and
+   * domain areas' statuses (CP3-Q2a, C2).
+   */
+  readonly securityStatus: AreaStatus;
   /** Checks that ran and found nothing wrong, in plain words. */
   readonly strengths: readonly string[];
   /** The most important problems, worst first. Empty when there are none. */
@@ -108,6 +113,12 @@ export interface OverallSummaryInput {
   readonly gradeLabel: string | null;
   /** A separately measured desktop speed result, or null when there is none. */
   readonly desktop: PerformanceData | null;
+  /**
+   * Whether the crawl's counts reconciled, worked out once by the document and
+   * passed in. A finding's reach is shown only when it did; this file never
+   * checks the counts itself.
+   */
+  readonly coverage: CoverageCheck | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,34 +140,45 @@ export const NOT_CHECKED_BY_THIS_AUDIT: readonly string[] = [
 const NOT_A_VERDICT = "This says nothing about the website itself.";
 
 /**
- * What a passing check means, in plain words. Speed is described from
+ * What a passing check means, in plain words: the count-safe sentences of
+ * CP1 v6 §5.2 (CP3-O7). None claims every page, because a check that ran may
+ * still have been unable to judge some of them. Speed is described from
  * measurements instead. Exported so the wording can be reviewed as printed.
  */
 export const PASSED: Readonly<Record<string, { readonly text: string; readonly area: SummaryArea["key"] }>> = {
-  "security.https": { text: "Every page read was delivered over a secure HTTPS connection.", area: "security" },
-  "security.ssl.expired": { text: "The website's certificate is within its validity period.", area: "certificate" },
-  "security.ssl.hostname": { text: "The certificate covers the address the website was reached on.", area: "certificate" },
+  "security.https": { text: "The pages checked were delivered over a secure HTTPS connection.", area: "security" },
+  "security.ssl.expired": { text: "The certificate was within its validity period.", area: "certificate" },
+  "security.ssl.hostname": { text: "The certificate covers the address the site was reached on.", area: "certificate" },
   "security.ssl.untrusted": { text: "The certificate is trusted by the system that checked it.", area: "certificate" },
-  "security.mixed-content": { text: "No insecure (http://) files were found in the pages read.", area: "security" },
-  "security.form.insecure": { text: "No forms sending data over an unencrypted connection were found.", area: "security" },
-  "security.headers.hsts": { text: "The pages read tell browsers to always use the secure version of the site (HSTS).", area: "security" },
-  "security.headers.csp": { text: "The pages read send a Content-Security-Policy.", area: "security" },
-  "security.cookies.secure": { text: "Cookies set by the pages read are limited to secure connections.", area: "security" },
-  "security.cookies.httponly": { text: "No cookies readable by page scripts were found where cookies were checked.", area: "security" },
+  "security.mixed-content": {
+    text: "No files loaded over an insecure (http://) connection were found on the pages where this could be checked.",
+    area: "security",
+  },
+  "security.form.insecure": {
+    text: "No forms sending information over an unencrypted connection were found on the pages checked.",
+    area: "security",
+  },
+  "security.headers.hsts": { text: "The site sends the HSTS instruction on the pages where this could be checked.", area: "security" },
+  "security.headers.csp": { text: "The site sends a Content-Security-Policy on the pages where this could be checked.", area: "security" },
+  "security.cookies.secure": { text: "Cookies set by the pages checked have the Secure protection.", area: "security" },
+  "security.cookies.httponly": { text: "Cookies set by the pages checked have the HttpOnly protection.", area: "security" },
   "security.dns.spf": { text: "The domain publishes an SPF record for its email.", area: "domain" },
   "security.dns.dmarc": { text: "The domain publishes a DMARC policy for its email.", area: "domain" },
-  "seo.viewport.missing": { text: "Every page read includes the mobile viewport tag.", area: "seo" },
-  "seo.title.missing": { text: "Every page read has a title.", area: "seo" },
-  "seo.meta-description.missing": { text: "Every page read has a meta description.", area: "seo" },
-  "seo.canonical.missing": { text: "Every page read declares its preferred (canonical) address.", area: "seo" },
-  "seo.lang.missing": { text: "Every page read declares its language.", area: "seo" },
-  "seo.h1.missing": { text: "Every page read has a main heading.", area: "seo" },
-  "seo.h1.multiple": { text: "No page read has more than one main heading.", area: "seo" },
-  "seo.h1.empty": { text: "No page read has an empty main heading.", area: "seo" },
-  "seo.headings.order": { text: "Heading levels follow in order on the pages read.", area: "seo" },
-  "seo.images.alt": { text: "Images on the pages read have alternative text.", area: "seo" },
-  "technical.robots.blocks-all": { text: "The robots.txt file does not block search engines from the whole site.", area: "site" },
+  "seo.viewport.missing": { text: "No missing mobile display setting was found on the pages where this could be checked.", area: "seo" },
+  "seo.title.missing": { text: "No missing page title was found on the pages where this could be checked.", area: "seo" },
+  "seo.meta-description.missing": { text: "No missing description was found on the pages where this could be checked.", area: "seo" },
+  "seo.canonical.missing": { text: "No missing canonical address was found on the pages where this could be checked.", area: "seo" },
+  "seo.lang.missing": { text: "No missing language setting was found on the pages where this could be checked.", area: "seo" },
+  "seo.h1.missing": { text: "No page checked was missing a main heading.", area: "seo" },
+  "seo.h1.multiple": { text: "No page checked had more than one main heading.", area: "seo" },
+  "seo.h1.empty": { text: "No page checked had an empty main heading.", area: "seo" },
+  "seo.headings.order": { text: "Heading levels were in order on the pages where this could be checked.", area: "seo" },
+  "seo.images.alt": { text: "Images on the pages checked have descriptions (alternative text).", area: "seo" },
+  "technical.robots.blocks-all": { text: "The robots.txt file does not block search engines from the site.", area: "site" },
 };
+
+/** Added to a strength whose check could not run on every page (CP1 v6 §5.2). */
+export const NOT_EVERY_PAGE_CHECKED = "(not every page could be checked; see Limitations)";
 
 const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, good: 3 };
 const SEVERITY_WORD: Record<Exclude<Severity, "good">, string> = {
@@ -190,13 +212,19 @@ function problemsIn(findings: readonly Finding[], test: (finding: Finding) => bo
   return findings.filter((finding) => isProblem(finding) && test(finding));
 }
 
-/** "No meta description (19 of 128 evaluated pages)". */
-function namedFinding(finding: Finding): string {
-  return `${finding.title} (${reachText(finding)})`;
-}
-
-function reachText(finding: Finding): string {
-  return affectedView(finding).reach ?? "site-wide";
+/**
+ * "No meta description (19 of 128 evaluated pages)", or "No SPF record
+ * published (site-wide)".
+ *
+ * THE REACH IS SHOWN ONLY FROM COUNTS THAT RECONCILED, read from the coverage
+ * result the document passed in. When a page finding's reach is withheld, the
+ * finding is named without brackets: an unknown reach is never re-labelled as
+ * site-wide.
+ */
+function namedFinding(finding: Finding, coverage: CoverageCheck | null): string {
+  const reach = affectedViewFor(finding, coverage).reach;
+  if (reach !== null) return `${finding.title} (${reach})`;
+  return findingScope(finding) === "site" ? `${finding.title} (site-wide)` : finding.title;
 }
 
 /** "a, b and c" -- with the rest counted rather than listed when there are many. */
@@ -220,17 +248,40 @@ function readableDate(iso: string | null): string | null {
   return date.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
 }
 
-/** The rules that ran and did not fire, by the result's own ledger. */
+/**
+ * The rules that ran and did not fire, by the result's own ledger.
+ *
+ * THE ROBOTS STRENGTH NEEDS A FILE. With no robots.txt at all the rule still
+ * passes, because nothing blocks anything; but "the robots.txt file does not
+ * block search engines" would describe a file that does not exist. So it is a
+ * strength only when the file was found.
+ */
 function passedRuleIds(input: OverallSummaryInput): string[] {
   if (input.ranRules === null) return [];
   const fired = new Set(input.findings.filter(isProblem).map((finding) => finding.id));
-  return input.ranRules.filter((id) => !fired.has(id) && Object.hasOwn(PASSED, id));
+  const robotsFound = input.data.technical?.robotsTxtStatus === "found";
+  return input.ranRules.filter(
+    (id) =>
+      !fired.has(id) &&
+      Object.hasOwn(PASSED, id) &&
+      (id !== "technical.robots.blocks-all" || robotsFound),
+  );
+}
+
+/**
+ * A strength as printed: the approved sentence, qualified when the check could
+ * not run on every page it was meant to.
+ */
+function strengthText(id: string, skippedIds: ReadonlySet<string>): string {
+  const text = PASSED[id].text;
+  return skippedIds.has(id) ? text.replace(/\.$/, ` ${NOT_EVERY_PAGE_CHECKED}.`) : text;
 }
 
 function strengthsFor(input: OverallSummaryInput, area: SummaryArea["key"]): string[] {
+  const skippedIds = new Set(input.skippedChecks.map((skipped) => skipped.ruleId));
   return passedRuleIds(input)
     .filter((id) => PASSED[id].area === area)
-    .map((id) => PASSED[id].text);
+    .map((id) => strengthText(id, skippedIds));
 }
 
 function area(
@@ -364,7 +415,7 @@ function seoArea(input: OverallSummaryInput): SummaryArea {
   const paragraphs: string[] = [];
 
   if (problems.length > 0) {
-    paragraphs.push(`Issues found: ${listed(problems.map(namedFinding))}.`);
+    paragraphs.push(`Issues found: ${listed(problems.map((finding) => namedFinding(finding, input.coverage)))}.`);
   }
   if (passed.length > 0) paragraphs.push(`Working well: ${passed.join(" ")}`);
   if (paragraphs.length === 0) {
@@ -430,7 +481,9 @@ function securityArea(input: OverallSummaryInput): SummaryArea {
     input.findings,
     (finding) => finding.category === "security" && !SSL_IDS.has(finding.id) && !DNS_IDS.has(finding.id),
   );
-  if (problems.length > 0) paragraphs.push(`Issues found: ${listed(problems.map(namedFinding))}.`);
+  if (problems.length > 0) {
+    paragraphs.push(`Issues found: ${listed(problems.map((finding) => namedFinding(finding, input.coverage)))}.`);
+  }
   const passed = strengthsFor(input, "security");
   if (passed.length > 0) paragraphs.push(`Working well: ${passed.join(" ")}`);
 
@@ -618,9 +671,57 @@ function siteArea(input: OverallSummaryInput): SummaryArea {
   }
 
   const problems = problemsIn(input.findings, (finding) => finding.category === "technical");
-  const status: AreaStatus =
-    problems.length > 0 ? "attention" : coverage.partial || technical === null ? "incomplete" : "good";
-  return area("site", "Pages read and instructions for search engines", status, paragraphs);
+  return area("site", "Pages read and instructions for search engines", technicalStatus(input, problems.length), paragraphs);
+}
+
+/**
+ * The Technical status, by the precedence of CP1 v6 §4; the first rule that
+ * matches decides.
+ *
+ *   P1  a technical finding                                   Needs attention
+ *   P2  robots.txt or the sitemap confirmed absent            Room for improvement
+ *   P3  either unreadable, or the technical checks not run    Partly checked
+ *   P4  both found, but the crawl stopped short               Partly checked
+ *   P5  both found, and the crawl complete                    In good shape
+ *
+ * A file confirmed missing outranks one that could not be read, because the
+ * first is a known fact and the second is not (D2, U4). Whether the crawl was
+ * complete is a flag, not a count, so this never depends on counts that might
+ * not reconcile.
+ */
+function technicalStatus(input: OverallSummaryInput, problemCount: number): AreaStatus {
+  const technical = input.data.technical;
+  if (problemCount > 0) return "attention";
+  if (technical !== null && (technical.robotsTxtStatus === "absent" || technical.sitemapStatus === "absent")) {
+    return "improve";
+  }
+  if (technical === null || technical.robotsTxtStatus === "unavailable" || technical.sitemapStatus === "unavailable") {
+    return "incomplete";
+  }
+  return input.crawl.complete ? "good" : "incomplete";
+}
+
+/** How serious each status is, for combining areas: the higher number wins. */
+const STATUS_RANK: Record<AreaStatus, number> = {
+  attention: 4,
+  improve: 3,
+  incomplete: 2,
+  good: 1,
+  "not-measured": 0,
+};
+
+/**
+ * The most serious of the given statuses (CP3-Q2a, C2).
+ *
+ * "Room for improvement" outranks "Partly checked": a shortfall that was found
+ * is a known fact, an unfinished lookup is not. "Not measured" ranks lowest, so
+ * it decides nothing unless every status is "Not measured".
+ */
+function mostSerious(statuses: readonly AreaStatus[]): AreaStatus {
+  return statuses.reduce<AreaStatus>(
+    (worst, status) => (STATUS_RANK[status] > STATUS_RANK[worst] ? status : worst),
+    "not-measured",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -631,7 +732,7 @@ function overview(input: OverallSummaryInput): string[] {
   const coverage = crawlView(input.crawl);
   const out = [
     `This report covers ${input.auditedUrl}${input.checkedAt === null ? "" : `, checked on ${input.checkedAt}`}. ${coverage.headline}`,
-    "The audit examined website speed (when requested), search visibility and content, security and HTTPS, the SSL/TLS certificate, domain and email records, and the instructions the site gives to search engines.",
+    "The audit examined website speed, search visibility and content, security and HTTPS, the SSL/TLS certificate, domain and email records, and the instructions the site gives to search engines.",
   ];
 
   const problems = input.findings.filter(isProblem);
@@ -652,7 +753,14 @@ function overview(input: OverallSummaryInput): string[] {
   return out;
 }
 
-function priorities(findings: readonly Finding[]): SummaryPriority[] {
+/**
+ * The most important problems, worst first.
+ *
+ * Each one's reach comes only from counts that reconciled. Without one, the
+ * finding's own scope is named instead -- "Page-level" or "Site-wide" -- so a
+ * page finding is never described as site-wide for want of a figure.
+ */
+function priorities(findings: readonly Finding[], coverage: CoverageCheck | null): SummaryPriority[] {
   return findings
     .filter(isProblem)
     .slice()
@@ -663,7 +771,7 @@ function priorities(findings: readonly Finding[]): SummaryPriority[] {
       return {
         title: finding.title,
         severityLabel: SEVERITY_WORD[finding.severity as Exclude<Severity, "good">],
-        reach: affectedView(finding).reach ?? "Site-wide",
+        reach: affectedViewFor(finding, coverage).reach ?? scopeLabel(findingScope(finding)),
         whyItMatters: explainer?.whyItMatters ?? finding.remediation,
         whoFixes: explainer === null ? null : whoFixesLabel(explainer),
       };
@@ -732,20 +840,18 @@ export function skybookHelp(findings: readonly Finding[]): SkybookHelp {
 // ---------------------------------------------------------------------------
 
 export function buildOverallSummary(input: OverallSummaryInput): OverallSummary {
-  const strengths = passedRuleIds(input).map((id) => PASSED[id].text);
+  const skippedIds = new Set(input.skippedChecks.map((skipped) => skipped.ruleId));
+  const strengths = passedRuleIds(input).map((id) => strengthText(id, skippedIds));
+  const security = securityArea(input);
+  const certificate = certificateArea(input);
+  const domain = domainArea(input);
 
   return {
     overview: overview(input),
-    areas: [
-      speedArea(input),
-      seoArea(input),
-      securityArea(input),
-      certificateArea(input),
-      domainArea(input),
-      siteArea(input),
-    ],
+    areas: [speedArea(input), seoArea(input), security, certificate, domain, siteArea(input)],
+    securityStatus: mostSerious([security.status, certificate.status, domain.status]),
     strengths,
-    priorities: priorities(input.findings),
+    priorities: priorities(input.findings, input.coverage),
     limitations: limitations(input),
     notChecked: NOT_CHECKED_BY_THIS_AUDIT,
     help: skybookHelp(input.findings),

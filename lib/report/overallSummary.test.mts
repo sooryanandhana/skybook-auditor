@@ -11,12 +11,16 @@ import { runSecurityChecks } from "../collector/securityChecks.ts";
 import type { SiteCrawlSummary } from "../collector/crawlSite.ts";
 import type { AuditData, Finding, PerformanceData } from "../types.ts";
 import {
+  AREA_STATUS_LABELS,
   NOT_CHECKED_BY_THIS_AUDIT,
+  NOT_EVERY_PAGE_CHECKED,
+  PASSED,
   buildOverallSummary,
   skybookHelp,
   type OverallSummary,
   type OverallSummaryInput,
 } from "./overallSummary.ts";
+import { coverageCheck } from "./coverageCheck.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -110,8 +114,12 @@ const finding = (id: string, severity: Finding["severity"], category: Finding["c
     evidence: "Measured.", remediation: "Do the thing.", scope: "site", ...over,
   }) as unknown as Finding;
 
+/**
+ * The summary's input. Unless a test says otherwise, the coverage result is the
+ * shared check of the crawl given, exactly as the document passes it in.
+ */
 function input(over: Partial<OverallSummaryInput> = {}): OverallSummaryInput {
-  return {
+  const merged = {
     auditedUrl: "https://example.com/",
     checkedAt: "28/10/2026, 10:00",
     data: auditData(),
@@ -124,6 +132,7 @@ function input(over: Partial<OverallSummaryInput> = {}): OverallSummaryInput {
     desktop: null,
     ...over,
   };
+  return { ...merged, coverage: "coverage" in over ? (over.coverage ?? null) : coverageCheck(merged.crawl) };
 }
 
 const textOf = (summary: OverallSummary): string =>
@@ -330,7 +339,7 @@ test("strengths come only from rules that ran and did not fire", () => {
   const summary = buildOverallSummary(
     input({ ranRules: ran, findings: [finding("security.dns.spf", "medium", "security")] }),
   );
-  assert.ok(summary.strengths.includes("Every page read has a title."));
+  assert.ok(summary.strengths.includes("No missing page title was found on the pages where this could be checked."));
   assert.ok(summary.strengths.some((line) => /HSTS/.test(line)));
   assert.ok(!summary.strengths.some((line) => /SPF/.test(line)), "a rule that fired is not a strength");
 
@@ -367,7 +376,9 @@ test("limitations include a partial crawl and every check that could not run", (
   assert.match(limits, /Not every page of the site was read/);
   assert.match(limits, /Could not be checked — Cookies sent without the Secure flag: This response set no cookies\./);
   assert.match(limits, /Content that appears only after scripts run/);
-  assert.equal(areaStatus(summary, "site"), "incomplete");
+  // The default fixture's sitemap is confirmed absent, so with a partial crawl
+  // this is CP1 §4 case 11 (T1): "Room for improvement", not "Partly checked".
+  assert.equal(areaStatus(summary, "site"), "improve");
 });
 
 test("the not-checked list names what this audit does not examine", () => {
@@ -420,4 +431,262 @@ test("the summary states no consequence as fact and promises no result", () => {
   for (const phrase of [/\bguarantee/i, /has been (hacked|compromised|breached)/i, /\bpenali[sz]/i, /lost (rankings|traffic|sales)/i, /will (lose|rank|improve|increase)/i]) {
     assert.doesNotMatch(text, phrase);
   }
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 2 (F16)
+// ---------------------------------------------------------------------------
+
+type FileState = "found" | "absent" | "unavailable";
+const technical = (robotsTxtStatus: FileState, sitemapStatus: FileState) =>
+  ({ robotsTxtStatus, sitemapStatus, robotsBlocksEverything: false, sitemapUrl: null });
+
+/** A partial crawl whose counts still reconcile: 20 found, 12 read, 8 not reached. */
+const partialCrawl = () =>
+  crawl({ complete: false, stoppedBecause: "max-pages", discovered: 20, evaluated: 12, queuedAtStop: 8, sources: { html: 20, sitemap: 0 } });
+
+const robotsFinding = () => finding("technical.robots.blocks-all", "critical", "technical");
+
+test("F16: the Technical status follows CP1 §4 P1–P5, case by case", () => {
+  // [case, finding?, robots.txt, sitemap ("not-run" = technical checks did not run), crawl, expected]
+  const matrix: ReadonlyArray<[number, boolean, FileState | "not-run", FileState | "not-run", "complete" | "partial", string]> = [
+    [1, true, "found", "found", "complete", "attention"],
+    [2, true, "found", "absent", "complete", "attention"],
+    [3, true, "found", "unavailable", "complete", "attention"],
+    [4, true, "found", "found", "partial", "attention"],
+    [5, false, "absent", "found", "complete", "improve"],
+    [6, false, "found", "absent", "complete", "improve"],
+    [7, false, "absent", "absent", "complete", "improve"],
+    [8, false, "absent", "unavailable", "complete", "improve"],
+    [9, false, "unavailable", "absent", "complete", "improve"],
+    [10, false, "absent", "found", "partial", "improve"],
+    [11, false, "found", "absent", "partial", "improve"],
+    [12, false, "unavailable", "found", "complete", "incomplete"],
+    [13, false, "found", "unavailable", "complete", "incomplete"],
+    [14, false, "unavailable", "unavailable", "complete", "incomplete"],
+    [15, false, "not-run", "not-run", "complete", "incomplete"],
+    [15, false, "not-run", "not-run", "partial", "incomplete"],
+    [16, false, "found", "found", "partial", "incomplete"],
+    [17, false, "found", "found", "complete", "good"],
+  ];
+  for (const [caseNo, hasFinding, robots, sitemap, crawlState, expected] of matrix) {
+    const summary = buildOverallSummary(
+      input({
+        data: auditData({ technical: robots === "not-run" || sitemap === "not-run" ? null : technical(robots, sitemap) }),
+        crawl: crawlState === "partial" ? partialCrawl() : crawl(),
+        findings: hasFinding ? [robotsFinding()] : [],
+      }),
+    );
+    assert.equal(areaStatus(summary, "site"), expected, `case ${caseNo}`);
+  }
+});
+
+test("F16 §4 case 18: the 'Not measured' label is unchanged, and Technical never produces it", () => {
+  assert.equal(AREA_STATUS_LABELS["not-measured"], "Not measured");
+  for (const tech of [technical("found", "found"), technical("absent", "absent"), null]) {
+    assert.notEqual(areaStatus(buildOverallSummary(input({ data: auditData({ technical: tech }) })), "site"), "not-measured");
+  }
+});
+
+test("F16 §4 case 19: counts that do not reconcile change no status, and the Technical text carries no figure", () => {
+  // A partial crawl whose sources over-count what was found (I1 fails).
+  const broken = crawl({ complete: false, stoppedBecause: "max-pages", discovered: 20, evaluated: 12, queuedAtStop: 8, sources: { html: 25, sitemap: 0 } });
+  assert.equal(coverageCheck(broken).valid, false);
+  for (const tech of [technical("found", "absent"), technical("found", "found"), technical("unavailable", "found")]) {
+    const valid = buildOverallSummary(input({ data: auditData({ technical: tech }), crawl: partialCrawl() }));
+    const failed = buildOverallSummary(input({ data: auditData({ technical: tech }), crawl: broken }));
+    assert.equal(areaStatus(failed, "site"), areaStatus(valid, "site"), JSON.stringify(tech));
+    assert.doesNotMatch(areaText(failed, "site"), /\d/, "no coverage figure in the status text or partial-crawl mention");
+  }
+});
+
+const ALL_HEADERS = {
+  "content-type": "text/html",
+  "x-frame-options": "DENY",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+  "permissions-policy": "geolocation=()",
+};
+
+test("F16 Q2a/C2: the Security status is the most serious of security, certificate and domain", () => {
+  const status = (over: Partial<Record<keyof AuditData, unknown>>, findings: Finding[] = []) => {
+    const summary = buildOverallSummary(input({ data: auditData(over), findings }));
+    return {
+      parts: ["security", "certificate", "domain"].map((key) => areaStatus(summary, key)),
+      combined: summary.securityStatus,
+    };
+  };
+  const goodSecurity = runSecurityChecks(ALL_HEADERS, "<html><body><p>x</p></body></html>", true, []);
+  const failedLookup = (dns: AuditData["dns"]) => ({ ...dns, mx: { status: "error", records: [], error: "timed out" } });
+  const baseDns = auditData().dns;
+
+  // improve (a missing protective header) + incomplete (a failed lookup): improve wins (C2).
+  const pair = status({ dns: failedLookup(baseDns) });
+  assert.deepEqual(pair.parts, ["improve", "good", "incomplete"]);
+  assert.equal(pair.combined, "improve");
+
+  // attention beats everything.
+  assert.equal(status({ dns: failedLookup(baseDns) }, [finding("security.https", "critical", "security")]).combined, "attention");
+
+  // incomplete + good gives incomplete; all good gives good.
+  const partly = status({ security: goodSecurity, dns: failedLookup(baseDns) });
+  assert.deepEqual(partly.parts, ["good", "good", "incomplete"]);
+  assert.equal(partly.combined, "incomplete");
+  const allGood = status({ security: goodSecurity });
+  assert.deepEqual(allGood.parts, ["good", "good", "good"]);
+  assert.equal(allGood.combined, "good");
+
+  // not-measured never decides.
+  const notMeasured = status({
+    security: goodSecurity,
+    ssl: { status: "not-applicable", hostname: "example.com", certificate: null, trusted: null, problem: null, failure: null, message: "No HTTPS." },
+  });
+  assert.deepEqual(notMeasured.parts, ["good", "not-measured", "good"]);
+  assert.equal(notMeasured.combined, "good");
+});
+
+test("F16: the security combination adds a status and changes no area", () => {
+  const summary = buildOverallSummary(input());
+  assert.deepEqual(summary.areas.map((area) => area.key), ["speed", "seo", "security", "certificate", "domain", "site"]);
+  assert.equal(summary.areas.length, 6);
+});
+
+test("F16 O7: every strength is an approved count-safe sentence, with no figure and no 'every page'", () => {
+  for (const { text } of Object.values(PASSED)) {
+    assert.doesNotMatch(text, /\d/, text);
+    assert.doesNotMatch(text, /\bevery page\b/i, text);
+  }
+  const summary = buildOverallSummary(
+    input({ ranRules: Object.keys(PASSED), data: auditData({ technical: technical("found", "found") }) }),
+  );
+  const approved = new Set(Object.values(PASSED).map((entry) => entry.text));
+  assert.equal(summary.strengths.length, Object.keys(PASSED).length);
+  for (const line of summary.strengths) assert.ok(approved.has(line), `invented strength: ${line}`);
+});
+
+/**
+ * The 23 approved strength sentences, written out by hand from the O7 list
+ * (CP1 v6 §5.2, its "/" alternatives expanded one rule at a time). Deliberately
+ * NOT read from `PASSED` or any other production constant, so a change to the
+ * printed wording fails here instead of passing unnoticed.
+ */
+const APPROVED_STRENGTHS: ReadonlyArray<readonly [string, string]> = [
+  ["security.https", "The pages checked were delivered over a secure HTTPS connection."],
+  ["security.ssl.expired", "The certificate was within its validity period."],
+  ["security.ssl.hostname", "The certificate covers the address the site was reached on."],
+  ["security.ssl.untrusted", "The certificate is trusted by the system that checked it."],
+  ["security.mixed-content", "No files loaded over an insecure (http://) connection were found on the pages where this could be checked."],
+  ["security.form.insecure", "No forms sending information over an unencrypted connection were found on the pages checked."],
+  ["security.headers.hsts", "The site sends the HSTS instruction on the pages where this could be checked."],
+  ["security.headers.csp", "The site sends a Content-Security-Policy on the pages where this could be checked."],
+  ["security.cookies.secure", "Cookies set by the pages checked have the Secure protection."],
+  ["security.cookies.httponly", "Cookies set by the pages checked have the HttpOnly protection."],
+  ["security.dns.spf", "The domain publishes an SPF record for its email."],
+  ["security.dns.dmarc", "The domain publishes a DMARC policy for its email."],
+  ["seo.viewport.missing", "No missing mobile display setting was found on the pages where this could be checked."],
+  ["seo.title.missing", "No missing page title was found on the pages where this could be checked."],
+  ["seo.meta-description.missing", "No missing description was found on the pages where this could be checked."],
+  ["seo.canonical.missing", "No missing canonical address was found on the pages where this could be checked."],
+  ["seo.lang.missing", "No missing language setting was found on the pages where this could be checked."],
+  ["seo.h1.missing", "No page checked was missing a main heading."],
+  ["seo.h1.multiple", "No page checked had more than one main heading."],
+  ["seo.h1.empty", "No page checked had an empty main heading."],
+  ["seo.headings.order", "Heading levels were in order on the pages where this could be checked."],
+  ["seo.images.alt", "Images on the pages checked have descriptions (alternative text)."],
+  ["technical.robots.blocks-all", "The robots.txt file does not block search engines from the site."],
+];
+
+test("F16 O7 (C1): each of the 23 strengths is printed exactly as approved, word for word", () => {
+  assert.equal(APPROVED_STRENGTHS.length, 23);
+
+  // Every rule passed, nothing skipped, robots.txt found: each strength is printed once, unqualified.
+  const summary = buildOverallSummary(
+    input({
+      ranRules: APPROVED_STRENGTHS.map(([id]) => id),
+      data: auditData({ technical: technical("found", "found") }),
+    }),
+  );
+  assert.deepEqual(
+    summary.strengths,
+    APPROVED_STRENGTHS.map(([, sentence]) => sentence),
+    "the printed strengths, in ledger order, are exactly the approved sentences",
+  );
+
+  // One rule at a time, so a mismatch names the rule it belongs to.
+  for (const [id, sentence] of APPROVED_STRENGTHS) {
+    const one = buildOverallSummary(
+      input({ ranRules: [id], data: auditData({ technical: technical("found", "found") }) }),
+    );
+    assert.deepEqual(one.strengths, [sentence], id);
+  }
+});
+
+test("F16 O7: a strength whose check could not run on every page says so", () => {
+  const summary = buildOverallSummary(
+    input({
+      ranRules: ["seo.title.missing", "seo.lang.missing"],
+      skippedChecks: [{ ruleId: "seo.title.missing", reason: "Too little text on one page." }],
+    }),
+  );
+  assert.ok(
+    summary.strengths.includes(
+      `No missing page title was found on the pages where this could be checked ${NOT_EVERY_PAGE_CHECKED}.`,
+    ),
+  );
+  assert.ok(summary.strengths.includes(PASSED["seo.lang.missing"].text), "an unqualified one stays as written");
+  assert.match(areaText(summary, "seo"), /not every page could be checked; see Limitations/);
+});
+
+test("F16: the robots strength appears only when a robots.txt file was found", () => {
+  const strengthsWith = (tech: ReturnType<typeof technical> | null) =>
+    buildOverallSummary(input({ ranRules: ["technical.robots.blocks-all"], data: auditData({ technical: tech }) })).strengths;
+  const robots = PASSED["technical.robots.blocks-all"].text;
+  assert.equal(robots, "The robots.txt file does not block search engines from the site.");
+
+  assert.ok(strengthsWith(technical("found", "found")).includes(robots));
+  assert.ok(!strengthsWith(technical("absent", "found")).includes(robots), "no file, no claim about one");
+  assert.ok(!strengthsWith(technical("unavailable", "found")).includes(robots));
+  assert.ok(!strengthsWith(null).includes(robots));
+});
+
+test("F16: the overview no longer qualifies speed with '(when requested)'", () => {
+  const overview = buildOverallSummary(input()).overview.join(" ");
+  assert.ok(!overview.includes("when requested"));
+  assert.ok(
+    overview.includes(
+      "The audit examined website speed, search visibility and content, security and HTTPS, the SSL/TLS certificate, domain and email records, and the instructions the site gives to search engines.",
+    ),
+  );
+});
+
+const pageProblem = () =>
+  finding("seo.title.missing", "high", "seo", {
+    scope: "page",
+    affected: [{ url: "https://example.com/a", evidence: "x" }],
+    affectedCount: 3,
+    evaluatedPages: 12,
+  });
+
+test("F16 Q11: a finding's reach comes from the coverage result passed in", () => {
+  const valid = buildOverallSummary(input({ findings: [pageProblem()] }));
+  assert.match(areaText(valid, "seo"), /Issues found: Title of seo\.title\.missing \(3 of 12 evaluated pages\)\./);
+  assert.equal(valid.priorities[0].reach, "3 of 12 evaluated pages");
+
+  for (const coverage of [{ valid: false } as const, null]) {
+    const hidden = buildOverallSummary(input({ findings: [pageProblem()], coverage }));
+    assert.match(areaText(hidden, "seo"), /Issues found: Title of seo\.title\.missing\./, "named without brackets");
+    assert.doesNotMatch(textOf(hidden), /3 of 12/, "no reach figure anywhere");
+    assert.equal(hidden.priorities[0].reach, "Page-level", "its own scope, not a figure");
+  }
+});
+
+test("F16 O6: a page finding is never called site-wide because its reach is unknown", () => {
+  const hidden = buildOverallSummary(input({ findings: [pageProblem()], coverage: null }));
+  assert.doesNotMatch(areaText(hidden, "seo"), /site-wide/i);
+  assert.notEqual(hidden.priorities[0].reach, "Site-wide");
+
+  // A site finding still reads as site-wide, as before.
+  const site = buildOverallSummary(input({ findings: [finding("security.headers.csp", "medium", "security")], coverage: null }));
+  assert.match(areaText(site, "security"), /\(site-wide\)/);
+  assert.equal(site.priorities[0].reach, "Site-wide");
 });

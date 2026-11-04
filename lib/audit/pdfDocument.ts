@@ -715,6 +715,12 @@ interface SiteDomains {
 function domainOrNull(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
+  /*
+   * AN IP ADDRESS IS NOT A DOMAIN (CP3-O4). Every label all digits is an IPv4
+   * address in some form -- dotted, shortened, or with a trailing dot -- and is
+   * treated as unknown. IPv6 never matches the pattern below.
+   */
+  if (/^\d+(\.\d+)*\.?$/.test(trimmed)) return null;
   return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.?$/i.test(trimmed) ? trimmed : null;
 }
 
@@ -1477,6 +1483,8 @@ export function buildPdfDocument(
         grade: score.grade,
         gradeLabel: score.bandLabel,
         desktop: job.desktop,
+        // The same check as every other figure in the document (CP3-Q11).
+        coverage: check,
       }),
 
       siteFindings: toSection(

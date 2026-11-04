@@ -12,11 +12,11 @@
  * the category label were all settled before this ran. This file chooses type
  * sizes and boxes.
  *
- * WHAT ONE FINDING SHOWS, in this order: the title, a severity chip carrying
- * the word as well as the colour, the scope spelled out, the reach for page
- * findings only, what we found, what this means, why it matters, how it may
- * affect the website or business, what to do (labelled and set apart), the
- * steps, who usually fixes it, the evidence panel and the affected pages.
+ * WHAT ONE FINDING SHOWS, in this order (CP1 v6 §6): the title, a severity chip
+ * carrying the word as well as the colour, the scope line, what we found, what
+ * this means, why it matters, how it may affect the website or business, what
+ * to do (labelled and set apart), the steps, what fixing it is intended to
+ * achieve, who usually fixes it, the evidence panel and the affected pages.
  *
  * NO AI WRITING ON A CARD. Every word here is either measured or fixed,
  * reviewed report text. The model's per-finding commentary is not printed in
@@ -32,6 +32,30 @@ import type {
 } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
 
+// ---------------------------------------------------------------------------
+// Card wording (CP1 v6 §6)
+// ---------------------------------------------------------------------------
+
+/*
+ * KEPT HERE BECAUSE THIS FOLDER MAY IMPORT ONLY THE PROJECTION. The report layer
+ * holds the same approved texts (`EVIDENCE_HEADINGS` in findingExplainers.ts,
+ * `AFFECTED_LIST_TRUNCATED` in reportSections.ts); the card tests hold each copy
+ * equal to the other, so the two cannot drift apart (CP3-O1).
+ */
+
+/** The evidence heading for each kind of evidence. */
+export const EVIDENCE_HEADING = {
+  site: "Measured for the whole domain",
+  onePage: "Measured on the page checked",
+  examplePage: "Example measured on the main page checked",
+} as const;
+
+/** Printed under an affected-page list only when the list was actually cut short (TR1). */
+export const AFFECTED_LIST_TRUNCATED = "Further affected pages are not listed.";
+
+/** The heading of card block 8. */
+export const WHAT_FIXING_ACHIEVES_LABEL = "What fixing it is intended to achieve";
+
 /**
  * The severity chip.
  *
@@ -46,32 +70,41 @@ function chip(finding: PdfFinding): string {
 }
 
 /**
- * Scope, and reach for the findings that have one.
+ * The scope line (CP1 v6 §6), or null when there is nothing true to say.
  *
- * A SITE FINDING IS NEVER GIVEN A DENOMINATOR. 7A §8 forbids it outright: one
- * certificate, one SPF record and one robots.txt are facts about a domain, and
- * "128 of 128 pages affected" about a single DNS record is a false statement
- * rather than a display quirk. 7B leaves `reach` null for those, and a null
- * reach renders no line rather than an invented one.
+ * EVERY VALUE IS THE PROJECTION'S. A speed card names the address that was
+ * measured; a site card names the domain the projection read for it; a page
+ * card states the counts the projection carried. Where the projection carried
+ * nothing -- counts that did not reconcile, a domain that was missing or not a
+ * domain at all -- no line is printed, rather than one built from something
+ * else. A site finding is never given a page denominator.
  */
-function meta(finding: PdfFinding): string {
-  const reach = finding.reach === null ? "" : html`<span class="reach">${finding.reach}</span>`;
+function scopeLine(finding: PdfFinding): string | null {
+  if (finding.category === "speed") {
+    const measured = finding.affected[0]?.url;
+    return measured === undefined ? null : `Measured on ${measured} (mobile).`;
+  }
+  if (finding.scope === "site") {
+    return finding.scopeDomain === null ? null : `Applies to the whole domain: ${finding.scopeDomain}.`;
+  }
+  if (finding.scopeCounts === null) return null;
+  return finding.evidenceKind === "onePage"
+    ? "Found on the page checked."
+    : `Found on ${finding.scopeCounts.affected} of ${finding.scopeCounts.evaluated} pages checked.`;
+}
 
-  return (
-    `<p class="finding-meta">` +
-    html`<span class="scope">${finding.scopeLabel}</span>` +
-    reach +
-    `</p>`
-  );
+function meta(finding: PdfFinding): string {
+  const line = scopeLine(finding);
+  return line === null ? "" : html`<p class="finding-meta">${line}</p>`;
 }
 
 /**
  * The affected pages, when the finding names any.
  *
- * A SAMPLE THAT SAYS SO. The aggregator caps the list at fifty, and 7A §8
- * requires the document to say so whenever the list is shorter than the true
- * total. `affectedNote` carries that sentence; without it the reader would
- * take fifty as the answer to "how many pages".
+ * A SAMPLE THAT SAYS SO. The aggregator caps the list at fifty, and the
+ * document says so whenever the list is shorter than the true total (TR1). The
+ * note carries no figure: `truncated` is a yes or no, so a count that could not
+ * be verified is never printed here.
  *
  * SET AS RUNNING TEXT, NOT A STACKED LIST. Fifty addresses one per line, on
  * twenty-four page findings, is most of a report. Run together they are a few
@@ -82,8 +115,7 @@ function affected(finding: PdfFinding, pages: readonly PdfAffectedPage[]): strin
   if (pages.length === 0) return "";
 
   const items = pages.map((page) => html`<li>${page.url}</li>`).join("");
-  const note =
-    finding.affectedNote === null ? "" : html`<p class="note">${finding.affectedNote}</p>`;
+  const note = finding.truncated ? html`<p class="note">${AFFECTED_LIST_TRUNCATED}</p>` : "";
 
   return `<div class="affected">` + `<ul class="affected-list">${items}</ul>` + note + `</div>`;
 }
@@ -108,28 +140,65 @@ function meaning(finding: PdfFinding): string {
   );
 }
 
-/** The practical steps and who usually does the work, after what to do. */
+/**
+ * The practical steps, what fixing it is intended to achieve, and who usually
+ * does the work, after what to do (CP1 v6 §6 blocks 7, 8 and 9).
+ *
+ * BLOCK 8 IS PRINTED EXACTLY AS WRITTEN. The sentence is the reviewed
+ * explainer's own, phrased as an intention rather than a promise; nothing is
+ * added to it here. With no sentence, there is no block.
+ */
 function howToFix(finding: PdfFinding): string {
   const written = finding.explainer;
   if (written === null) return "";
+  const achieves = written.whatFixingAchieves;
+  const achievesBlock =
+    typeof achieves === "string" && achieves.trim() !== ""
+      ? html`<p class="explainer-label">${WHAT_FIXING_ACHIEVES_LABEL}</p>` + html`<p>${achieves}</p>`
+      : "";
   return (
     `<div class="explainer explainer-steps">` +
     `<p class="explainer-label">Steps</p>` +
     `<ol>` +
     written.steps.map((step) => html`<li>${step}</li>`).join("") +
     `</ol>` +
+    achievesBlock +
     html`<p class="who-fixes"><span class="explainer-label">Who usually fixes it:</span> ${written.whoFixes}</p>` +
     `</div>`
   );
 }
 
 /**
+ * The evidence heading, from the kind of evidence the projection named.
+ *
+ * The several-pages form carries the reach only when the projection carried
+ * counts that reconciled; otherwise it is the same words with no figure.
+ */
+function evidenceHeading(finding: PdfFinding): string {
+  switch (finding.evidenceKind) {
+    case "site":
+      return EVIDENCE_HEADING.site;
+    case "onePage":
+      return EVIDENCE_HEADING.onePage;
+    case "examplePage":
+      return finding.scopeCounts === null
+        ? EVIDENCE_HEADING.examplePage
+        : `${EVIDENCE_HEADING.examplePage} (found on ${finding.scopeCounts.affected} of ${finding.scopeCounts.evaluated} pages)`;
+  }
+}
+
+/**
  * The measured rows behind the finding, as a small table. The same rows, from
  * the same builders, as the measured-facts tables, so the two cannot disagree.
+ *
+ * HEADED ONLY WHERE THERE IS A PANEL (CP3-O9), and never on a speed card, whose
+ * scope line already says what was measured and where.
  */
 function evidencePanel(finding: PdfFinding): string {
   const panel = finding.evidencePanel;
   if (panel === null || panel.facts.length === 0) return "";
+  const heading =
+    finding.category === "speed" ? "" : html`<p class="explainer-label">Evidence · ${evidenceHeading(finding)}</p>`;
   const rows = panel.facts
     .map(
       (fact) =>
@@ -140,7 +209,7 @@ function evidencePanel(finding: PdfFinding): string {
     .join("");
   return (
     `<div class="evidence-panel">` +
-    html`<p class="explainer-label">Evidence · ${panel.heading}</p>` +
+    heading +
     `<table class="facts evidence-facts"><tbody>${rows}</tbody></table>` +
     `</div>`
   );
@@ -221,4 +290,17 @@ export function findingsHtml(section: PdfFindingSection, labels: PdfLabels): str
     section.groups.map((one) => group(one, labels)).join("") +
     `</section>`
   );
+}
+
+/**
+ * Finding cards on their own: no section, no heading and no category group.
+ *
+ * FOR APPENDING AFTER A SECTION THAT ALREADY EXISTS, such as the speed cards
+ * that follow the Speed section. With no section and no heading of its own it
+ * cannot add a numbered section to the report. Each card is drawn exactly as
+ * it is everywhere else. Nothing at all for an empty list.
+ */
+export function findingCardsHtml(findings: readonly PdfFinding[], labels: PdfLabels): string {
+  if (findings.length === 0) return "";
+  return `<div class="finding-cards">` + findings.map((finding) => findingCard(finding, labels)).join("") + `</div>`;
 }

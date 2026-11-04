@@ -12,9 +12,17 @@
  */
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { findingsHtml } from "./findings.ts";
+import {
+  AFFECTED_LIST_TRUNCATED,
+  EVIDENCE_HEADING,
+  WHAT_FIXING_ACHIEVES_LABEL,
+  findingCardsHtml,
+  findingsHtml,
+} from "./findings.ts";
 import { HOSTILE, testDocument } from "./testDocument.fixture.mts";
 import type { PdfFinding, PdfFindingSection, PdfLabels } from "../pdfDocument.ts";
+import { EVIDENCE_HEADINGS, evidenceHeadingWithReach } from "../../report/findingExplainers.ts";
+import { AFFECTED_LIST_TRUNCATED as REPORT_AFFECTED_LIST_TRUNCATED } from "../../report/reportSections.ts";
 
 const LABELS: PdfLabels = testDocument().labels;
 
@@ -119,9 +127,13 @@ test("a thirty-finding section renders every one, in order, with and without com
 // Scope, and the denominator a site finding must never have
 // ---------------------------------------------------------------------------
 
-test("the scope is spelled out in words on every finding", () => {
-  assert.ok(findingsHtml(siteSection(), LABELS).includes("Site-wide"));
-  assert.ok(findingsHtml(pageSection(), LABELS).includes("Page-level"));
+test("the scope is spelled out in words on every finding, as the approved scope line", () => {
+  // CP1 §6 scope lines, in place of the old "Site-wide" / "Page-level" label (CP3-O2).
+  const site = findingsHtml(siteSection(), LABELS);
+  const page = findingsHtml(pageSection(), LABELS);
+  assert.ok(site.includes('<p class="finding-meta">Applies to the whole domain: example.com.</p>'));
+  assert.ok(page.includes('<p class="finding-meta">Found on 19 of 128 pages checked.</p>'));
+  assert.ok(!site.includes('class="scope"') && !page.includes('class="scope"'), "the old scope label is gone");
 });
 
 test("a site-wide finding carries no reach line at all", () => {
@@ -133,29 +145,31 @@ test("a site-wide finding carries no reach line at all", () => {
   assert.ok(!/\d+ of \d+/.test(out), "and no denominator anywhere near it");
 });
 
-test("a page finding carries the reach the projection worked out", () => {
+test("a page finding states the counts the projection carried", () => {
   const out = findingsHtml(pageSection(), LABELS);
 
-  assert.ok(out.includes("19 of 128 evaluated pages"));
+  assert.ok(out.includes("Found on 19 of 128 pages checked."));
 });
 
-test("a page finding with no reach is shown without one, never with an invented one", () => {
-  const out = findingsHtml(sectionOf([{ ...pageFinding(), reach: null }]), LABELS);
+test("a page finding with no counts is shown without a scope line, never with an invented one", () => {
+  const out = findingsHtml(sectionOf([{ ...pageFinding(), reach: null, scopeCounts: null }]), LABELS);
 
-  assert.ok(!out.includes("class=\"reach\""));
-  assert.ok(out.includes("Page-level"), "the scope still appears");
+  assert.ok(!out.includes("finding-meta"), "no scope line at all");
+  assert.ok(!/Found on/.test(out));
+  assert.ok(!/\d+ of \d+/.test(out), "and no figure anywhere on the card");
 });
 
 // ---------------------------------------------------------------------------
 // The affected sample says it is a sample
 // ---------------------------------------------------------------------------
 
-test("affected pages are listed, and the sample note is shown with them", () => {
+test("affected pages are listed, and a cut-short list says so without a figure (TR1)", () => {
   const out = findingsHtml(pageSection(), LABELS);
 
   assert.ok(out.includes("https://example.com/about"));
   assert.ok(out.includes("https://example.com/contact"));
-  assert.ok(out.includes("Showing 2 of 19 affected pages."));
+  assert.ok(out.includes('<p class="note">Further affected pages are not listed.</p>'));
+  assert.ok(!out.includes("Showing"), "the old count note is gone (CP3-Q6)");
 });
 
 test("a finding with no affected pages renders no list", () => {
@@ -223,17 +237,15 @@ test("the measured evidence and the remediation each appear once", () => {
 });
 
 // ---------------------------------------------------------------------------
-// What stays exactly as it was until the cards can read verified counts
+// The scope line and evidence heading, from the projection's own fields
 // ---------------------------------------------------------------------------
 
-test("the scope line and its reach render as before", () => {
+test("the scope line is the only line above what we found", () => {
   const out = findingsHtml(pageSection(), LABELS);
-  assert.ok(
-    out.includes('<p class="finding-meta"><span class="scope">Page-level</span><span class="reach">19 of 128 evaluated pages</span></p>'),
-  );
+  assert.ok(out.includes('<p class="finding-meta">Found on 19 of 128 pages checked.</p><p class="finding-eyebrow">What we found</p>'));
 });
 
-test("the evidence heading renders as before", () => {
+test("a site card's evidence heading says it was measured for the whole domain", () => {
   const section = siteSection();
   const out = findingsHtml(
     {
@@ -248,10 +260,11 @@ test("the evidence heading renders as before", () => {
     },
     LABELS,
   );
-  assert.ok(out.includes('<p class="explainer-label">Evidence · Measured for the whole site</p>'));
+  assert.ok(out.includes('<p class="explainer-label">Evidence · Measured for the whole domain</p>'));
+  assert.ok(!out.includes("Measured for the whole site"), "the projection's old panel heading is not printed");
 });
 
-test("no card offers what fixing it achieves yet", () => {
+test("a card with no written explanation has no intended-aim block", () => {
   const out = findingsHtml(pageSection(), LABELS) + findingsHtml(siteSection(), LABELS);
   assert.ok(!/intended to achieve/i.test(out));
 });
@@ -457,7 +470,7 @@ test("an evidence panel shows its measured rows under the finding, escaped", () 
     withPanel({ heading: "Measured for the whole site", facts: [{ label: "SPF", value: "Not found", note: HOSTILE }] }),
     LABELS,
   );
-  assert.ok(out.includes("Evidence · Measured for the whole site"));
+  assert.ok(out.includes("Evidence · Measured for the whole domain"));
   assert.ok(out.includes("<th scope=\"row\">SPF</th><td>Not found"));
   assert.ok(!out.includes("<script>"), "a measured value cannot inject markup");
   assert.ok(out.indexOf("Evidence ·") > out.indexOf("Publish an SPF record"), "evidence follows the recommended action");
@@ -466,4 +479,146 @@ test("an evidence panel shows its measured rows under the finding, escaped", () 
 test("no evidence panel, no evidence markup", () => {
   const out = findingsHtml(withPanel(null), LABELS);
   assert.ok(!out.includes("evidence-panel"));
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 2 (F3b): the card's approved wording
+// ---------------------------------------------------------------------------
+
+/** One card, alone, through the same renderer the sections use. */
+const cardOf = (finding: PdfFinding) => findingsHtml(sectionOf([finding]), LABELS);
+
+const PANEL = { heading: "IGNORED-BY-THE-CARD", facts: [{ label: "Row", value: "Value" }] };
+
+/** A speed finding as the projection carries one: one measured address, counts of one. */
+const speedFinding = (over: Partial<PdfFinding> = {}): PdfFinding => ({
+  ...pageFinding(),
+  ruleId: "speed.field.lcp.slow",
+  title: "Largest Contentful Paint is slow for real visitors",
+  category: "speed",
+  affected: [{ url: "https://example.com/", evidence: "Google rates LCP as SLOW." }],
+  affectedNote: null,
+  truncated: false,
+  scopeCounts: { affected: 1, evaluated: 1 },
+  evidenceKind: "examplePage",
+  ...over,
+});
+
+test("F3b O1: the card's wording is the report layer's approved wording, letter for letter", () => {
+  assert.deepEqual({ ...EVIDENCE_HEADING }, { ...EVIDENCE_HEADINGS });
+  assert.equal(AFFECTED_LIST_TRUNCATED, REPORT_AFFECTED_LIST_TRUNCATED);
+  // The several-pages heading with its reach is built the same way in both places.
+  const out = cardOf({ ...pageFinding(), evidencePanel: PANEL, evidenceKind: "examplePage", scopeCounts: { affected: 19, evaluated: 128 } });
+  assert.ok(out.includes(`Evidence · ${evidenceHeadingWithReach(19, 128)}`));
+});
+
+test("F3b: one page read gives the single-page scope line", () => {
+  const out = cardOf({ ...pageFinding(), evidenceKind: "onePage", scopeCounts: { affected: 1, evaluated: 1 } });
+  assert.ok(out.includes('<p class="finding-meta">Found on the page checked.</p>'));
+  assert.ok(!out.includes("1 of 1"));
+});
+
+test("F3b T-1: two pages read, a rule that ran on one, says so with both figures", () => {
+  const out = cardOf({ ...pageFinding(), evidenceKind: "examplePage", scopeCounts: { affected: 1, evaluated: 1 } });
+  assert.ok(out.includes('<p class="finding-meta">Found on 1 of 1 pages checked.</p>'));
+});
+
+test("F3b: a site card names its domain, and with no usable domain has no scope line (O3)", () => {
+  assert.ok(cardOf({ ...siteFinding(), scopeDomain: "mail.example.org" }).includes(
+    '<p class="finding-meta">Applies to the whole domain: mail.example.org.</p>',
+  ));
+  const unknown = cardOf({ ...siteFinding(), scopeDomain: null });
+  assert.ok(!unknown.includes("finding-meta"));
+  assert.ok(!unknown.includes("Applies to the whole domain"));
+});
+
+test("F3b: a scope line is escaped like every other value", () => {
+  const out = cardOf({ ...siteFinding(), scopeDomain: HOSTILE });
+  assert.ok(!out.includes("<script>"));
+});
+
+test("F3b: a speed card says where it was measured, and is never given page counts", () => {
+  const out = cardOf(speedFinding());
+  assert.ok(out.includes('<p class="finding-meta">Measured on https://example.com/ (mobile).</p>'));
+  assert.ok(!/Found on/.test(out), "no page denominator for a single measured address");
+  // CP3-O5: the affected-address list stays, as CP1 §6 lists it on every card.
+  assert.match(out, /<ul class="affected-list"><li>https:\/\/example\.com\/<\/li><\/ul>/);
+});
+
+test("F3b: a speed card with no measured address has no scope line rather than an invented one", () => {
+  const out = cardOf(speedFinding({ affected: [] }));
+  assert.ok(!out.includes("finding-meta"));
+});
+
+test("F3b: each evidence heading follows the kind of evidence, and only where a panel exists (O9)", () => {
+  assert.ok(cardOf({ ...siteFinding(), evidencePanel: PANEL }).includes("Evidence · Measured for the whole domain"));
+  assert.ok(cardOf({ ...pageFinding(), evidencePanel: PANEL, evidenceKind: "onePage" }).includes("Evidence · Measured on the page checked"));
+
+  const unverified = cardOf({ ...pageFinding(), evidencePanel: PANEL, evidenceKind: "examplePage", scopeCounts: null });
+  assert.ok(unverified.includes('<p class="explainer-label">Evidence · Example measured on the main page checked</p>'));
+  assert.ok(!/found on \d/.test(unverified), "no figure in the heading when the counts were not carried");
+
+  for (const kind of ["site", "onePage", "examplePage"] as const) {
+    const bare = cardOf({ ...pageFinding(), evidencePanel: null, evidenceKind: kind });
+    assert.ok(!bare.includes("Evidence ·"), `${kind}: no heading without a panel`);
+  }
+  assert.ok(!cardOf({ ...siteFinding(), evidencePanel: PANEL }).includes("IGNORED-BY-THE-CARD"));
+});
+
+test("F3b: a speed card never carries an evidence heading, even with measured rows", () => {
+  const out = cardOf(speedFinding({ evidencePanel: PANEL }));
+  assert.ok(!out.includes("Evidence ·"));
+  assert.ok(out.includes('<th scope="row">Row</th><td>Value'), "the rows themselves are kept");
+});
+
+test("F3b G6: the truncation note follows the flag alone, never the old count note", () => {
+  const two = [
+    { url: "https://example.com/a", evidence: "x" },
+    { url: "https://example.com/b", evidence: "x" },
+  ];
+  const cut = cardOf({ ...pageFinding(), affected: two, truncated: true, affectedNote: "Showing 2 of 60 affected pages." });
+  assert.ok(cut.includes(`<p class="note">${AFFECTED_LIST_TRUNCATED}</p>`));
+  assert.ok(!cut.includes("Showing"), "the count note is never printed");
+  assert.ok(!/\b60\b/.test(cut), "and no hidden total leaks");
+
+  const whole = cardOf({ ...pageFinding(), affected: two, truncated: false, affectedNote: "Showing 2 of 60 affected pages." });
+  assert.ok(!whole.includes(AFFECTED_LIST_TRUNCATED));
+  assert.ok(!whole.includes("Showing"));
+});
+
+test("F3b: what fixing it is intended to achieve comes after the steps and before who fixes it, verbatim", () => {
+  const out = findingsHtml(withExplainer(EXPLAINER), LABELS);
+  const order = ["Steps", "STEP-TWO", WHAT_FIXING_ACHIEVES_LABEL, "ACHIEVES-TEXT", "Who usually fixes it"];
+  let at = -1;
+  for (const marker of order) {
+    const next = out.indexOf(marker, at + 1);
+    assert.ok(next > at, `"${marker}" comes after the part before it`);
+    at = next;
+  }
+  assert.ok(out.includes(`<p class="explainer-label">${WHAT_FIXING_ACHIEVES_LABEL}</p><p>ACHIEVES-TEXT</p>`));
+
+  const hostile = findingsHtml(withExplainer({ ...EXPLAINER, whatFixingAchieves: HOSTILE }), LABELS);
+  assert.ok(!hostile.includes("<script>") && hostile.includes("&lt;script&gt;"), "escaped, not dropped");
+});
+
+test("F3b: an empty intended-aim sentence draws no block", () => {
+  for (const text of ["", "   "]) {
+    const out = findingsHtml(withExplainer({ ...EXPLAINER, whatFixingAchieves: text }), LABELS);
+    assert.ok(!out.includes(WHAT_FIXING_ACHIEVES_LABEL), JSON.stringify(text));
+    assert.ok(out.includes("Who usually fixes it"), "the rest of the block is unchanged");
+  }
+});
+
+test("F3b: cards on their own carry no section, heading or group, and nothing at all when empty", () => {
+  assert.equal(findingCardsHtml([], LABELS), "");
+
+  const out = findingCardsHtml([speedFinding(), speedFinding({ ruleId: "speed.lab.score", title: "Simulated performance score is poor" })], LABELS);
+  assert.ok(out.startsWith('<div class="finding-cards">') && out.endsWith("</div>"));
+  assert.ok(!/<section|<h2|<h3/.test(out), "no section, section heading or group heading");
+  assert.ok(out.includes("Largest Contentful Paint is slow") && out.includes("Simulated performance score is poor"));
+
+  // The same card as inside a section, so a card reads the same wherever it is.
+  const inSection = findingsHtml(sectionOf([speedFinding()]), LABELS);
+  const card = findingCardsHtml([speedFinding()], LABELS).replace(/^<div class="finding-cards">|<\/div>$/g, "");
+  assert.ok(inSection.includes(card));
 });

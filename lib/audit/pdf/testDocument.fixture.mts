@@ -73,11 +73,22 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
       partialNote: null,
       capNote: "82% of checks passed, but unresolved serious issues cap the grade at B.",
       categories: [
-        { assessed: true, label: "Security", grade: "B", passRate: 80, coveragePercent: 83, gradeClass: "tile-good" },
-        { assessed: true, label: "Search visibility", grade: "C", passRate: 62, coveragePercent: 100, gradeClass: "tile-medium" },
-        { assessed: false, label: "Speed" },
-        { assessed: true, label: "Technical", grade: "A", passRate: 100, coveragePercent: 100, gradeClass: "tile-good" },
+        {
+          assessed: true, label: "Security", grade: "B", passRate: 80, coveragePercent: 83, gradeClass: "tile-good",
+          category: "security", ranCount: 10, skippedCount: 2,
+        },
+        {
+          assessed: true, label: "Search visibility", grade: "C", passRate: 62, coveragePercent: 100, gradeClass: "tile-medium",
+          category: "seo", ranCount: 10, skippedCount: 0,
+        },
+        { assessed: false, label: "Speed", category: "speed", ranCount: 0, skippedCount: 0 },
+        {
+          assessed: true, label: "Technical", grade: "A", passRate: 100, coveragePercent: 100, gradeClass: "tile-good",
+          category: "technical", ranCount: 1, skippedCount: 0,
+        },
       ],
+      ranCount: 21,
+      expectedCount: 23,
       gateHeading: "What's holding the grade back",
       gateReasons: ["No SPF record"],
       gateNote:
@@ -162,6 +173,10 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
               commentary: null,
               explainer: null,
               evidencePanel: null,
+              scopeCounts: null,
+              truncated: false,
+              scopeDomain: "example.com",
+              evidenceKind: "site",
             },
           ],
         },
@@ -200,6 +215,10 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
               },
               explainer: null,
               evidencePanel: null,
+              scopeCounts: { affected: 19, evaluated: 128 },
+              truncated: true,
+              scopeDomain: null,
+              evidenceKind: "examplePage",
             },
           ],
         },
@@ -216,6 +235,19 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
       { heading: `Measured facts ${SENTINEL}`, facts: [{ label: "Page title", value: HOSTILE }] },
     ],
     coverageDetail: [{ heading: "Crawl limits", facts: [{ label: "Page limit", value: "150" }] }],
+    // The F13 fields. No renderer reads them yet; they are present so the
+    // fixture is a complete document, consistent with the coverage above.
+    coverageCheck: { valid: true, includesStartingAddress: false, pagesRead: 128 },
+    coverageCounts: {
+      discovered: 128, evaluated: 128, unavailable: 0, notWebPages: 0, notVisited: 0,
+      robotsExcluded: 4, includesStartingAddress: false,
+    },
+    coverageFlags: { partial: false, hasExclusions: true },
+    configuredLimits: { maxPages: 150, maxDurationMs: 300_000 },
+    singlePageAudit: false,
+    checklists: [],
+    speedFindings: [],
+    technicalFiles: { robots: "found", sitemap: "found" },
     ...overrides,
   };
 }

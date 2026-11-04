@@ -31,7 +31,12 @@ import { runSecurityChecks } from "../collector/securityChecks.ts";
 import { MAX_AFFECTED_PAGES } from "../report/aggregate.ts";
 import { AI_CONTRACT_VERSION } from "../ai/contract.ts";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
-import type { Finding, SiteAuditResult, SpeedResult } from "../types.ts";
+import type { AuditResult, Finding, SiteAuditResult, SpeedResult } from "../types.ts";
+import { coverageCheck } from "../report/coverageCheck.ts";
+import { discoverySourceFacts, sitemapDiscoveryFacts } from "../report/measurementsView.ts";
+import { explainerFor } from "../report/findingExplainers.ts";
+import { AUDIT_RULES } from "../rules/all.ts";
+import { runRealAudit, runRealCertificateFailure } from "./pdf/realAudit.fixture.mts";
 
 const META = "seo.meta-description.missing";
 const SPF_RULE = "security.dns.spf.missing";
@@ -1448,4 +1453,596 @@ test("no evidence panel ever carries a raw response header", () => {
   assert.ok(panel !== null);
   const securityFacts = doc.measured.find((section) => section.heading === "Security")?.facts ?? [];
   for (const row of panel.facts) assert.ok(securityFacts.includes(row) || securityFacts.some((s) => JSON.stringify(s) === JSON.stringify(row)), "only the document's own sanitised rows");
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 1 (F13): what the redesigned sections will read
+// ---------------------------------------------------------------------------
+
+const pageHtml = (title: string, body: string) =>
+  `<!doctype html><html lang="en"><head><title>${title}</title></head><body>${body}</body></html>`;
+
+/**
+ * The CP2 coverage fixtures, built the way the step-0 baseline built them: a
+ * real crawl of 60 linked pages and one unreadable page, stopped at its page
+ * limit, then one consistent adjustment (a non-page file and two robots.txt
+ * exclusions) and one copy breaking each invariant group.
+ */
+const coverageFixtures = (async () => {
+  const site: Record<string, { html: string; unreadable?: string }> = {};
+  const links = Array.from({ length: 60 }, (_, i) => `<a href="/p${i + 1}">Page ${i + 1}</a>`).join(" ");
+  site["https://example.com/"] = {
+    html: pageHtml("Example Company", `<h1>Welcome</h1><p>We sell widgets to businesses across the country and have done so since 1994.</p><a href="/broken">Broken</a> ${links}`),
+  };
+  site["https://example.com/broken"] = { html: "", unreadable: "The server returned an error." };
+  for (let i = 1; i <= 60; i++) {
+    site[`https://example.com/p${i}`] = {
+      html: pageHtml(`Page ${i}`, `<h1>Page ${i}</h1><p>Widgets supplied, installed and maintained for businesses of every size, number ${i}.</p><a href="/">Home</a>`),
+    };
+  }
+  const valid = await runRealAudit({ site, checks: { spfMissing: true }, maxPages: 56 });
+  valid.crawl.skippedNonHtml += 1;
+  valid.crawl.discovered += 1;
+  valid.crawl.sources.html += 1;
+  valid.crawl.robots.excluded = 2;
+
+  const unreached = valid.crawl.discovered - valid.crawl.evaluated - valid.crawl.unavailable.length - valid.crawl.skippedNonHtml;
+  const i1 = structuredClone(valid); i1.crawl.sources.html += 3;
+  const i23 = structuredClone(valid); i23.crawl.evaluated += unreached + 1;
+  const i45 = structuredClone(valid); i45.crawl.complete = true; i45.crawl.stoppedBecause = "completed";
+  const i6 = structuredClone(valid); i6.crawl.unavailable.push({ ...i6.crawl.unavailable[0] });
+  return { valid, failing: { I1: i1, I23: i23, I45: i45, I6: i6 } };
+})();
+
+/** The document for a whole-site audit, through the same store the export route reads. */
+function documentOf(audit: SiteAuditResult): PdfDocument {
+  const { store, jobId } = jobWith(audit.crawl.complete ? "completed" : "partial", audit);
+  return documentFor(store, jobId);
+}
+
+const allCards = (doc: PdfDocument) =>
+  [...doc.siteFindings.groups, ...doc.pageFindings.groups].flatMap((group) => group.findings);
+
+/** One category's check list. */
+const checklistOf = (doc: PdfDocument, category: "seo" | "security" | "technical") =>
+  doc.checklists.find((list) => list.category === category)!.items;
+
+/** Every check-list line, in order. */
+const checklistItems = (doc: PdfDocument) => doc.checklists.flatMap((list) => list.items);
+
+test("F13: the crawl's counts are checked once, and the document holds the shared check's answer", async () => {
+  const { valid, failing } = await coverageFixtures;
+  for (const audit of [valid, ...Object.values(failing)]) {
+    assert.deepEqual(documentOf(audit).coverageCheck, coverageCheck(audit.crawl));
+  }
+});
+
+test("F13: reconciled counts are carried exactly as measured", async () => {
+  const { valid } = await coverageFixtures;
+  const doc = documentOf(valid);
+  const crawl = valid.crawl;
+
+  assert.deepEqual(doc.coverageCounts, {
+    discovered: crawl.discovered,
+    evaluated: crawl.evaluated,
+    unavailable: crawl.unavailable.length,
+    notWebPages: crawl.skippedNonHtml,
+    notVisited: crawl.discovered - crawl.evaluated - crawl.unavailable.length - crawl.skippedNonHtml,
+    robotsExcluded: 2,
+    includesStartingAddress: true,
+  });
+  assert.deepEqual(doc.coverageFlags, { partial: true, hasExclusions: true });
+
+  for (const card of doc.pageFindings.groups.flatMap((group) => group.findings)) {
+    const finding = valid.site.findings.find((f) => f.id === card.ruleId)!;
+    assert.deepEqual(card.scopeCounts, { affected: finding.affectedCount, evaluated: finding.evaluatedPages }, card.ruleId);
+  }
+  for (const card of doc.siteFindings.groups.flatMap((group) => group.findings)) {
+    assert.equal(card.scopeCounts, null, `${card.ruleId}: a site finding has no page figures`);
+  }
+
+  const status = doc.coverageDetail.find((section) => section.heading === "Crawl status")!.facts;
+  for (const row of [...discoverySourceFacts(crawl), ...sitemapDiscoveryFacts(crawl)]) {
+    assert.ok(status.some((fact) => fact.label === row.label && fact.value === row.value), `${row.label} is shown`);
+  }
+});
+
+test("F13: when the counts do not reconcile, no coverage or finding-scope figure reaches the document", async () => {
+  const { failing } = await coverageFixtures;
+  for (const [name, audit] of Object.entries(failing)) {
+    const doc = documentOf(audit);
+    assert.equal(doc.coverageCheck?.valid, false, name);
+    assert.equal(doc.coverageCounts, null, name);
+    assert.equal(doc.singlePageAudit, false, name);
+
+    for (const card of [...allCards(doc), ...doc.speedFindings]) {
+      assert.equal(card.scopeCounts, null, `${name} ${card.ruleId}: no scope figures`);
+      assert.equal(card.reach, null, `${name} ${card.ruleId}: no reach line`);
+      assert.equal(card.affectedNote, null, `${name} ${card.ruleId}: no "showing X of Y"`);
+    }
+    const page = doc.pageFindings.groups.flatMap((group) => group.findings)[0];
+    assert.equal(page.affected.length, MAX_AFFECTED_PAGES, `${name}: the affected addresses are kept`);
+
+    const status = doc.coverageDetail.find((section) => section.heading === "Crawl status")!.facts;
+    for (const row of [...discoverySourceFacts(audit.crawl), ...sitemapDiscoveryFacts(audit.crawl)]) {
+      assert.ok(!status.some((fact) => fact.label === row.label), `${name}: ${row.label} is left out`);
+    }
+    assert.deepEqual(doc.configuredLimits, {
+      maxPages: audit.crawl.limits.maxPages,
+      maxDurationMs: audit.crawl.limits.maxDurationMs,
+    }, `${name}: configured limits are settings and stay`);
+  }
+});
+
+test("F13: a cut-short affected list is flagged with no figure, whatever the counts", async () => {
+  const { valid, failing } = await coverageFixtures;
+  for (const audit of [valid, ...Object.values(failing)]) {
+    const doc = documentOf(audit);
+    for (const card of allCards(doc)) {
+      const finding = audit.site.findings.find((f) => f.id === card.ruleId)!;
+      assert.equal(card.truncated, (finding.affectedCount ?? 0) > (finding.affected ?? []).length, card.ruleId);
+    }
+    assert.ok(allCards(doc).some((card) => card.truncated), "the 55-page findings are cut at 50");
+  }
+});
+
+test("F13: 'a single page' means the audit read exactly one page, with counts that reconcile", async () => {
+  const onePage = await runRealAudit({
+    site: {
+      "https://example.com/": {
+        html: pageHtml("Home", "<h1>Home</h1><p>Widgets supplied, installed and maintained for businesses of every size.</p>"),
+      },
+    },
+  });
+  assert.equal(onePage.crawl.evaluated, 1);
+  const single = documentOf(onePage);
+  assert.equal(single.singlePageAudit, true);
+  for (const card of single.pageFindings.groups.flatMap((group) => group.findings)) {
+    assert.equal(card.evidenceKind, "onePage", card.ruleId);
+  }
+
+  const { valid } = await coverageFixtures;
+  const several = documentOf(valid);
+  assert.equal(several.singlePageAudit, false);
+  for (const card of several.pageFindings.groups.flatMap((group) => group.findings)) {
+    assert.equal(card.evidenceKind, "examplePage", card.ruleId);
+  }
+  for (const card of several.siteFindings.groups.flatMap((group) => group.findings)) {
+    assert.equal(card.evidenceKind, "site", card.ruleId);
+  }
+});
+
+test("F13 / T-1: a finding on one page and a skip on another give one issue line, on a two-page audit", async () => {
+  const SPA_HTML = `<html lang="en"><head>
+<title>Shop</title>
+<meta name="description" content="Our shop.">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="canonical" href="https://shop.test/">
+</head><body><div id="root"></div><script src="/bundle.js"></script></body></html>`;
+  const audit = await runRealAudit({
+    site: {
+      "https://example.com/": {
+        html: pageHtml("Example Company", `<h1>Welcome</h1><p>We sell widgets to businesses across the country and have done so since 1994.</p><img src="/hero.png"><a href="/app">Shop</a>`),
+      },
+      "https://example.com/app": { html: SPA_HTML },
+    },
+  });
+  // Results 1 and 2, at the engine.
+  const finding = audit.site.findings.find((f) => f.id === "seo.images.alt");
+  assert.ok(finding, "the rule fired on page A");
+  assert.equal(finding.affectedCount, 1);
+  assert.equal(finding.evaluatedPages, 1);
+  assert.ok(audit.site.skippedChecks.some((s) => s.ruleId === "seo.images.alt"), "and was skipped on page B");
+
+  const doc = documentOf(audit);
+  // The input to result 6: two pages read, so not the single-page form.
+  assert.equal(audit.crawl.evaluated, 2);
+  assert.equal(doc.singlePageAudit, false);
+  const card = doc.pageFindings.groups.flatMap((group) => group.findings).find((c) => c.ruleId === "seo.images.alt")!;
+  assert.deepEqual(card.scopeCounts, { affected: 1, evaluated: 1 });
+
+  const item = checklistOf(doc, "seo").find((i) => i.ruleId === "seo.images.alt")!;
+  assert.deepEqual(item, { ruleId: "seo.images.alt", scope: "page", status: "issue", findingTitle: finding.title });
+});
+
+test("F13: every category tile carries the scorer's own counts, and keeps its percentage", async () => {
+  const { valid } = await coverageFixtures;
+  const doc = documentOf(valid);
+  const score = scoreAudit(valid);
+
+  for (const tile of doc.score.categories) {
+    const expected = score.categories[tile.category];
+    assert.equal(tile.ranCount, expected.ranCount, tile.category);
+    assert.equal(tile.skippedCount, expected.skippedCount, tile.category);
+    if (tile.assessed) {
+      assert.equal(typeof tile.coveragePercent, "number", `${tile.category}: % assessed is still carried`);
+    }
+  }
+  assert.equal(doc.score.ranCount, score.ranCount);
+  assert.equal(doc.score.expectedCount, score.ranCount + score.skippedCount);
+
+  // Speed was not requested: no speed check was expected at all.
+  const speed = doc.score.categories.find((tile) => tile.category === "speed")!;
+  assert.equal(speed.assessed, false);
+  assert.equal(speed.ranCount + speed.skippedCount, 0);
+});
+
+test("F13: what fixing a finding is intended to achieve is the explainer's own sentence", async () => {
+  const { valid } = await coverageFixtures;
+  for (const card of allCards(documentOf(valid))) {
+    if (card.explainer === null) continue;
+    assert.equal(card.explainer.whatFixingAchieves, explainerFor(card.ruleId)!.whatFixingAchieves, card.ruleId);
+  }
+});
+
+test("F13: the check lists name every audit rule of their category, in registry order, and no speed rule", async () => {
+  const { valid } = await coverageFixtures;
+  const doc = documentOf(valid);
+  assert.deepEqual(doc.checklists.map((list) => list.category), ["seo", "security", "technical"]);
+  for (const category of ["seo", "security", "technical"] as const) {
+    assert.deepEqual(
+      checklistOf(doc, category).map((item) => [item.ruleId, item.scope]),
+      AUDIT_RULES.filter((rule) => rule.category === category).map((rule) => [rule.id, rule.scope]),
+      category,
+    );
+  }
+  assert.deepEqual(doc.checklists.map((list) => list.items.length), [10, 12, 1]);
+  assert.ok(!checklistItems(doc).some((item) => item.ruleId.startsWith("speed.")));
+});
+
+/** A whole-site summary of the given outcomes, on the shared stored audit. */
+function auditWithOutcomes(site: SiteAuditResult["site"]): SiteAuditResult {
+  return storedAudit({ site });
+}
+
+const problem = (id: string, title: string, scope: "site" | "page"): Finding =>
+  ({
+    id,
+    title,
+    category: id.split(".")[0],
+    severity: "medium",
+    evidence: "Measured.",
+    remediation: "Fix it.",
+    scope,
+    ...(scope === "page"
+      ? { affected: [{ url: "https://example.com/", evidence: "Measured." }], affectedCount: 1, evaluatedPages: 128 }
+      : {}),
+  }) as unknown as Finding;
+
+test("F13: each check-list status follows the approved precedence", () => {
+  const notRun = new Set(["security.headers.hsts", "security.mixed-content", "security.dns.dmarc"]);
+  const doc = documentOf(
+    auditWithOutcomes({
+      findings: [problem("seo.title.missing", "No page title", "page")],
+      skippedChecks: [
+        { ruleId: "security.headers.hsts", reason: "HSTS is ignored by browsers on a plain HTTP page, so it was not graded here." },
+        { ruleId: "security.mixed-content", reason: "Mixed content only applies to HTTPS pages, and this page was served over HTTP." },
+        { ruleId: "seo.h1.missing", reason: "Too little text on one page." },
+        { ruleId: "security.dns.dmarc", reason: "The lookup failed." },
+        { ruleId: "seo.title.missing", reason: "Too little text on another page." },
+      ],
+      ranRules: AUDIT_RULES.map((rule) => rule.id).filter((id) => !notRun.has(id)),
+      evaluatedPages: 128,
+    }),
+  );
+  const status = (id: string) => checklistItems(doc).find((i) => i.ruleId === id)!;
+
+  assert.equal(status("seo.title.missing").status, "issue", "a finding is shown even where the rule was also skipped");
+  assert.equal(status("seo.title.missing").findingTitle, "No page title");
+  assert.equal(status("security.headers.hsts").status, "not-checked", "HTTP-only: skipped everywhere");
+  assert.equal(status("security.mixed-content").status, "not-checked", "HTTP-only: skipped everywhere");
+  assert.equal(status("seo.h1.missing").status, "partly", "ran on some pages, skipped on others");
+  assert.equal(status("security.dns.dmarc").status, "not-checked", "a skipped site rule is never a pass");
+  assert.equal(status("security.dns.spf").status, "no-issue", "a site rule that ran and found nothing");
+  assert.equal(status("seo.lang.missing").status, "no-issue", "a page rule that ran everywhere and found nothing");
+  for (const item of checklistItems(doc)) {
+    if (item.status !== "issue") assert.equal(item.findingTitle, null, item.ruleId);
+  }
+});
+
+test("F13: an audit stored before the ledger existed never shows a pass it cannot prove", () => {
+  const doc = documentOf(
+    auditWithOutcomes({
+      findings: [problem("seo.title.missing", "No page title", "page")],
+      skippedChecks: [{ ruleId: "seo.h1.missing", reason: "Too little text." }],
+      evaluatedPages: 128,
+    }),
+  );
+  const items = checklistItems(doc);
+  assert.equal(items.find((i) => i.ruleId === "seo.title.missing")!.status, "issue");
+  for (const item of items.filter((i) => i.ruleId !== "seo.title.missing")) {
+    assert.equal(item.status, "not-checked", `${item.ruleId}: without the ledger, silence is not a pass`);
+  }
+});
+
+test("F13: no check-list status is taken from how a skipped check is worded", () => {
+  const source = fs.readFileSync(new URL("./pdfDocument.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function checklistsFor(");
+  const end = source.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start, "the check-list builder is found");
+  const body = source.slice(start, end).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  assert.ok(!body.includes(".reason"), "never reads a skipped check's reason");
+  assert.ok(!/applicable/.test(body), "never reads an entry page's applicable flags");
+});
+
+test("F13: a site card names the measured domain it applies to, and never a guessed one", () => {
+  const base = storedAudit();
+  const withDomains = (dns: Record<string, unknown>, ssl: Record<string, unknown>) =>
+    storedAudit({
+      data: {
+        ...base.data,
+        dns: { ...base.data.dns, ...dns },
+        ssl: { ...base.data.ssl, ...ssl },
+        fetch: { ...base.data.fetch, finalUrl: "https://www.example.com/start" },
+      },
+      site: {
+        findings: [
+          problem("security.dns.spf", "No SPF record published", "site"),
+          problem("security.ssl.expired", "TLS certificate has expired", "site"),
+          problem("technical.robots.blocks-all", "robots.txt blocks all search engines", "site"),
+          problem("seo.title.missing", "No page title", "page"),
+        ],
+        skippedChecks: [],
+        evaluatedPages: 128,
+      },
+    });
+  const domainOf = (doc: PdfDocument, id: string) => allCards(doc).find((card) => card.ruleId === id)!.scopeDomain;
+
+  const measured = documentOf(withDomains({ emailDomain: "mail.example.org" }, { hostname: "cert.example.net" }));
+  assert.equal(domainOf(measured, "security.dns.spf"), "mail.example.org");
+  assert.equal(domainOf(measured, "security.ssl.expired"), "cert.example.net");
+  assert.equal(domainOf(measured, "technical.robots.blocks-all"), "www.example.com");
+  assert.equal(domainOf(measured, "seo.title.missing"), null, "a page finding has no domain line");
+
+  const unusable = documentOf(withDomains({ emailDomain: "" }, { hostname: "not a host!" }));
+  assert.equal(domainOf(unusable, "security.dns.spf"), null, "an empty value is not replaced by a guess");
+  assert.equal(domainOf(unusable, "security.ssl.expired"), null, "an invalid value is not replaced by a guess");
+});
+
+test("F13: the technical file states are carried as measured, and are null when the checks did not run", () => {
+  assert.deepEqual(documentOf(storedAudit()).technicalFiles, { robots: "found", sitemap: "found" });
+  const base = storedAudit();
+  assert.equal(documentOf(storedAudit({ data: { ...base.data, technical: null } })).technicalFiles, null);
+});
+
+test("F13: speed findings are listed for the Speed section, and still where they were until the renderer moves", () => {
+  const { store, jobId } = jobWith();
+  store.attach(jobId, {
+    data: {
+      status: "checked",
+      strategy: "mobile",
+      requestedUrl: "https://example.com/",
+      failureReason: null,
+      field: {
+        status: "found", measuredUrl: "https://example.com/", scope: "url", overall: "SLOW",
+        lcp: { percentileMs: 5200, category: "SLOW" }, inp: null, cls: null, fcp: null, ttfb: null, error: null,
+      },
+      lab: { status: "absent", measuredUrl: null, score: null, lcpMs: null, fcpMs: null, tbtMs: null, speedIndexMs: null, cls: null, error: null },
+      notInspected: [],
+      message: "Measured.",
+    },
+    findings: [
+      {
+        id: "speed.field.lcp.slow",
+        title: "Largest Contentful Paint is slow for real visitors",
+        category: "speed",
+        severity: "high",
+        evidence: "Google rates LCP as SLOW.",
+        remediation: "Make the main content appear sooner.",
+        scope: "page",
+      },
+    ],
+    skippedChecks: [],
+  } as unknown as SpeedResult);
+
+  const doc = documentFor(store, jobId);
+  assert.deepEqual(doc.speedFindings.map((card) => card.ruleId), ["speed.field.lcp.slow"]);
+  const stillInPage = doc.pageFindings.groups.flatMap((group) => group.findings).some((c) => c.ruleId === "speed.field.lcp.slow");
+  assert.ok(stillInPage, "page findings are unchanged in this step");
+});
+
+test("F13: a certificate failure carries no coverage figure and lists every page check as not checked", async () => {
+  const audit = await runRealCertificateFailure({
+    site: {
+      "https://example.com/": {
+        html: "",
+        unreadable: "The website's security certificate has expired.",
+        certificateProblem: "expired",
+      },
+    },
+    checks: { certificateExpired: true },
+  });
+  const store = createJobStore<AuditResult, SpeedResult, ExplainResult, SpeedResult["data"]>();
+  const job = store.create("https://example.com/");
+  store.finish(job.id, "partial", audit);
+  const outcome = buildPdfDocument(job.id, store);
+  if (!outcome.ok) assert.fail(outcome.reason);
+  const doc = outcome.document;
+
+  assert.equal(doc.coverageCheck, null);
+  assert.equal(doc.coverageCounts, null);
+  assert.equal(doc.singlePageAudit, false);
+  assert.deepEqual(doc.speedFindings, []);
+
+  const items = checklistItems(doc);
+  for (const item of items.filter((i) => i.scope === "page")) {
+    assert.equal(item.status, "not-checked", `${item.ruleId}: no page was read`);
+  }
+  const skipped = new Set(audit.site.skippedChecks.map((s) => s.ruleId));
+  for (const item of items.filter((i) => i.scope === "site" && skipped.has(i.ruleId))) {
+    assert.equal(item.status, "not-checked", `${item.ruleId}: a skipped site check is never a pass`);
+  }
+  assert.equal(items.find((i) => i.ruleId === "security.ssl.expired")!.status, "issue");
+
+  const expired = allCards(doc).find((card) => card.ruleId === "security.ssl.expired")!;
+  assert.equal(expired.scopeDomain, audit.ssl.hostname);
+
+  const seo = doc.score.categories.find((tile) => tile.category === "seo")!;
+  assert.deepEqual([seo.assessed, seo.ranCount, seo.skippedCount], [false, 0, 10]);
+  const speed = doc.score.categories.find((tile) => tile.category === "speed")!;
+  assert.deepEqual([speed.ranCount, speed.skippedCount], [0, 0]);
+});
+
+// ---------------------------------------------------------------------------
+// F13 review follow-ups (G1-G4)
+// ---------------------------------------------------------------------------
+
+/** A certificate-failure audit from the real pipeline, as a plain copy a test may adjust. */
+async function certificateFailureAudit() {
+  const audit = await runRealCertificateFailure({
+    site: {
+      "https://example.com/": {
+        html: "",
+        unreadable: "The website's security certificate has expired.",
+        certificateProblem: "expired",
+      },
+    },
+    checks: { certificateExpired: true },
+  });
+  return structuredClone(audit);
+}
+
+/** The document for any finished audit, a certificate failure included. */
+function documentOfAny(audit: AuditResult): PdfDocument {
+  const store = createJobStore<AuditResult, SpeedResult, ExplainResult, SpeedResult["data"]>();
+  const job = store.create("https://example.com/");
+  store.finish(job.id, "partial", audit);
+  const outcome = buildPdfDocument(job.id, store);
+  if (!outcome.ok) assert.fail(outcome.reason);
+  return outcome.document;
+}
+
+test("F13 G1: a certificate failure names each site card's own measured domain, from the failure record", async () => {
+  const audit = await certificateFailureAudit();
+  // Three different values, so a card taking the wrong field cannot pass by coincidence.
+  audit.ssl.hostname = "cert.example.net";
+  audit.dns.emailDomain = "mail.example.org";
+  audit.failedUrl = "https://www.example.com/start";
+  // The robots rule has nothing to fire on in this fixture, so its card is supplied here.
+  audit.site.findings.push(problem("technical.robots.blocks-all", "robots.txt blocks all search engines", "site"));
+
+  const doc = documentOfAny(audit);
+  const domainOf = (id: string) => {
+    const card = allCards(doc).find((c) => c.ruleId === id);
+    assert.ok(card, `${id} has a card`);
+    return card.scopeDomain;
+  };
+  assert.equal(domainOf("security.ssl.expired"), "cert.example.net", "certificate checks: the certificate's host");
+  assert.equal(domainOf("security.dns.dmarc"), "mail.example.org", "DMARC: the mail domain");
+  assert.equal(domainOf("technical.robots.blocks-all"), "www.example.com", "robots: the host of the address that failed");
+});
+
+test("F13 G1: a whole-site audit maps DMARC and every certificate check to their own fields", () => {
+  const base = storedAudit();
+  const doc = documentOf(
+    storedAudit({
+      data: {
+        ...base.data,
+        dns: { ...base.data.dns, emailDomain: "mail.example.org" },
+        ssl: { ...base.data.ssl, hostname: "cert.example.net" },
+        fetch: { ...base.data.fetch, finalUrl: "https://www.example.com/start" },
+      },
+      site: {
+        findings: [
+          problem("security.dns.dmarc", "No DMARC record published", "site"),
+          problem("security.ssl.hostname", "TLS certificate does not cover this address", "site"),
+          problem("security.ssl.untrusted", "TLS certificate is not trusted", "site"),
+        ],
+        skippedChecks: [],
+        evaluatedPages: 128,
+      },
+    }),
+  );
+  const domainOf = (id: string) => allCards(doc).find((c) => c.ruleId === id)!.scopeDomain;
+  assert.equal(domainOf("security.dns.dmarc"), "mail.example.org");
+  assert.equal(domainOf("security.ssl.hostname"), "cert.example.net");
+  assert.equal(domainOf("security.ssl.untrusted"), "cert.example.net");
+});
+
+test("F13 G2: one page read is not 'a single page' when the crawl's counts do not reconcile", async () => {
+  const onePage = await runRealAudit({
+    site: {
+      "https://example.com/": {
+        html: pageHtml("Home", "<h1>Home</h1><p>Widgets supplied, installed and maintained for businesses of every size.</p>"),
+      },
+    },
+  });
+  // The control: the same audit, counts intact, is a single page.
+  assert.equal(documentOf(onePage).singlePageAudit, true);
+
+  // The same single page read, but the sources no longer account for what was found (I1).
+  const broken = structuredClone(onePage);
+  broken.crawl.sources.html += 3;
+  assert.equal(broken.crawl.evaluated, 1, "still exactly one page read");
+  assert.equal(coverageCheck(broken.crawl).valid, false, "and the counts fail the shared check");
+
+  const doc = documentOf(broken);
+  assert.equal(doc.singlePageAudit, false);
+  const pageCards = doc.pageFindings.groups.flatMap((group) => group.findings);
+  assert.ok(pageCards.length > 0, "the page has findings to label");
+  for (const card of pageCards) {
+    assert.equal(card.evidenceKind, "examplePage", `${card.ruleId}: never the single-page heading on unverified counts`);
+    assert.equal(card.scopeCounts, null, `${card.ruleId}: and no figures`);
+  }
+});
+
+test("F13 G3: 'has exclusions' says only whether robots.txt kept anything out, whether or not the counts reconcile", async () => {
+  const onePage = await runRealAudit({
+    site: {
+      "https://example.com/": {
+        html: pageHtml("Home", "<h1>Home</h1><p>Widgets supplied, installed and maintained for businesses of every size.</p>"),
+      },
+    },
+  });
+  assert.equal(onePage.crawl.robots.excluded, 0);
+  assert.equal(documentOf(onePage).coverageFlags.hasExclusions, false, "none excluded");
+
+  // Counts that fail the check, with and without exclusions: the flag follows the exclusions only.
+  const brokenNone = structuredClone(onePage);
+  brokenNone.crawl.sources.html += 3;
+  const failedNone = documentOf(brokenNone);
+  assert.equal(failedNone.coverageCheck?.valid, false);
+  assert.equal(failedNone.coverageFlags.hasExclusions, false, "failed counts, none excluded");
+
+  const { valid, failing } = await coverageFixtures;
+  assert.equal(documentOf(valid).coverageFlags.hasExclusions, true, "valid counts, two excluded");
+  for (const [name, audit] of Object.entries(failing)) {
+    const doc = documentOf(audit);
+    assert.equal(doc.coverageCounts, null, `${name}: the exclusion count is not carried`);
+    assert.equal(doc.coverageFlags.hasExclusions, true, `${name}: but that some were excluded still is`);
+  }
+
+  // A certificate failure: the flag reads the record's own crawl summary.
+  const certificate = await certificateFailureAudit();
+  assert.equal(documentOfAny(certificate).coverageFlags.hasExclusions, certificate.crawl.robots.excluded > 0);
+  certificate.crawl.robots.excluded = 3;
+  assert.equal(documentOfAny(certificate).coverageFlags.hasExclusions, true);
+});
+
+test("F13 G4: absent and unavailable robots.txt and sitemap states are carried as measured", () => {
+  const base = storedAudit();
+  const withFiles = (robotsTxtStatus: string, sitemapStatus: string) =>
+    documentOf(
+      storedAudit({
+        data: {
+          ...base.data,
+          technical: { robotsTxtStatus, sitemapStatus, robotsBlocksEverything: false, sitemapUrl: null },
+        },
+      }),
+    ).technicalFiles;
+
+  assert.deepEqual(withFiles("absent", "unavailable"), { robots: "absent", sitemap: "unavailable" });
+  assert.deepEqual(withFiles("unavailable", "absent"), { robots: "unavailable", sitemap: "absent" });
+});
+
+test("F13 G4: a certificate failure carries its own technical file states, or null when they were not checked", async () => {
+  const audit = await certificateFailureAudit();
+  // The fixture's site checks report robots.txt found and no sitemap.
+  assert.deepEqual(documentOfAny(audit).technicalFiles, { robots: "found", sitemap: "absent" });
+
+  audit.technical = { ...audit.technical!, robotsTxtStatus: "unavailable", sitemapStatus: "unavailable" };
+  assert.deepEqual(documentOfAny(audit).technicalFiles, { robots: "unavailable", sitemap: "unavailable" });
+
+  audit.technical = null;
+  assert.equal(documentOfAny(audit).technicalFiles, null);
 });

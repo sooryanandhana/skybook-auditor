@@ -75,17 +75,20 @@ import {
   REMEDIATION_LABEL,
   SITE_FINDINGS_HEADING,
   SITE_FINDINGS_INTRO,
-  affectedView,
+  affectedViewFor,
   auditStatusText,
   certificateFailureView,
+  coverageCheck,
   crawlView,
   isCertificateFailureAudit,
   SPEED_NOT_MEASURED_WITHOUT_PAGE,
   partitionByScope,
   scopeLabel,
   stopReasonText,
+  type CoverageCheck,
   type FindingScope,
 } from "../report/siteFindingsView.ts";
+import { AUDIT_RULES } from "../rules/all.ts";
 import {
   AI_EXPLANATION_LABEL,
   AI_IMPACT_LABEL,
@@ -129,6 +132,8 @@ import type {
   PerformanceRating,
   Severity,
   SiteAuditResult,
+  SiteFileStatus,
+  SkippedCheck,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -305,7 +310,16 @@ export interface PdfSummary {
  * grade or number to show as a zero, and the renderer cannot reach one.
  */
 export type PdfScoreCategory =
-  | { readonly assessed: false; readonly label: string }
+  | {
+      readonly assessed: false;
+      readonly label: string;
+      /** Which pillar, so a renderer never has to recognise one by its wording. */
+      readonly category: Category;
+      /** Nothing in this category reached a result. */
+      readonly ranCount: 0;
+      /** Expected checks in this category that did not run. Zero when none were expected. */
+      readonly skippedCount: number;
+    }
   | {
       readonly assessed: true;
       readonly label: string;
@@ -315,6 +329,11 @@ export type PdfScoreCategory =
       readonly coveragePercent: number;
       /** The severity class that tints the grade. */
       readonly gradeClass: string;
+      readonly category: Category;
+      /** Expected checks that reached a result: passes and findings alike (CP3-Q17). */
+      readonly ranCount: number;
+      /** Expected checks that did not run. `ranCount + skippedCount` is every check expected. */
+      readonly skippedCount: number;
     };
 
 /** The whole score, projected for the document. */
@@ -334,6 +353,10 @@ export interface PdfScore {
   /** Said when a gate held the grade below its pass rate. */
   readonly capNote: string | null;
   readonly categories: readonly PdfScoreCategory[];
+  /** Expected checks across the audit that reached a result. */
+  readonly ranCount: number;
+  /** Every check the audit expected, whether or not it could run. */
+  readonly expectedCount: number;
   readonly gateHeading: string;
   /** The findings that capped the grade, by title. Empty when none did. */
   readonly gateReasons: readonly string[];
@@ -365,6 +388,8 @@ export interface PdfExplainer {
   readonly steps: readonly string[];
   /** "Website developer, Hosting or server administrator". */
   readonly whoFixes: string;
+  /** What the fix is intended to bring about, copied from the explainer unchanged. */
+  readonly whatFixingAchieves: string;
 }
 
 export interface PdfFinding {
@@ -398,6 +423,85 @@ export interface PdfFinding {
    * the finding's own evidence and affected pages already say everything.
    */
   readonly evidencePanel: PdfEvidencePanel | null;
+  /**
+   * The figures for "found on {affected} of {evaluated} pages", or null. Present
+   * only for a page finding whose crawl counts reconciled; `evaluated` is the
+   * pages this rule ran on, not the pages the audit read.
+   */
+  readonly scopeCounts: PdfScopeCounts | null;
+  /** Whether the affected list is shorter than the true total. No figure is carried. */
+  readonly truncated: boolean;
+  /** The domain a site finding applies to, or null when it is unknown or not a site finding. */
+  readonly scopeDomain: string | null;
+  /** Which evidence heading applies: the whole domain, the one page read, or an example page. */
+  readonly evidenceKind: PdfEvidenceKind;
+}
+
+export interface PdfScopeCounts {
+  readonly affected: number;
+  readonly evaluated: number;
+}
+
+export type PdfEvidenceKind = "site" | "onePage" | "examplePage";
+
+/**
+ * One check's line in a category's check list, as a status rather than a
+ * sentence: the renderer supplies the approved label and wording.
+ *
+ *   issue        a finding exists for this rule
+ *   no-issue     the rule is known to have run, was skipped nowhere and found nothing
+ *   partly       a page rule that ran on some pages and was skipped on others
+ *   not-checked  anything else: the rule did not run, or that it ran cannot be shown
+ */
+export type PdfChecklistStatus = "issue" | "no-issue" | "partly" | "not-checked";
+
+export interface PdfChecklistItem {
+  readonly ruleId: string;
+  readonly scope: FindingScope;
+  readonly status: PdfChecklistStatus;
+  /** The finding's own title, for an issue; null otherwise. */
+  readonly findingTitle: string | null;
+}
+
+/**
+ * One category's check list. A list of these rather than an object keyed by
+ * category, so no raw block's name ("seo", say) ever appears as a document key.
+ */
+export interface PdfChecklist {
+  readonly category: "seo" | "security" | "technical";
+  readonly items: readonly PdfChecklistItem[];
+}
+
+/** The crawl's counts, carried only when they reconciled. */
+export interface PdfCoverageCounts {
+  readonly discovered: number;
+  readonly evaluated: number;
+  readonly unavailable: number;
+  /** Addresses found that were not web pages (n). */
+  readonly notWebPages: number;
+  /** Found but not visited before the audit stopped (r). */
+  readonly notVisited: number;
+  readonly robotsExcluded: number;
+  readonly includesStartingAddress: boolean;
+}
+
+/** What may be said about the crawl without any figure. */
+export interface PdfCoverageFlags {
+  readonly partial: boolean;
+  /** Whether robots.txt kept any address from being visited. The count is not carried here. */
+  readonly hasExclusions: boolean;
+}
+
+/** Settings, not measurements: shown whether or not the counts reconciled. */
+export interface PdfConfiguredLimits {
+  readonly maxPages: number;
+  readonly maxDurationMs: number;
+}
+
+/** robots.txt and the sitemap as the audit found them. */
+export interface PdfTechnicalFiles {
+  readonly robots: SiteFileStatus;
+  readonly sitemap: SiteFileStatus;
 }
 
 /** Measured rows shown under a finding, so its evidence sits beside it. */
@@ -503,6 +607,28 @@ export interface PdfDocument {
   /** The measured facts, in the order the results page shows them. */
   readonly measured: readonly PdfFactSection[];
   readonly coverageDetail: readonly PdfFactSection[];
+
+  /**
+   * Whether the crawl's counts reconcile, worked out once for the whole
+   * document. Null when there is no crawl of pages to check: a certificate
+   * failure read no page.
+   */
+  readonly coverageCheck: CoverageCheck | null;
+  /** Null unless `coverageCheck` passed. */
+  readonly coverageCounts: PdfCoverageCounts | null;
+  readonly coverageFlags: PdfCoverageFlags;
+  readonly configuredLimits: PdfConfiguredLimits;
+  /** True only when the counts reconciled and the audit read exactly one page (CP3-Q20). */
+  readonly singlePageAudit: boolean;
+  /** SEO, Security and Technical, in that order. Speed has no check list. */
+  readonly checklists: readonly PdfChecklist[];
+  /**
+   * The speed findings, for the cards that follow the Speed section. They are
+   * still in `pageFindings` too, until the renderer moves them.
+   */
+  readonly speedFindings: readonly PdfFinding[];
+  /** Null when the technical checks did not run. */
+  readonly technicalFiles: PdfTechnicalFiles | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -563,20 +689,76 @@ function commentaryFor(
 }
 
 /**
+ * What a finding's document fields depend on beyond the finding itself, worked
+ * out once per document so every card reads the same answer.
+ */
+interface FindingContext {
+  readonly check: CoverageCheck | null;
+  readonly singlePageAudit: boolean;
+  readonly domains: SiteDomains;
+}
+
+/**
+ * The domains a site finding can apply to, each read from a measured field and
+ * null when that field holds nothing usable. Never guessed from another field.
+ */
+interface SiteDomains {
+  /** The mail domain the SPF and DMARC records were looked up for. */
+  readonly email: string | null;
+  /** The host the certificate check read. */
+  readonly certificate: string | null;
+  /** The host of the address audited, where robots.txt lives. */
+  readonly site: string | null;
+}
+
+/** A hostname as measured, or null when the value is empty or not a hostname at all. */
+function domainOrNull(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.?$/i.test(trimmed) ? trimmed : null;
+}
+
+/** The host of an address, or null when the address cannot be parsed. */
+function hostOf(address: string): string | null {
+  try {
+    return domainOrNull(new URL(address).hostname);
+  } catch {
+    return null;
+  }
+}
+
+/** Which measured domain each site rule speaks about (CP3-F13-Q3). */
+function scopeDomainFor(ruleId: string, domains: SiteDomains): string | null {
+  if (ruleId === "security.dns.spf" || ruleId === "security.dns.dmarc") return domains.email;
+  if (ruleId.startsWith("security.ssl.")) return domains.certificate;
+  if (ruleId === "technical.robots.blocks-all") return domains.site;
+  return null;
+}
+
+/**
  * One finding, worded by the report layer.
  *
  * EVERY VALUE IS COPIED, NEVER COMPUTED. The severity is the rule's own; the
- * reach comes from the server's counts through `affectedView`, which gives a
- * site finding no denominator; the sample is the aggregator's, already capped.
- * Nothing here counts the sample array to produce a total.
+ * reach comes from the server's counts through `affectedViewFor`, which gives a
+ * site finding no denominator and hides every figure when the crawl's counts
+ * did not reconcile; the sample is the aggregator's, already capped. The one
+ * comparison made here -- whether the sample is shorter than the true total --
+ * yields a yes or no, never a number.
  */
 function toFinding(
   finding: Finding,
   scope: FindingScope,
   commentary: ReadonlyMap<string, PdfCommentary>,
   panels: ReadonlyMap<string, PdfEvidencePanel>,
+  context: FindingContext,
 ): PdfFinding {
-  const reach = affectedView(finding);
+  const reach = affectedViewFor(finding, context.check);
+  const counted =
+    scope === "page" &&
+    context.check !== null &&
+    context.check.valid &&
+    finding.affectedCount !== undefined &&
+    finding.evaluatedPages !== undefined;
 
   return {
     ruleId: finding.id,
@@ -595,6 +777,10 @@ function toFinding(
     commentary: commentary.get(finding.id) ?? null,
     explainer: explainerView(finding),
     evidencePanel: finding.severity === "good" ? null : (panels.get(finding.id) ?? null),
+    scopeCounts: counted ? { affected: finding.affectedCount!, evaluated: finding.evaluatedPages! } : null,
+    truncated: (finding.affectedCount ?? 0) > (finding.affected ?? []).length,
+    scopeDomain: scope === "site" ? scopeDomainFor(finding.id, context.domains) : null,
+    evidenceKind: scope === "site" ? "site" : context.singlePageAudit ? "onePage" : "examplePage",
   };
 }
 
@@ -645,6 +831,7 @@ function explainerView(finding: Finding): PdfExplainer | null {
     possibleImpact: entry.possibleImpact,
     steps: entry.steps,
     whoFixes: whoFixesLabel(entry),
+    whatFixingAchieves: entry.whatFixingAchieves,
   };
 }
 
@@ -661,7 +848,8 @@ function toSection(
   heading: string,
   intro: string,
   commentary: ReadonlyMap<string, PdfCommentary>,
-  panels: ReadonlyMap<string, PdfEvidencePanel> = new Map(),
+  panels: ReadonlyMap<string, PdfEvidencePanel>,
+  context: FindingContext,
 ): PdfFindingSection {
   return {
     heading,
@@ -670,9 +858,87 @@ function toSection(
     groups: groupByCategory(findings).map((group) => ({
       category: group.category,
       label: group.label,
-      findings: group.findings.map((finding) => toFinding(finding, scope, commentary, panels)),
+      findings: group.findings.map((finding) => toFinding(finding, scope, commentary, panels, context)),
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Check lists
+// ---------------------------------------------------------------------------
+
+/** The categories that have a check list, each listing its rules in registry order. Speed has none. */
+const CHECKLIST_CATEGORIES = ["seo", "security", "technical"] as const;
+
+/**
+ * Every check-list line, as a status (CP3 revision 9, §1.9).
+ *
+ * BUILT FROM STRUCTURE ONLY: which findings exist, which rules have a skipped
+ * entry, which rules the ledger says ran, each rule's declared scope, and
+ * whether this is a certificate failure. The words a skipped entry carries are
+ * never read here, so no status can depend on how a reason happens to be
+ * phrased.
+ *
+ * NEVER A PASS WITHOUT EVIDENCE. "no-issue" needs the ledger to name the rule.
+ * A stored audit that predates the ledger cannot show that a silent rule ran,
+ * so such a rule reads "not-checked" rather than borrowing a pass.
+ */
+function checklistsFor(
+  findings: readonly Finding[],
+  skippedChecks: readonly SkippedCheck[],
+  ranRules: readonly string[] | undefined,
+  certificateFailure: boolean,
+): PdfChecklist[] {
+  const issues = new Map<string, Finding>();
+  for (const finding of findings) {
+    if (finding.severity !== "good" && !issues.has(finding.id)) issues.set(finding.id, finding);
+  }
+  const skippedIds = new Set(skippedChecks.map((entry) => entry.ruleId));
+  const ranIds = ranRules === undefined ? null : new Set(ranRules);
+
+  const statusOf = (ruleId: string, scope: FindingScope): PdfChecklistStatus => {
+    if (certificateFailure && scope === "page") return "not-checked";
+    if (issues.has(ruleId)) return "issue";
+    if (ranIds === null || !ranIds.has(ruleId)) return "not-checked";
+    if (skippedIds.has(ruleId)) return scope === "page" ? "partly" : "not-checked";
+    return "no-issue";
+  };
+
+  return CHECKLIST_CATEGORIES.map((category) => ({
+    category,
+    items: AUDIT_RULES.filter((rule) => rule.category === category).map((rule) => {
+      const status = statusOf(rule.id, rule.scope);
+      return {
+        ruleId: rule.id,
+        scope: rule.scope,
+        status,
+        findingTitle: status === "issue" ? (issues.get(rule.id)?.title ?? null) : null,
+      };
+    }),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Coverage, safe to show
+// ---------------------------------------------------------------------------
+
+/** The crawl's counts, only when the shared check says they reconcile. */
+function coverageCountsFor(crawl: SiteAuditResult["crawl"], check: CoverageCheck | null): PdfCoverageCounts | null {
+  if (check === null || !check.valid) return null;
+  const unavailable = crawl.unavailable.length;
+  return {
+    discovered: crawl.discovered,
+    evaluated: crawl.evaluated,
+    unavailable,
+    notWebPages: crawl.skippedNonHtml,
+    notVisited: crawl.discovered - crawl.evaluated - unavailable - crawl.skippedNonHtml,
+    robotsExcluded: crawl.robots.excluded,
+    includesStartingAddress: check.includesStartingAddress,
+  };
+}
+
+function technicalFilesFrom(technical: AuditData["technical"] | null): PdfTechnicalFiles | null {
+  return technical === null ? null : { robots: technical.robotsTxtStatus, sitemap: technical.sitemapStatus };
 }
 
 // ---------------------------------------------------------------------------
@@ -824,6 +1090,21 @@ function certificateFailureDocument(
   // No commentary was asked for, so no card carries any.
   const commentary = new Map<string, PdfCommentary>();
 
+  /*
+   * NO CRAWL OF PAGES TO CHECK. No page was read, so there are no coverage or
+   * finding-scope figures to verify and none is shown -- the dashboard passes
+   * the same null for this audit. The domains come from the failure record.
+   */
+  const context: FindingContext = {
+    check: null,
+    singlePageAudit: false,
+    domains: {
+      email: domainOrNull(audit.dns.emailDomain),
+      certificate: domainOrNull(audit.ssl.hostname),
+      site: hostOf(audit.failedUrl),
+    },
+  };
+
   const requested = withoutCredentials(audit.website.requestedUrl);
   const audited = withoutCredentials(audit.failedUrl);
 
@@ -875,10 +1156,10 @@ function certificateFailureDocument(
     clientSummary: buildClientAiSummary(findings, commentary, null),
     overallSummary: null,
 
-    siteFindings: toSection(site, "site", SITE_FINDINGS_HEADING, SITE_FINDINGS_INTRO, commentary),
+    siteFindings: toSection(site, "site", SITE_FINDINGS_HEADING, SITE_FINDINGS_INTRO, commentary, new Map(), context),
     // Empty, and the renderer draws nothing for it. No page was read, so
     // there is no page-level finding and none may be implied.
-    pageFindings: toSection(page, "page", PAGE_FINDINGS_HEADING, PAGE_FINDINGS_INTRO, commentary),
+    pageFindings: toSection(page, "page", PAGE_FINDINGS_HEADING, PAGE_FINDINGS_INTRO, commentary, new Map(), context),
 
     skipped: showsSkippedPanel(state)
       ? {
@@ -916,6 +1197,16 @@ function certificateFailureDocument(
 
     // Nothing here: every row of it describes a crawl of pages.
     coverageDetail: [],
+
+    coverageCheck: null,
+    coverageCounts: null,
+    coverageFlags: { partial: true, hasExclusions: audit.crawl.robots.excluded > 0 },
+    configuredLimits: { maxPages: audit.crawl.limits.maxPages, maxDurationMs: audit.crawl.limits.maxDurationMs },
+    singlePageAudit: false,
+    checklists: checklistsFor(findings, skippedChecks, audit.site.ranRules, true),
+    // A speed check needs a page to measure, and none was read.
+    speedFindings: [],
+    technicalFiles: technicalFilesFrom(audit.technical),
   };
 }
 
@@ -967,9 +1258,10 @@ function gradeClassFor(grade: Grade): string {
   }
 }
 
-function toScoreCategory(label: string, category: CategoryScore): PdfScoreCategory {
+/** The counts are the scorer's own (CP3-Q17), copied rather than re-derived. */
+function toScoreCategory(name: Category, label: string, category: CategoryScore): PdfScoreCategory {
   if (category.status !== "assessed") {
-    return { label, assessed: false };
+    return { label, assessed: false, category: name, ranCount: 0, skippedCount: category.skippedCount };
   }
   return {
     label,
@@ -978,6 +1270,9 @@ function toScoreCategory(label: string, category: CategoryScore): PdfScoreCatego
     passRate: category.passRate,
     coveragePercent: coveragePercent(category.coverage),
     gradeClass: gradeClassFor(category.grade),
+    category: name,
+    ranCount: category.ranCount,
+    skippedCount: category.skippedCount,
   };
 }
 
@@ -1008,8 +1303,10 @@ function toScore(score: ScoreResult, findings: readonly Finding[]): PdfScore {
     partialNote: score.partial ? SCORE_PARTIAL_NOTE : null,
     capNote,
     categories: SCORE_CATEGORY_ORDER.map((name) =>
-      toScoreCategory(categoryLabel(name), score.categories[name]),
+      toScoreCategory(name, categoryLabel(name), score.categories[name]),
     ),
+    ranCount: score.ranCount,
+    expectedCount: score.ranCount + score.skippedCount,
     gateHeading: GATE_HEADING,
     gateReasons: reasons.map((reason) => reason.title),
     gateNote: reasons.length > 0 ? GATE_NOTE : null,
@@ -1075,6 +1372,23 @@ export function buildPdfDocument(
   const panels = evidencePanels(data, crawl);
   const state = findingsState(findings.length, skippedChecks.length);
   const coverage = crawlView(crawl);
+
+  /*
+   * ONE CHECK OF THE CRAWL'S COUNTS FOR THE WHOLE DOCUMENT. Every coverage or
+   * finding-scope figure below is filled from it, so no two parts of the report
+   * can disagree about whether those counts may be shown.
+   */
+  const check = coverageCheck(crawl);
+  const singlePageAudit = check.valid && check.pagesRead === 1;
+  const context: FindingContext = {
+    check,
+    singlePageAudit,
+    domains: {
+      email: domainOrNull(data.dns.emailDomain),
+      certificate: domainOrNull(data.ssl.hostname),
+      site: hostOf(data.fetch.finalUrl),
+    },
+  };
 
   const aiSummary: PdfAiSummary | null =
     job.explanation !== null && job.explanation.state === "explained"
@@ -1172,6 +1486,7 @@ export function buildPdfDocument(
         SITE_FINDINGS_INTRO,
         commentary,
         panels,
+        context,
       ),
       pageFindings: toSection(
         page,
@@ -1180,6 +1495,7 @@ export function buildPdfDocument(
         PAGE_FINDINGS_INTRO,
         commentary,
         panels,
+        context,
       ),
 
       skipped: showsSkippedPanel(state)
@@ -1222,13 +1538,29 @@ export function buildPdfDocument(
              * applies the same condition.
              */
             ...(crawl.complete ? [] : [{ label: "Stopped because", value: stopReasonText(crawl) }]),
-            ...discoverySourceFacts(crawl),
-            ...sitemapDiscoveryFacts(crawl),
+            /*
+             * COUNTS FROM THE SAME CRAWL, so shown only when that crawl's counts
+             * reconciled. These two rows have no check of their own; leaving them
+             * out here keeps the shared fact builders unchanged.
+             */
+            ...(check.valid ? discoverySourceFacts(crawl) : []),
+            ...(check.valid ? sitemapDiscoveryFacts(crawl) : []),
             ...robotsFacts(crawl, data.technical),
           ],
         },
         { heading: "Audit limits", facts: crawlLimitFacts(crawl.limits) },
       ],
+
+      coverageCheck: check,
+      coverageCounts: coverageCountsFor(crawl, check),
+      coverageFlags: { partial: !crawl.complete, hasExclusions: crawl.robots.excluded > 0 },
+      configuredLimits: { maxPages: crawl.limits.maxPages, maxDurationMs: crawl.limits.maxDurationMs },
+      singlePageAudit,
+      checklists: checklistsFor(findings, skippedChecks, whole.site.ranRules, false),
+      speedFindings: findings
+        .filter((finding) => finding.category === "speed")
+        .map((finding) => toFinding(finding, "page", commentary, panels, context)),
+      technicalFiles: technicalFilesFrom(data.technical),
     },
   };
 }

@@ -388,6 +388,7 @@ const EXPLAINER = {
   possibleImpact: "IMPACT-TEXT",
   steps: ["STEP-ONE", "STEP-TWO"],
   whoFixes: "WHO-TEXT",
+  whatFixingAchieves: "ACHIEVES-TEXT",
 };
 
 test("a card reads in the approved order: found, means, matters, may affect, action, steps, who, pages", () => {

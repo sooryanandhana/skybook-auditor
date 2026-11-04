@@ -290,7 +290,7 @@ test("the coverage facts name a page too large to analyse, apart from pages that
   const facts = Object.fromEntries(view.facts.map((fact) => [fact.label, fact.value]));
 
   assert.equal(facts["page too large to analyse"], "1");
-  assert.equal(facts["page that could not be read"], "1", "the unreadable page alone");
+  assert.equal(facts["Pages that could not be read"], "1", "the unreadable page alone");
   assert.equal(facts["Pages read"], "2");
 });
 

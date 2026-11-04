@@ -504,6 +504,11 @@ test("missing HSTS: medium", () => {
   assert.ok(finding);
   assert.equal(finding.severity, "medium");
   assert.match(finding.evidence, /No Strict-Transport-Security/);
+  // includeSubDomains is advised only once every subdomain is known to work over HTTPS.
+  assert.equal(
+    finding.remediation,
+    "Send the Strict-Transport-Security header with a max-age of at least six months (for example max-age=15552000). Add includeSubDomains only after confirming that every subdomain also works over HTTPS.",
+  );
 });
 
 test("HSTS present but max-age=0 is reported as switched off, not as missing", () => {
@@ -694,6 +699,10 @@ test("no DMARC record: medium", () => {
 
   assert.ok(finding);
   assert.equal(finding.severity, "medium");
+  assert.equal(
+    finding.remediation,
+    "Publish a DMARC record for the domain (a TXT record named _dmarc), starting with a monitoring-only policy (p=none) so reports can be reviewed before the policy is enforced.",
+  );
 });
 
 /*

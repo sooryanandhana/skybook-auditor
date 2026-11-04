@@ -302,6 +302,25 @@ test("heading level skips: medium, quoting the skips measured", () => {
   assert.match(finding.evidence, /h2 followed by h4/);
 });
 
+test("heading level skips: one place is singular, several are plural", () => {
+  const one = findingFor("seo.headings.order", { seo: seoWith({ headingSkips: ["h2 followed by h4"] }) });
+  assert.equal(one?.evidence, "1 place skips a heading level: h2 followed by h4.");
+
+  const two = findingFor("seo.headings.order", {
+    seo: seoWith({ headingSkips: ["h1 followed by h3", "h2 followed by h4"] }),
+  });
+  assert.equal(two?.evidence, "2 places skip a heading level: h1 followed by h3; h2 followed by h4.");
+});
+
+test("missing canonical: the approved evidence and remediation wording", () => {
+  const finding = findingFor("seo.canonical.missing", { seo: seoWith({ canonicalUrl: null }) });
+  assert.equal(finding?.evidence, "No canonical URL was declared on the affected page(s).");
+  assert.equal(
+    finding?.remediation,
+    "Add a canonical link to the page's head section that points to this page's preferred web address.",
+  );
+});
+
 test("images without alt: medium, and decorative ones are not counted", () => {
   // The healthy fixture has one described image and one alt="" divider.
   const seo = runSeoChecks(HEALTHY_HTML);

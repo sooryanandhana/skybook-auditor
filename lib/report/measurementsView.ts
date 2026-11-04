@@ -36,6 +36,8 @@ import type { CrawlStopReason } from "../collector/crawlFrontier.ts";
 import type { SiteCrawlSummary } from "../collector/crawlSite.ts";
 import type { RobotsStatus } from "../collector/robots.ts";
 import type { SitemapStopReason } from "../collector/sitemap.ts";
+import { coverageCheck, type CoverageCheck } from "./coverageCheck.ts";
+import { ADDRESSES_FOUND_LABEL, configuredLimitsSentence } from "./reportSections.ts";
 import type {
   Category,
   CertificateProblem,
@@ -180,7 +182,8 @@ export function expiryNote(days: number | null): string | undefined {
     const ago = Math.abs(days);
     return `Expired ${ago} ${ago === 1 ? "day" : "days"} ago`;
   }
-  return `${days} ${days === 1 ? "day" : "days"} from now`;
+  // Counted from the day of the audit, not from whenever the report is read.
+  return `${days} ${days === 1 ? "day" : "days"} after the audit date`;
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +591,28 @@ function durationText(ms: number): string {
 }
 
 /**
+ * The configured limits as one sentence, with the duration's unit written out.
+ *
+ * These are settings, not results, so they may be shown even when the crawl's
+ * counts could not be verified -- and they are labelled as configured so they
+ * are never read as a measurement of the site.
+ */
+export function configuredLimitsText(limits: SiteCrawlSummary["limits"]): string {
+  return configuredLimitsSentence(withThousands(limits.maxPages), durationText(limits.maxDurationMs));
+}
+
+/**
+ * The first row label of the crawl table, from the verified coverage check:
+ * whether the found total includes the starting address is the check's answer,
+ * never re-derived here.
+ */
+export function addressesFoundLabel(coverage: Extract<CoverageCheck, { valid: true }>): string {
+  return coverage.includesStartingAddress
+    ? ADDRESSES_FOUND_LABEL.includingStartingAddress
+    : ADDRESSES_FOUND_LABEL.plain;
+}
+
+/**
  * The limits this crawl was given.
  *
  * Shown because they explain a partial result. "128 of 417 pages" invites the
@@ -733,7 +758,8 @@ export function robotsFacts(
     });
   }
 
-  if (crawl.robots.excluded > 0) {
+  // A count from the same crawl as the others: shown only when they reconcile.
+  if (crawl.robots.excluded > 0 && coverageCheck(crawl).valid) {
     rows.push({
       label: "Pages the site asked us to skip",
       value: withThousands(crawl.robots.excluded),
@@ -1114,6 +1140,8 @@ export interface CountTile {
  * addresses from the sitemap" is a fact worth seeing next to "416 from links".
  */
 export function crawlCountTiles(crawl: SiteCrawlSummary): CountTile[] {
+  // Every tile is one of the crawl's counts; when they do not add up, none is shown.
+  if (!coverageCheck(crawl).valid) return [];
   return [
     { label: "Discovered", value: withThousands(crawl.discovered) },
     { label: "Evaluated", value: withThousands(crawl.evaluated) },

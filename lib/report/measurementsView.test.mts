@@ -142,7 +142,7 @@ test("a valid certificate shows its details rather than nothing", () => {
   assert.equal(valueOf(rows, "Issued to"), "example.com");
   assert.equal(valueOf(rows, "Valid from"), "15 January 2026");
   assert.equal(valueOf(rows, "Expires"), "27 October 2026");
-  assert.equal(noteOf(rows, "Expires"), "84 days from now");
+  assert.equal(noteOf(rows, "Expires"), "84 days after the audit date");
   assert.equal(valueOf(rows, "Covers this address"), "Yes");
   assert.equal(valueOf(rows, "Trusted"), "Yes, by the system's certificate store");
   assert.equal(valueOf(rows, "Protocol"), "TLSv1.3");
@@ -286,7 +286,8 @@ test("a moment is the date helper plus a time, not a second date formatter", () 
 
 test("the expiry note handles today and one day either side", () => {
   assert.equal(expiryNote(0), "Expires today");
-  assert.equal(expiryNote(1), "1 day from now");
+  assert.equal(expiryNote(1), "1 day after the audit date");
+  assert.equal(expiryNote(2), "2 days after the audit date");
   assert.equal(expiryNote(-1), "Expired 1 day ago");
   assert.equal(expiryNote(null), undefined);
 });
@@ -1025,6 +1026,9 @@ test("the heading counts distinct CHECKS, not reasons", () => {
 test("the tiles carry every crawl number, and invent none", () => {
   const tiles = crawlCountTiles(
     crawl({
+      // Stopped at a limit: with 283 addresses unreached it cannot be complete.
+      complete: false,
+      stoppedBecause: "max-pages",
       discovered: 417,
       evaluated: 128,
       queuedAtStop: 267,
@@ -1048,7 +1052,8 @@ test("the tiles carry every crawl number, and invent none", () => {
 });
 
 test("zeroes are kept here, because how it looked is a fact too", () => {
-  const tiles = crawlCountTiles(crawl({ sources: { html: 0, sitemap: 0 } }));
+  // Everything but the starting address came from links; none from a sitemap.
+  const tiles = crawlCountTiles(crawl({ sources: { html: 11, sitemap: 0 } }));
 
   assert.equal(tiles.find((t) => t.label === "From sitemap")?.value, "0");
 });

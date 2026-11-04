@@ -289,7 +289,7 @@ export const hstsRule = defineRule<SecurityData>({
   category: "security",
   severity: "medium",
   remediation:
-    "Send Strict-Transport-Security with a max-age of at least six months, e.g. max-age=15552000; includeSubDomains.",
+    "Send the Strict-Transport-Security header with a max-age of at least six months (for example max-age=15552000). Add includeSubDomains only after confirming that every subdomain also works over HTTPS.",
   select: (data) =>
     whenApplicable(
       data.security.hsts.applicable,
@@ -538,7 +538,7 @@ export const dmarcRule = defineRule<Presence<string>, SiteFacts>({
   category: "security",
   severity: "medium",
   remediation:
-    "Publish a DMARC TXT record at _dmarc.<domain>, starting with p=none to monitor before enforcing.",
+    "Publish a DMARC record for the domain (a TXT record named _dmarc), starting with a monitoring-only policy (p=none) so reports can be reviewed before the policy is enforced.",
   select: (data) => fromEmailPolicy(data.dns.dmarc),
   evaluate: (dmarc) =>
     dmarc.present

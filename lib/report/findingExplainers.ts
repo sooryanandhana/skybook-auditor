@@ -43,6 +43,11 @@ export interface FindingExplainer {
   readonly possibleImpact: string;
   /** Practical steps, in the order someone would take them. */
   readonly steps: readonly string[];
+  /**
+   * What the fix is meant to bring about. Phrased as an intention ("is intended
+   * to"), never a promise: the audit cannot know what a change will achieve.
+   */
+  readonly whatFixingAchieves: string;
   /** Who normally does the work, most likely first. */
   readonly whoFixes: readonly FixRole[];
 }
@@ -56,6 +61,8 @@ const LCP_STEPS = [
   "Ask the hosting provider to review how quickly the server responds and whether pages are cached (kept ready to send), and consider a content delivery network, which serves the site from locations closer to visitors.",
   "Check again after the changes. Google's real-visitor data updates gradually, so improvements take several weeks to show fully.",
 ];
+const LCP_ACHIEVES =
+  "Showing the main content sooner is intended to let visitors see what the page offers without waiting, which can make them more likely to stay.";
 
 const INP_MEANS =
   "This measures how quickly the page visibly reacts after a visitor taps, clicks or types (Google calls this Interaction to Next Paint). The result comes from Google's records of real visits to this page.";
@@ -65,6 +72,8 @@ const INP_STEPS = [
   "Remove plugins, widgets and outside scripts the site no longer needs, and load the rest after the page is ready to use.",
   "Check again after the changes. Google's real-visitor data updates gradually, so improvements take several weeks to show fully.",
 ];
+const INP_ACHIEVES =
+  "Faster reactions are intended to make the page feel responsive, so visitors can act without hesitation or repeated taps.";
 
 const CLS_MEANS =
   "This measures how much the content of the page moves around while it loads (Google calls this Cumulative Layout Shift). The result comes from Google's records of real visits to this page.";
@@ -75,6 +84,8 @@ const CLS_STEPS = [
   "Set up web fonts so that the text does not jump when the final font replaces the temporary one.",
   "Check again after the changes. Google's real-visitor data updates gradually, so improvements take several weeks to show fully.",
 ];
+const CLS_ACHIEVES =
+  "A stable layout is intended to stop visitors losing their place or tapping the wrong item while the page loads.";
 
 export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
   // -------------------------------------------------------------------------
@@ -93,6 +104,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Send every http:// address automatically to the matching https:// address (this is called a redirect).",
       "Update links, pictures and scripts inside the site to use https:// addresses, then check the page again.",
     ],
+    whatFixingAchieves:
+      "Serving every page securely is intended to protect what visitors see and type, remove the \"Not secure\" label, and show visitors and search engines that the site takes protection seriously.",
     whoFixes: ["hosting", "developer"],
   },
   "security.ssl.expired": {
@@ -107,6 +120,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Install the new certificate on the server and confirm the site opens without a warning.",
       "Turn on automatic renewal so the certificate does not lapse again, and set a reminder before the next expiry date.",
     ],
+    whatFixingAchieves:
+      "A valid, automatically renewed certificate is intended to let visitors reach the site without a warning and keep their connection encrypted.",
     whoFixes: ["hosting"],
   },
   "security.ssl.hostname": {
@@ -121,6 +136,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Have the certificate reissued so it covers each of those addresses, or send visitors to an address the current certificate already covers.",
       "Install the updated certificate and confirm each address opens without a warning.",
     ],
+    whatFixingAchieves:
+      "A certificate that covers every address is intended to let visitors reach the site on any of them without a warning.",
     whoFixes: ["hosting", "dns"],
   },
   "security.ssl.untrusted": {
@@ -135,6 +152,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Install the full set of certificate files on the server, including any \"intermediate\" certificates the provider supplies.",
       "Check the site again with an online SSL checking tool to confirm the set is complete.",
     ],
+    whatFixingAchieves:
+      "A recognised, complete certificate is intended to let all common browsers and devices confirm the site is genuine, without warnings.",
     whoFixes: ["hosting"],
   },
   "security.mixed-content": {
@@ -150,6 +169,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Where the source does not support https://, store the file on the website itself or replace it.",
       "Check the page again after the changes.",
     ],
+    whatFixingAchieves:
+      "Loading every file securely is intended to keep every part of the page working and protected, with the full padlock shown.",
     whoFixes: ["developer"],
   },
   "security.form.insecure": {
@@ -164,6 +185,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Confirm that the page receiving the form works over https://.",
       "Send a test message through the form and check that it arrives correctly.",
     ],
+    whatFixingAchieves:
+      "Sending form details securely is intended to protect the information visitors share with you.",
     whoFixes: ["developer"],
   },
   "security.headers.hsts": {
@@ -177,8 +200,10 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Confirm that every page of the site works over https://.",
       "Add the HSTS instruction with a short duration first, to make sure nothing stops working.",
       "Once the site is confirmed to work, increase the duration to at least six months.",
-      "Only add the \"includeSubDomains\" option if every subdomain (such as shop. or mail. versions of the address) also works over https://.",
+      "Only add the \"includeSubDomains\" option after confirming that every subdomain (such as shop. or mail. versions of the address) also works over https://.",
     ],
+    whatFixingAchieves:
+      "The instruction is intended to make browsers always use the secure version of the site, closing the brief unprotected moment at the start of a first visit.",
     whoFixes: ["hosting", "developer"],
   },
   "security.headers.csp": {
@@ -194,6 +219,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Review the reports, adjust the list, and then switch the policy on fully.",
       "Update the list whenever new outside tools are added to the site.",
     ],
+    whatFixingAchieves:
+      "A policy is intended to add an extra safeguard that limits what harmful code could do if it ever reached a page.",
     whoFixes: ["developer"],
   },
   "security.cookies.secure": {
@@ -208,6 +235,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Add the \"Secure\" setting to each cookie, usually through an option in the website platform or the server configuration.",
       "Check the page again to confirm the setting is present.",
     ],
+    whatFixingAchieves:
+      "The \"Secure\" setting is intended to keep cookie information from travelling over unencrypted connections.",
     whoFixes: ["developer"],
   },
   "security.cookies.httponly": {
@@ -222,6 +251,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Add the \"HttpOnly\" setting to all other cookies, starting with sign-in and session cookies.",
       "Test that the website's features still work, then check the page again.",
     ],
+    whatFixingAchieves:
+      "The setting is intended to keep sign-in and session cookies out of reach of page scripts, reducing what another weakness could expose.",
     whoFixes: ["developer"],
   },
   "security.dns.spf": {
@@ -237,6 +268,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Add it as a TXT record with the company that manages the domain's DNS settings.",
       "Confirm the record with an online SPF checking tool.",
     ],
+    whatFixingAchieves:
+      "An SPF record is intended to help receiving email systems recognise genuine email from your domain.",
     whoFixes: ["dns"],
   },
   "security.dns.dmarc": {
@@ -252,6 +285,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Review the reports for a few weeks to confirm that genuine email passes the checks.",
       "Then strengthen the policy step by step (p=quarantine, then p=reject).",
     ],
+    whatFixingAchieves:
+      "A DMARC policy is intended to give receiving email systems clear instructions for messages that fail your domain's checks, and to give you regular reports on who is sending email using your domain's name.",
     whoFixes: ["dns"],
   },
 
@@ -270,6 +305,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Check the page on several phone sizes.",
       "Adjust anything that does not fit the narrower screen.",
     ],
+    whatFixingAchieves:
+      "The tag is intended to make pages fit phone screens, so mobile visitors can read them without zooming.",
     whoFixes: ["developer"],
   },
   "seo.title.missing": {
@@ -284,6 +321,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Add it in the page's head section, or in the SEO title field of the website platform.",
       "Check the page again after publishing.",
     ],
+    whatFixingAchieves:
+      "A clear title is intended to help search engines and visitors understand the page before they open it.",
     whoFixes: ["seo", "developer"],
   },
   "seo.meta-description.missing": {
@@ -298,6 +337,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Add it through the SEO description field of the website platform, or in the page's head section.",
       "Use a different description for each important page.",
     ],
+    whatFixingAchieves:
+      "A written description is intended to give people a clear, relevant summary of the page when it appears in search results.",
     whoFixes: ["seo"],
   },
   "seo.canonical.missing": {
@@ -309,9 +350,11 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Without it, search engines may not receive a clear signal about the preferred address, although they can use other signals to choose one. This audit does not establish that it has affected the site's search results.",
     steps: [
       "Decide on the preferred address for each page.",
-      "Add a canonical tag pointing to that address. Most website platforms and SEO plugins can do this automatically.",
+      "Add a canonical link to each page's head section pointing to that address; most website platforms and SEO plugins can do this automatically.",
       "Make sure redirects and links within the site use the same preferred addresses.",
     ],
+    whatFixingAchieves:
+      "Stating the preferred address is intended to give search engines a clear signal about which version of each page is the main one.",
     whoFixes: ["developer", "seo"],
   },
   "seo.lang.missing": {
@@ -325,11 +368,13 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Add the language setting to the page's html tag, for example lang=\"en\" for English.",
       "Use the correct language code on each language version of the site.",
     ],
+    whatFixingAchieves:
+      "Declaring the language is intended to help screen readers pronounce the content correctly and help browsers offer translation.",
     whoFixes: ["developer"],
   },
   "seo.h1.missing": {
     whatItMeans:
-      "The page has no main heading. The main heading (coded as h1) is the top-level heading that states what the page is about.",
+      "The page does not have a main heading (coded as h1). A main heading is the top-level heading that states what the page is about.",
     whyItMatters:
       "The main heading helps visitors, search engines and screen-reader users understand the page and find their way around it.",
     possibleImpact:
@@ -338,6 +383,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Add one clear main heading near the top of the page that describes its content.",
       "If a visible title is already styled to look like a heading, mark it as the h1 instead.",
     ],
+    whatFixingAchieves:
+      "A clear main heading is intended to make each page's purpose obvious to visitors, search engines and screen-reader users.",
     whoFixes: ["developer", "seo"],
   },
   "seo.h1.multiple": {
@@ -352,6 +399,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Change the other main headings to lower levels (h2 or h3).",
       "Adjust their appearance with styling if they need to look the same as before.",
     ],
+    whatFixingAchieves:
+      "A single main heading is intended to make the page's main topic unambiguous.",
     whoFixes: ["developer"],
   },
   "seo.h1.empty": {
@@ -360,16 +409,18 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
     whyItMatters:
       "Search engines and screen readers get nothing useful from a heading without text.",
     possibleImpact:
-      "The page loses the benefit of having a main heading.",
+      "The page loses the benefit of a clearly stated main topic, so its purpose may be less clear to search engines and to people using screen readers.",
     steps: [
       "Put readable text inside the main heading.",
       "If the heading contains a picture such as a logo, give that picture alternative text describing it.",
     ],
+    whatFixingAchieves:
+      "A readable main heading is intended to give the page a clear, stated topic.",
     whoFixes: ["developer"],
   },
   "seo.headings.order": {
     whatItMeans:
-      "The page's heading levels skip a step, for example going straight from the main heading (h1) to a fourth-level heading (h4).",
+      "The page's heading levels skip a step, for example a second-level heading (h2) followed directly by a fourth-level heading (h4). The exact skips found are listed under \"What we found\".",
     whyItMatters:
       "Headings work like a table of contents. Skipped levels make that outline harder to follow, especially for screen-reader users.",
     possibleImpact:
@@ -378,6 +429,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Arrange headings in order: one h1, then h2, then h3 where needed, without skipping levels.",
       "Control the size of headings with styling rather than by choosing a different level.",
     ],
+    whatFixingAchieves:
+      "Headings in order are intended to give the page a clear outline that is easier to follow, especially with a screen reader.",
     whoFixes: ["developer"],
   },
   "seo.images.alt": {
@@ -392,6 +445,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Give purely decorative pictures an empty alternative text so screen readers skip them.",
       "Check the page again after the changes.",
     ],
+    whatFixingAchieves:
+      "Alternative text is intended to make pictures understandable to people who cannot see them, and to search engines.",
     whoFixes: ["seo", "developer"],
   },
 
@@ -410,6 +465,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Remove the \"Disallow: /\" line that applies to all search engines, keeping only blocks that are intended.",
       "Ask search engines to read the site again, for example through Google Search Console.",
     ],
+    whatFixingAchieves:
+      "Removing the block is intended to let search engines visit and read the site's pages again.",
     whoFixes: ["developer", "seo"],
   },
 
@@ -423,6 +480,7 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
     possibleImpact:
       "Some visitors may leave before the page has finished appearing. Google uses these measurements as one of many signals about page experience.",
     steps: LCP_STEPS,
+    whatFixingAchieves: LCP_ACHIEVES,
     whoFixes: ["developer", "hosting"],
   },
   "speed.field.lcp.needs-improvement": {
@@ -432,6 +490,7 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
     possibleImpact:
       "Some visitors, particularly on slower connections, may wait noticeably before seeing the page's main content.",
     steps: LCP_STEPS,
+    whatFixingAchieves: LCP_ACHIEVES,
     whoFixes: ["developer", "hosting"],
   },
   "speed.field.inp.slow": {
@@ -441,6 +500,7 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
     possibleImpact:
       "Visitors may tap or click repeatedly, become frustrated, or give up on what they were doing.",
     steps: INP_STEPS,
+    whatFixingAchieves: INP_ACHIEVES,
     whoFixes: ["developer"],
   },
   "speed.field.inp.needs-improvement": {
@@ -450,6 +510,7 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
     possibleImpact:
       "Some visitors may notice a delay after tapping, clicking or typing.",
     steps: INP_STEPS,
+    whatFixingAchieves: INP_ACHIEVES,
     whoFixes: ["developer"],
   },
   "speed.field.cls.slow": {
@@ -459,6 +520,7 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
     possibleImpact:
       "Visitors may tap the wrong item or lose their place while the page loads.",
     steps: CLS_STEPS,
+    whatFixingAchieves: CLS_ACHIEVES,
     whoFixes: ["developer"],
   },
   "speed.field.cls.needs-improvement": {
@@ -468,6 +530,7 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
     possibleImpact:
       "Some visitors may notice content moving while the page loads.",
     steps: CLS_STEPS,
+    whatFixingAchieves: CLS_ACHIEVES,
     whoFixes: ["developer"],
   },
   "speed.lab.score": {
@@ -483,6 +546,8 @@ export const FINDING_EXPLAINERS: Readonly<Record<string, FindingExplainer>> = {
       "Run the test again after each round of changes.",
       "Check the real-visitor results again once the site has more traffic.",
     ],
+    whatFixingAchieves:
+      "Working through the suggested improvements is intended to make the page lighter and quicker to load. The effect should be confirmed with real-visitor data once it becomes available.",
     whoFixes: ["developer"],
   },
 };
@@ -492,6 +557,25 @@ export const EVIDENCE_PANEL_HEADINGS = {
   site: "Measured for the whole site",
   mainPage: "Measured on the main page checked",
 } as const;
+
+/**
+ * The evidence heading of the redesigned finding card. NOT YET PRINTED: the PDF
+ * moves to these when the card can tell whether the crawl counts reconciled.
+ * Until then `EVIDENCE_PANEL_HEADINGS` above is what the report shows.
+ *
+ * `examplePage` alone is the heading for a finding on several pages when the
+ * counts could not be verified: the same words, with no figures.
+ */
+export const EVIDENCE_HEADINGS = {
+  site: "Measured for the whole domain",
+  onePage: "Measured on the page checked",
+  examplePage: "Example measured on the main page checked",
+} as const;
+
+/** The several-pages heading when the counts reconciled, with how far the finding reached. */
+export function evidenceHeadingWithReach(affected: number, evaluated: number): string {
+  return `${EVIDENCE_HEADINGS.examplePage} (found on ${affected} of ${evaluated} pages)`;
+}
 
 /** The explanation for a rule, or null when the rule has none. */
 export function explainerFor(ruleId: string): FindingExplainer | null {

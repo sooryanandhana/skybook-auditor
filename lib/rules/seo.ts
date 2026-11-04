@@ -131,11 +131,11 @@ export const canonicalRule = defineRule<SeoData>({
   category: "seo",
   severity: "medium",
   remediation:
-    'Add <link rel="canonical" href="..."> pointing at this page\'s preferred address.',
+    "Add a canonical link to the page's head section that points to this page's preferred web address.",
   select: (data) => fromServedHead(data.seo, (s) => s.canonicalUrl !== null),
   evaluate: (seo) =>
     seo.canonicalUrl === null
-      ? fires("The page declares no canonical URL.")
+      ? fires("No canonical URL was declared on the affected page(s).")
       : passes,
 });
 
@@ -245,7 +245,9 @@ export const headingOrderRule = defineRule<SeoData>({
   evaluate: (seo) =>
     seo.headingSkips.length > 0
       ? fires(
-          `${seo.headingSkips.length} place(s) skip a heading level: ${seo.headingSkips.join("; ")}.`,
+          seo.headingSkips.length === 1
+            ? `1 place skips a heading level: ${seo.headingSkips.join("; ")}.`
+            : `${seo.headingSkips.length} places skip a heading level: ${seo.headingSkips.join("; ")}.`,
         )
       : passes,
 });

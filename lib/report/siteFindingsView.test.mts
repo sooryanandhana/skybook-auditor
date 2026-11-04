@@ -80,7 +80,10 @@ const crawl = (overrides: Partial<SiteCrawlSummary> = {}): SiteCrawlSummary => (
   evaluated: 128,
   unavailable: [],
   skippedNonHtml: 0,
-  sources: { html: 127, sitemap: 0 },
+  // Consistent with what the crawler produces: everything found except the
+  // starting address arrived through a link. The coverage check refuses
+  // counts that do not add up, so a fixture must be one a real crawl could be.
+  sources: { html: (overrides.discovered ?? 128) - 1, sitemap: 0 },
   sitemapDiscovery: { attempted: true, complete: true, stoppedBecause: "completed" },
   robots: { status: "absent", enforced: true, excluded: 0 },
   ...overrides,
@@ -343,6 +346,8 @@ test("crawl facts show only what happened", () => {
     crawl({
       complete: false,
       stoppedBecause: "max-pages",
+      // Read + unreadable + non-pages may not exceed what was found.
+      evaluated: 100,
       unavailable: [{ url: "https://example.com/a", reason: "timeout" }],
       skippedNonHtml: 3,
       queuedAtStop: 267,
@@ -481,6 +486,35 @@ test("the sentence still says what it said before", () => {
   // The wording change is grammar only. The meaning it carries — that this
   // covers part of the site — must survive it.
   assert.match(partialCrawl(2, 10), /covers part of the site rather than all of it\.$/);
+});
+
+test("a finished crawl that could not read everything it found says so", () => {
+  // "Every page we found was visited" would be false here.
+  assert.equal(
+    crawlView(
+      crawl({
+        discovered: 8,
+        evaluated: 6,
+        unavailable: [{ url: "https://example.com/gone", reason: "timeout" }],
+        skippedNonHtml: 1,
+      }),
+    ).headline,
+    "8 addresses found: 6 pages read, 1 could not be read, 1 was not a web page.",
+  );
+  assert.equal(
+    crawlView(crawl({ discovered: 12, evaluated: 9, skippedNonHtml: 3 })).headline,
+    "12 addresses found: 9 pages read, 3 were not web pages.",
+  );
+});
+
+test("unreadable pages are labelled the same way however many there are", () => {
+  const facts = crawlView(
+    crawl({ discovered: 10, evaluated: 9, unavailable: [{ url: "https://example.com/gone", reason: "timeout" }] }),
+  ).facts;
+  assert.deepEqual(facts.find((fact) => /could not be read/.test(fact.label)), {
+    label: "Pages that could not be read",
+    value: "1",
+  });
 });
 
 test("the complete-crawl wording is untouched", () => {

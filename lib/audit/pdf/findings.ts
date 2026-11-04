@@ -12,10 +12,16 @@
  * the category label were all settled before this ran. This file chooses type
  * sizes and boxes.
  *
- * WHAT ONE FINDING SHOWS, from 7A §8, in this order: the title, a severity
- * chip carrying the word as well as the colour, the scope spelled out, the
- * reach for page findings only, the evidence, the remediation labelled and set
- * apart, the affected-page sample, and the AI commentary last.
+ * WHAT ONE FINDING SHOWS, in this order: the title, a severity chip carrying
+ * the word as well as the colour, the scope spelled out, the reach for page
+ * findings only, what we found, what this means, why it matters, how it may
+ * affect the website or business, what to do (labelled and set apart), the
+ * steps, who usually fixes it, the evidence panel and the affected pages.
+ *
+ * NO AI WRITING ON A CARD. Every word here is either measured or fixed,
+ * reviewed report text. The model's per-finding commentary is not printed in
+ * the PDF, even when the audit carries some: a card explains its finding once,
+ * completely, in words a person approved.
  */
 import type {
   PdfAffectedPage,
@@ -83,83 +89,26 @@ function affected(finding: PdfFinding, pages: readonly PdfAffectedPage[]): strin
 }
 
 /**
- * The model's writing about one finding, when there is any.
- *
- * LAST, AND SET APART. 7A §9 requires it visually subordinate to the measured
- * content and after both the evidence and the remediation, so the order on the
- * page matches the order of authority: what we measured, what we advise, then
- * what a model said about it.
- *
- * LABELLED IN WORDS. The reader is told this part was written by AI, in text
- * rather than by a change of colour, so the distinction survives greyscale.
- *
- * PLAIN TEXT, ALWAYS. The words originated with a model that was shown text
- * taken off somebody else's website. They are escaped like every other value
- * here, no markup in them is interpreted, and no link is built from them.
- *
- * NOTHING IS PRINTED TWICE. A model often answers "what was found" with the
- * evidence sentence itself and "what to do" with the remediation itself. Both
- * are already on the card directly above, as measured text, so a part that only
- * repeats one of them is left out and the parts that add something are kept.
- * This is a choice about layout and never about content: the measured evidence
- * and remediation are untouched, and no word of the model's is altered.
- *
- * THE AI LABEL STAYS WHENEVER ANY AI TEXT DOES. It heads the box, so whichever
- * parts remain are still marked as written by AI. With nothing left to show,
- * the box is not drawn at all, exactly as for a finding with no commentary.
- */
-function commentary(finding: PdfFinding, labels: PdfLabels): string {
-  const written = finding.commentary;
-  if (written === null) return "";
-
-  const alreadyShown = [finding.evidence, finding.remediation].map(comparable);
-  const adds = (text: string): boolean => {
-    const key = comparable(text);
-    return key !== "" && !alreadyShown.includes(key);
-  };
-
-  const parts =
-    (adds(written.explanation) ? html`<p>${written.explanation}</p>` : "") +
-    (adds(written.businessImpact)
-      ? html`<p class="ai-sub">${labels.aiImpact}</p>` + html`<p>${written.businessImpact}</p>`
-      : "") +
-    (adds(written.recommendation)
-      ? html`<p class="ai-sub">${labels.aiRecommendation}</p>` + html`<p>${written.recommendation}</p>`
-      : "");
-
-  if (parts === "") return "";
-
-  return `<div class="commentary">` + html`<p class="ai-label">${labels.aiExplanation}</p>` + parts + `</div>`;
-}
-
-/**
- * A text reduced to what makes two texts "the same sentence" for a reader.
- *
- * DELIBERATELY STRICT. Only differences nobody would notice are ignored: the
- * spacing, the capitals and a closing full stop. A reworded sentence is a
- * different sentence and is kept, because dropping something the model really
- * did add would be worse than printing a near-repeat.
- */
-/**
- * What the finding means, why it matters and what may follow, in plain words.
- * Placed after the measured evidence, so the reader meets the fact first.
+ * What the finding means, why it matters and how it may affect the website or
+ * business, in plain words. Placed after what we found, so the reader meets
+ * the fact first.
  */
 function meaning(finding: PdfFinding): string {
   const written = finding.explainer;
   if (written === null) return "";
   return (
     `<div class="explainer">` +
-    `<p class="explainer-label">What it means</p>` +
+    `<p class="explainer-label">What this means</p>` +
     html`<p>${written.whatItMeans}</p>` +
     `<p class="explainer-label">Why it matters</p>` +
     html`<p>${written.whyItMatters}</p>` +
-    `<p class="explainer-label">Possible impact</p>` +
+    `<p class="explainer-label">How it may affect your website or business</p>` +
     html`<p>${written.possibleImpact}</p>` +
     `</div>`
   );
 }
 
-/** The practical steps and who normally does the work, after the recommended action. */
+/** The practical steps and who usually does the work, after what to do. */
 function howToFix(finding: PdfFinding): string {
   const written = finding.explainer;
   if (written === null) return "";
@@ -169,7 +118,7 @@ function howToFix(finding: PdfFinding): string {
     `<ol>` +
     written.steps.map((step) => html`<li>${step}</li>`).join("") +
     `</ol>` +
-    html`<p class="who-fixes"><span class="explainer-label">Who should fix it:</span> ${written.whoFixes}</p>` +
+    html`<p class="who-fixes"><span class="explainer-label">Who usually fixes it:</span> ${written.whoFixes}</p>` +
     `</div>`
   );
 }
@@ -197,10 +146,6 @@ function evidencePanel(finding: PdfFinding): string {
   );
 }
 
-function comparable(text: string): string {
-  return text.replace(/\s+/g, " ").trim().replace(/\.$/, "").toLowerCase();
-}
-
 /** One finding, as a card. 7A §17 keeps cards for exactly this. */
 function findingCard(finding: PdfFinding, labels: PdfLabels): string {
   return (
@@ -217,13 +162,11 @@ function findingCard(finding: PdfFinding, labels: PdfLabels): string {
     `</div>` +
     meta(finding) +
     /*
-     * The evidence is what the audit measured, and it is now labelled as such,
-     * so a finding reads as three named parts in one glance: what was MEASURED,
-     * what to do about it, and — when a model wrote any — how it explains it. The
-     * label is a fixed structural word, like the scope above it, not a document
-     * value: it says nothing about the site.
+     * The rule's measured evidence, labelled as what we found. The label is a
+     * fixed structural word, like the scope above it, not a document value: it
+     * says nothing about the site.
      */
-    `<p class="finding-eyebrow">Measured</p>` +
+    `<p class="finding-eyebrow">What we found</p>` +
     html`<p class="evidence">${finding.evidence}</p>` +
     meaning(finding) +
     /*
@@ -239,7 +182,6 @@ function findingCard(finding: PdfFinding, labels: PdfLabels): string {
     howToFix(finding) +
     evidencePanel(finding) +
     affected(finding, finding.affected) +
-    commentary(finding, labels) +
     `</article>`
   );
 }

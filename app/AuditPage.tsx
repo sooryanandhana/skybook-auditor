@@ -3,7 +3,7 @@
 //   We need that because this page has a button, a text box, and remembers
 //   things (state) — all of which are browser-side behaviour.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { SignOut } from "./SignOut";
 import { AuditProgress } from "./AuditProgress";
 import { PerformancePanel } from "./PerformancePanel";
@@ -29,17 +29,20 @@ import {
   SITE_FINDINGS_HEADING,
   REMEDIATION_LABEL,
   SITE_FINDINGS_INTRO,
-  affectedView,
+  affectedViewFor,
   auditStatusText,
   CERTIFICATE_FAILURE_HEADING,
   certificateFailureView,
+  coverageCheck,
   crawlView,
   isCertificateFailureAudit,
   hasAffectedList,
+  pagesReadFigure,
   partitionByScope,
   robotsNote,
   scopeLabel,
   siteFileText,
+  type CoverageCheck,
   type FindingScope,
 } from "@/lib/report/siteFindingsView";
 import { MAX_EXPLAINED_FINDINGS } from "@/lib/ai/contract";
@@ -743,6 +746,12 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
   const typed = normalizeUrl(url);
   const runningUrl = typed.ok ? withoutCredentials(typed.url.toString()) : null;
   const panelScore = siteResult?.score ?? certificateFailure?.score ?? null;
+  // Whether this audit's crawl counts add up, worked out once per result and
+  // handed to everything below that shows a coverage or finding-scope figure.
+  const coverage = useMemo(
+    () => (siteResult === null ? null : coverageCheck(siteResult.crawl)),
+    [siteResult],
+  );
   /*
    * Which report sections are on the page, read from the same conditions that
    * render them: the score dashboard needs a score (and, for a reachable site,
@@ -944,7 +953,7 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
               checkedAt={result?.website.checkedAt ?? certificateFailure?.website.checkedAt ?? null}
               statusCode={result?.uptime.statusCode ?? null}
               serverResponseMs={result?.uptime.serverResponseTimeMs ?? null}
-              pagesRead={siteResult?.crawl.evaluated ?? null}
+              pagesRead={pagesReadFigure(coverage)}
             />
           </aside>
 
@@ -988,6 +997,7 @@ export function AuditPage({ isManagement = false }: { isManagement?: boolean }) 
                 explanation={explanation}
                 explanationRunning={explanationRunning}
                 reportJobId={reportJobId}
+                coverage={coverage}
               />
             )}
           </div>
@@ -1058,6 +1068,7 @@ function Results({
   explanation,
   explanationRunning,
   reportJobId,
+  coverage,
 }: {
   data: AuditData;
   /** The whole-site audit, when a crawl produced one. */
@@ -1074,6 +1085,8 @@ function Results({
   explanationRunning: boolean;
   /** The audit a report may be made from, or null when none may be. */
   reportJobId: string | null;
+  /** Whether the crawl's counts add up, checked once for this result. */
+  coverage: CoverageCheck | null;
 }) {
   /*
    * ruleId -> the writing about that rule.
@@ -1228,6 +1241,7 @@ function Results({
           ...performanceSkipped,
         ]}
         explanations={explanations}
+        coverage={coverage}
       />
 
       {siteResult !== null && (
@@ -1433,6 +1447,8 @@ function CertificateFailureResults({
         findings={audit.site.findings}
         skipped={audit.site.skippedChecks}
         explanations={new Map()}
+        // No page was read, so there are no crawl counts to verify.
+        coverage={null}
       />
 
       <section className={styles.facts}>
@@ -1484,11 +1500,14 @@ function FindingsSection({
   findings,
   skipped,
   explanations,
+  coverage,
 }: {
   findings: Finding[];
   skipped: SkippedCheck[];
   /** Written commentary by rule id. Empty when there is none, which is fine. */
   explanations: Map<string, AIExplanation>;
+  /** Whether the crawl's counts add up; finding figures are shown only when they do. */
+  coverage: CoverageCheck | null;
 }) {
   const state = findingsState(findings.length, skipped.length);
   const summary = findingsHeadline(findings, state);
@@ -1585,6 +1604,7 @@ function FindingsSection({
           findings={site}
           scope="site"
           explanations={explanations}
+          coverage={coverage}
         />
       )}
 
@@ -1596,6 +1616,7 @@ function FindingsSection({
           findings={page}
           scope="page"
           explanations={explanations}
+          coverage={coverage}
         />
       )}
 
@@ -1654,6 +1675,7 @@ function ScopedFindings({
   findings,
   scope,
   explanations,
+  coverage,
 }: {
   id: string;
   heading: string;
@@ -1661,6 +1683,7 @@ function ScopedFindings({
   findings: Finding[];
   scope: FindingScope;
   explanations: Map<string, AIExplanation>;
+  coverage: CoverageCheck | null;
 }) {
   const categories = groupByCategory(findings);
 
@@ -1683,6 +1706,7 @@ function ScopedFindings({
                 finding={finding}
                 scope={scope}
                 explanation={explanations.get(finding.id)}
+                coverage={coverage}
               />
             ))}
           </ul>
@@ -1702,13 +1726,15 @@ function FindingCard({
   finding,
   scope,
   explanation,
+  coverage,
 }: {
   finding: Finding;
   scope: FindingScope;
   /** Writing about this finding, when there is any. Never a measurement. */
   explanation?: AIExplanation;
+  coverage: CoverageCheck | null;
 }) {
-  const reach = affectedView(finding);
+  const reach = affectedViewFor(finding, coverage);
 
   /*
    * A severity-tinted left edge, so the worst findings catch the eye in a long

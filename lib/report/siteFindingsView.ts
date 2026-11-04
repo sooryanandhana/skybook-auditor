@@ -19,7 +19,18 @@ import type { SiteCrawlSummary } from "../collector/crawlSite";
 import { withoutCredentials } from "../collector/url.ts";
 import { TOO_LARGE_TO_ANALYSE } from "../collector/analysisLimit.ts";
 import { certificateProblemLabel } from "./measurementsView.ts";
+import { coverageCheck, type CoverageCheck } from "./coverageCheck.ts";
+import { SAFETY_LIMIT_STOP } from "./reportSections.ts";
 import type { AuditResult, CertificateFailureAudit, Finding, SiteFileStatus } from "../types";
+
+// The shared coverage check lives in its own file so the fact views can use it
+// too without an import cycle; this is where the screen and the PDF import it.
+export {
+  coverageCheck,
+  coverageInvariants,
+  type CoverageCheck,
+  type CoverageInvariant,
+} from "./coverageCheck.ts";
 
 /** Whether a finding is about one page or the whole site. */
 export type FindingScope = "site" | "page";
@@ -112,6 +123,29 @@ export function affectedView(finding: Finding): AffectedView {
 }
 
 /**
+ * The affected view, with its figures shown only when the crawl's counts
+ * reconciled.
+ *
+ * "19 of 128 evaluated pages" and "Showing 50 of 147" are counts from the same
+ * crawl the coverage check examined. When that check failed -- or there is no
+ * crawl summary to check at all -- those counts cannot be trusted, so neither
+ * line is shown. The pages themselves are always kept: each is an address the
+ * rule actually fired on, whatever the totals say.
+ *
+ * `coverage` is required, never defaulted, so no caller can forget to decide.
+ */
+export function affectedViewFor(finding: Finding, coverage: CoverageCheck | null): AffectedView {
+  const view = affectedView(finding);
+  if (coverage !== null && coverage.valid) return view;
+  return { reach: null, sample: null, pages: view.pages };
+}
+
+/** "Pages read" for a completed audit: the figure only when the counts reconciled. */
+export function pagesReadFigure(coverage: CoverageCheck | null): number | null {
+  return coverage !== null && coverage.valid ? coverage.pagesRead : null;
+}
+
+/**
  * Whether the affected-pages list is worth offering.
  *
  * A finding with nothing listed has nothing to expand, and an empty
@@ -170,7 +204,21 @@ export function auditStatusText(complete: boolean): string {
   return complete ? "Website audit complete" : "Partial website audit";
 }
 
+/** The stops that are a configured limit being reached. */
+const LIMIT_STOPS: ReadonlySet<SiteCrawlSummary["stoppedBecause"]> = new Set([
+  "max-pages",
+  "max-duration",
+  "max-queue",
+]);
+
 export function stopReasonText(crawl: SiteCrawlSummary): string {
+  /*
+   * When the coverage counts did not reconcile, a limit stop is described
+   * without its figure: "Stopped at the 150-page safety limit" next to
+   * untrustworthy counts would invite arithmetic with them.
+   */
+  if (LIMIT_STOPS.has(crawl.stoppedBecause) && !coverageCheck(crawl).valid) return SAFETY_LIMIT_STOP;
+
   switch (crawl.stoppedBecause) {
     case "max-pages":
       return `Stopped at the ${crawl.limits.maxPages}-page safety limit.`;
@@ -212,6 +260,18 @@ export interface CrawlView {
  */
 export function crawlView(crawl: SiteCrawlSummary): CrawlView {
   const partial = !crawl.complete;
+
+  /*
+   * COUNTS THAT DO NOT ADD UP ARE NOT SHOWN AT ALL. No headline and no facts,
+   * because every one of them is built from those counts; the reason stays,
+   * without figures, so a partial crawl still says why it stopped. The headline
+   * is an empty string rather than a different type so every existing reader
+   * of this shape keeps working unchanged.
+   */
+  if (!coverageCheck(crawl).valid) {
+    return { partial, headline: "", reason: partial ? stopReasonText(crawl) : null, facts: [] };
+  }
+
   /*
    * A page too large to analyse is kept with the pages that could not be read,
    * so it is never graded or counted as clean -- but it WAS read, so it is
@@ -228,7 +288,7 @@ export function crawlView(crawl: SiteCrawlSummary): CrawlView {
   // Only shown when they happened. A row of zeroes is noise, and "0 pages
   // excluded by robots.txt" invites a question nobody asked.
   if (unavailable > 0) {
-    facts.push({ label: `${pages(unavailable)} that could not be read`, value: String(unavailable) });
+    facts.push({ label: "Pages that could not be read", value: String(unavailable) });
   }
   if (tooLarge > 0) {
     facts.push({ label: `${pages(tooLarge)} too large to analyse`, value: String(tooLarge) });
@@ -257,9 +317,31 @@ export function crawlView(crawl: SiteCrawlSummary): CrawlView {
   const headline = partial
     ? `${crawl.evaluated} of ${crawl.discovered} ${pages(crawl.discovered)} found on this site ` +
       `${crawl.evaluated === 1 ? "was" : "were"} read, so this covers part of the site rather than all of it.`
-    : `${crawl.evaluated} ${pages(crawl.evaluated)} read. Every page we found was visited.`;
+    : completeHeadline(crawl, unavailable);
 
   return { partial, headline, reason: partial ? stopReasonText(crawl) : null, facts };
+}
+
+/**
+ * The headline of a crawl that finished.
+ *
+ * "Every page we found was visited" is true only when everything found was
+ * also read. When some addresses could not be read, or were not web pages,
+ * the headline says so instead of implying a clean sweep. `unreadable` leaves
+ * out pages too large to analyse, which were read and are named in the facts.
+ */
+function completeHeadline(crawl: SiteCrawlSummary, unreadable: number): string {
+  if (crawl.discovered === crawl.evaluated) {
+    return `${crawl.evaluated} ${pages(crawl.evaluated)} read. Every page we found was visited.`;
+  }
+  const notPages = crawl.skippedNonHtml;
+  return (
+    `${crawl.discovered} ${crawl.discovered === 1 ? "address" : "addresses"} found: ` +
+    `${crawl.evaluated} ${pages(crawl.evaluated)} read` +
+    (unreadable > 0 ? `, ${unreadable} could not be read` : "") +
+    (notPages > 0 ? `, ${notPages} ${notPages === 1 ? "was not a web page" : "were not web pages"}` : "") +
+    "."
+  );
 }
 
 /**

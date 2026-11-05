@@ -12,14 +12,21 @@
  */
 import { strict as assert } from "node:assert";
 import test from "node:test";
+import fs from "node:fs";
 import {
   AFFECTED_LIST_TRUNCATED,
   EVIDENCE_HEADING,
+  NO_PAGE_READ_SENTENCE,
+  PAGE_LEVEL_ISSUES_HEADING,
+  PAGE_LEVEL_ISSUES_INTRO,
   WHAT_FIXING_ACHIEVES_LABEL,
   findingCardsHtml,
   findingsHtml,
+  pageLevelIssuesHtml,
 } from "./findings.ts";
+import { documentHtml } from "./shell.ts";
 import { HOSTILE, testDocument } from "./testDocument.fixture.mts";
+import { SECTION_INTROS } from "../../report/reportSections.ts";
 import type { PdfFinding, PdfFindingSection, PdfLabels } from "../pdfDocument.ts";
 import { EVIDENCE_HEADINGS, evidenceHeadingWithReach } from "../../report/findingExplainers.ts";
 import { AFFECTED_LIST_TRUNCATED as REPORT_AFFECTED_LIST_TRUNCATED } from "../../report/reportSections.ts";
@@ -621,4 +628,111 @@ test("F3b: cards on their own carry no section, heading or group, and nothing at
   const inSection = findingsHtml(sectionOf([speedFinding()]), LABELS);
   const card = findingCardsHtml([speedFinding()], LABELS).replace(/^<div class="finding-cards">|<\/div>$/g, "");
   assert.ok(inSection.includes(card));
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 4a (F1): the Page-Level Issues section
+// ---------------------------------------------------------------------------
+
+/** A certificate-failure document: the model's own statuses say so (M6). */
+const CERTIFICATE_FAILURE = {
+  certificateFailureAreas: { seo: "not-measured", security: "attention", speed: "not-measured", technical: "incomplete" },
+  overallSummary: null,
+} as const;
+
+/** The page findings section with these groups. */
+function pageFindingsWith(groups: PdfFindingSection["groups"]): PdfFindingSection {
+  return { ...pageSection(), count: groups.reduce((sum, one) => sum + one.findings.length, 0), groups };
+}
+
+const seoGroup = (findings: readonly PdfFinding[]) => ({ category: "seo" as const, label: "Search visibility", findings: [...findings] });
+const securityGroup = (findings: readonly PdfFinding[]) => ({ category: "security" as const, label: "Security", findings: [...findings] });
+const speedGroup = (findings: readonly PdfFinding[]) => ({ category: "speed" as const, label: "Speed", findings: [...findings] });
+
+test("4a: the heading, and the introduction equal to the report layer's", () => {
+  assert.equal(PAGE_LEVEL_ISSUES_HEADING, "Page-Level Issues");
+  assert.equal(PAGE_LEVEL_ISSUES_INTRO, SECTION_INTROS.pageLevelIssues);
+  assert.equal(NO_PAGE_READ_SENTENCE, "No page could be read, so no page-level checks were made.");
+  const out = pageLevelIssuesHtml(testDocument());
+  assert.ok(out.startsWith(
+    `<section class="findings page-level-issues"><h2>Page-Level Issues</h2><p class="lead">${PAGE_LEVEL_ISSUES_INTRO}</p>`,
+  ));
+  assert.equal(out.split("<h2").length - 1, 1, "one numbered heading");
+});
+
+test("4a: the page findings are drawn with exactly the existing group and card markup", () => {
+  const doc = testDocument();
+  const out = pageLevelIssuesHtml(doc);
+  // findingsHtml draws the same groups under the old heading and intro; the groups themselves are identical.
+  const old = findingsHtml(doc.pageFindings, doc.labels);
+  const groupsOld = old.slice(old.indexOf(`<div class="group">`), old.lastIndexOf("</section>"));
+  const groupsNew = out.slice(out.indexOf(`<div class="group">`), out.lastIndexOf("</section>"));
+  assert.ok(groupsOld.length > 0);
+  assert.equal(groupsNew, groupsOld);
+  assert.ok(out.includes("No meta description"));
+});
+
+test("4a: several groups are drawn in the model's order", () => {
+  const first = { ...pageFinding(), ruleId: "seo.title.missing", title: "FIRST-SEO" };
+  const second = { ...pageFinding(), ruleId: "security.headers.hsts", category: "security" as const, title: "SECOND-SECURITY" };
+  const out = pageLevelIssuesHtml(testDocument({ pageFindings: pageFindingsWith([seoGroup([first]), securityGroup([second])]) }));
+  assert.equal(out.split(`<div class="group">`).length - 1, 2);
+  assert.ok(out.indexOf("FIRST-SEO") < out.indexOf("SECOND-SECURITY"));
+  assert.ok(out.indexOf("<h3>Search visibility</h3>") < out.indexOf("<h3>Security</h3>"));
+});
+
+test("4a: the Speed group is left out, because its cards follow the Speed section", () => {
+  const out = pageLevelIssuesHtml(testDocument({
+    pageFindings: pageFindingsWith([seoGroup([pageFinding()]), speedGroup([speedFinding()])]),
+  }));
+  assert.ok(!out.includes(speedFinding().title));
+  assert.ok(!out.includes("<h3>Speed</h3>"));
+  assert.ok(out.includes("No meta description"));
+});
+
+test("4a (D1): a whole-site audit with no page finding, or only Speed findings, has no section at all", () => {
+  for (const pageFindings of [pageFindingsWith([]), pageFindingsWith([speedGroup([speedFinding()])]), pageFindingsWith([seoGroup([])])]) {
+    assert.equal(pageLevelIssuesHtml(testDocument({ pageFindings })), "");
+  }
+});
+
+test("4a (Q9): a certificate failure says no page could be read, with no card and no introduction", () => {
+  const out = pageLevelIssuesHtml(testDocument({ ...CERTIFICATE_FAILURE, pageFindings: pageFindingsWith([]) }));
+  assert.equal(
+    out,
+    `<section class="findings page-level-issues"><h2>Page-Level Issues</h2><p>No page could be read, so no page-level checks were made.</p></section>`,
+  );
+});
+
+test("4a (Q9): a certificate failure never prints a card or a success claim, whatever the model carries", () => {
+  // Told apart by the model's certificate-failure statuses, not by whether the list happens to be empty.
+  const out = pageLevelIssuesHtml(testDocument({ ...CERTIFICATE_FAILURE }));
+  assert.ok(out.includes(NO_PAGE_READ_SENTENCE));
+  assert.ok(!out.includes(`<article class="finding`), "no card");
+  assert.ok(!out.includes(PAGE_LEVEL_ISSUES_INTRO), "no introduction about issues found on pages");
+  for (const claim of ["No issue", "no issues", "passed", "No page-level issues"]) {
+    assert.ok(!out.includes(claim), `no "${claim}"`);
+  }
+});
+
+test("4a: text from the audited site is escaped on the cards", () => {
+  const hostile = { ...pageFinding(), title: HOSTILE, evidence: HOSTILE, affected: [{ url: `https://example.com/${HOSTILE}`, evidence: HOSTILE }] };
+  const out = pageLevelIssuesHtml(testDocument({ pageFindings: pageFindingsWith([seoGroup([hostile])]) }));
+  assert.ok(!out.includes("<script>"));
+  assert.ok(out.includes("&lt;script&gt;"));
+});
+
+test("4a: the existing findings section is unchanged by the new one", () => {
+  const doc = testDocument();
+  const out = findingsHtml(doc.pageFindings, doc.labels);
+  assert.ok(out.startsWith(`<section class="findings"><h2>Page-level issues</h2>`));
+  assert.ok(out.includes(`<p class="lead">${doc.pageFindings.intro}</p>`));
+});
+
+test("4a: not wired -- the shell does not call the new section, and the current document is unchanged by it", () => {
+  const shell = fs.readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
+  assert.ok(!shell.includes("pageLevelIssuesHtml"));
+  const page = documentHtml(testDocument());
+  assert.ok(!page.includes(PAGE_LEVEL_ISSUES_HEADING));
+  assert.ok(!page.includes(`class="findings page-level-issues"`));
 });

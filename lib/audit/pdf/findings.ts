@@ -25,6 +25,7 @@
  */
 import type {
   PdfAffectedPage,
+  PdfDocument,
   PdfFinding,
   PdfFindingGroup,
   PdfFindingSection,
@@ -303,4 +304,62 @@ export function findingsHtml(section: PdfFindingSection, labels: PdfLabels): str
 export function findingCardsHtml(findings: readonly PdfFinding[], labels: PdfLabels): string {
   if (findings.length === 0) return "";
   return `<div class="finding-cards">` + findings.map((finding) => findingCard(finding, labels)).join("") + `</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Page-Level Issues (CP1 F1, CP3 step 4a)
+// ---------------------------------------------------------------------------
+
+/** The section's printed heading (CP1 §4, item 3). */
+export const PAGE_LEVEL_ISSUES_HEADING = "Page-Level Issues";
+
+/** Equal to `SECTION_INTROS.pageLevelIssues` in lib/report/reportSections.ts. */
+export const PAGE_LEVEL_ISSUES_INTRO =
+  "These issues were found on individual pages. Each one explains what was found, where, why it matters and what to do about it. The count beside each issue shows how many of the pages we checked it was found on.";
+
+/** Printed instead of cards when no page could be read (CP3-Q9). */
+export const NO_PAGE_READ_SENTENCE = "No page could be read, so no page-level checks were made.";
+
+/**
+ * The redesigned Page-Level Issues section (CP1 F1, CP3 step 4a).
+ *
+ * NOT YET PRINTED. Nothing in the document calls it until the shell is rewired
+ * in CP3 step 4b. Until then the report prints `findingsHtml` above, unchanged.
+ *
+ * THE SAME GROUPS AND THE SAME CARDS, drawn by the same `group` helper as
+ * every other findings section, in the order the model gave them.
+ *
+ * NO SPEED GROUP. Speed findings are printed straight after the Speed section
+ * (CP3 revision 9 §1.18), so they are never shown here as well.
+ *
+ * A CERTIFICATE FAILURE READ NO PAGE. Its section says so in the approved
+ * words (Q9) and carries no card -- and no introduction, which speaks of
+ * issues found on pages. That case is told apart by the model's own
+ * certificate-failure statuses, never by any printed text.
+ *
+ * NOTHING AT ALL FOR A WHOLE-SITE AUDIT WITH NO PAGE FINDING (D1). An empty
+ * section is omitted, and no "no issues" sentence is made up for it.
+ */
+export function pageLevelIssuesHtml(doc: PdfDocument): string {
+  if (doc.certificateFailureAreas !== null) {
+    return (
+      `<section class="findings page-level-issues">` +
+      html`<h2>${PAGE_LEVEL_ISSUES_HEADING}</h2>` +
+      html`<p>${NO_PAGE_READ_SENTENCE}</p>` +
+      `</section>`
+    );
+  }
+
+  const groups = doc.pageFindings.groups.filter(
+    (one) => one.category !== "speed" && one.findings.length > 0,
+  );
+  if (groups.length === 0) return "";
+
+  return (
+    `<section class="findings page-level-issues">` +
+    html`<h2>${PAGE_LEVEL_ISSUES_HEADING}</h2>` +
+    html`<p class="lead">${PAGE_LEVEL_ISSUES_INTRO}</p>` +
+    groups.map((one) => group(one, doc.labels)).join("") +
+    `</section>`
+  );
 }

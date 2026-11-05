@@ -57,7 +57,7 @@ const CAVEATS: readonly Caveat[] = [
   {
     heading: "How much of the site was seen",
     points: [
-      "The audit follows links and sitemaps. A page nothing points at is not found, and the report says how many pages were read rather than claiming to have seen the whole site.",
+      "The audit follows links and sitemaps. A page nothing points at is not found, and the report describes the pages it could check rather than claiming to have seen the whole site.",
       "Where the audit stopped at its own limit, the report says so and is marked as a partial audit throughout.",
       "Pages the site asked automated visitors not to read were left alone and counted. That is the site working as intended, not a fault.",
       "A file the audit could not read is a gap in the audit, not a fault in the website, and is described that way.",
@@ -73,15 +73,24 @@ const CAVEATS: readonly Caveat[] = [
   },
 ];
 
-/** The section. Static, and identical in every document. */
-export function aboutHtml(): string {
-  const groups = CAVEATS.map(
+/**
+ * Every clause, in its four groups, without a section or a section heading
+ * (CP1 F9, CP3 step 3c-i), so the Limitations section can carry them.
+ *
+ * ALL OF THEM, ALWAYS (S3-D9). No clause is chosen by what the audit found:
+ * deciding which caveats "apply" would be this file judging the audit.
+ */
+export function aboutClausesHtml(): string {
+  return CAVEATS.map(
     (caveat) =>
       `<div class="caveat">` +
       `<h3>${caveat.heading}</h3>` +
       `<ul class="caveat-list">${caveat.points.map((point) => `<li>${point}</li>`).join("")}</ul>` +
       `</div>`,
   ).join("");
+}
 
-  return `<section class="about">` + `<h2>${ABOUT_HEADING}</h2>` + groups + `</section>`;
+/** The section. Static, and identical in every document. */
+export function aboutHtml(): string {
+  return `<section class="about">` + `<h2>${ABOUT_HEADING}</h2>` + aboutClausesHtml() + `</section>`;
 }

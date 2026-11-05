@@ -12,7 +12,7 @@ import test from "node:test";
 import { speedHtml } from "./speed.ts";
 import { skippedHtml } from "./skipped.ts";
 import { COVERAGE_DETAIL_HEADING, MEASURED_HEADING, factSectionsHtml } from "./factSections.ts";
-import { aboutHtml } from "./about.ts";
+import { aboutClausesHtml, aboutHtml } from "./about.ts";
 import { testDocument } from "./testDocument.fixture.mts";
 import type { PdfLabels, PdfMetric, PdfSpeed } from "../pdfDocument.ts";
 
@@ -362,6 +362,56 @@ test("the about section is the same in every document", () => {
 
 test("the about section takes its own page", () => {
   assert.ok(aboutHtml().startsWith('<section class="about">'));
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 3c-i (F9): the Q4 clause, and the clauses without their section
+// ---------------------------------------------------------------------------
+
+/** Every About clause, exactly as approved (CP3 revision 9 §1.8: Q4, O2, Q8). */
+const ABOUT_CLAUSES = [
+  "Every page was read as the server sent it. Scripts are not run, so anything a page builds in the browser after it loads is not counted here.",
+  "Style sheets are not downloaded, so images and other files named inside them are not seen. This is why insecure resources are reported as none found in the page's own HTML, rather than as none found anywhere.",
+  "Cookies created later by a script are not seen. Only the ones the server set are counted, and only their names and protective settings, never their contents.",
+  "Where a page carried too little readable text to judge, its headings and images were not judged at all. The report says so rather than reporting a count of nothing.",
+  "The certificate's trust is reported as the operating system judges it. It is not verified independently.",
+  "Whether a certificate has been withdrawn since it was issued is not checked.",
+  "A record lookup can fail on some networks. Where that happened the report says the check could not be completed, and never that the record is missing. Those are different things and only one of them is a problem.",
+  "The audit follows links and sitemaps. A page nothing points at is not found, and the report describes the pages it could check rather than claiming to have seen the whole site.",
+  "Where the audit stopped at its own limit, the report says so and is marked as a partial audit throughout.",
+  "Pages the site asked automated visitors not to read were left alone and counted. That is the site working as intended, not a fault.",
+  "A file the audit could not read is a gap in the audit, not a fault in the website, and is described that way.",
+  "Every finding, its severity and every number in this report were produced by the audit itself, from what it measured.",
+  "Where written commentary appears, it was produced by an AI from those findings and is labelled. It explains them; it does not decide them, and it cannot add, remove or re-grade anything.",
+  "A report with no commentary is complete. Its absence means none was requested or none was usable, and says nothing about the website.",
+];
+
+test("3c-i Q4: the revised clause is printed exactly, and the old wording is gone", () => {
+  const out = aboutHtml();
+  assert.ok(out.includes(
+    "<li>The audit follows links and sitemaps. A page nothing points at is not found, and the report describes the pages it could check rather than claiming to have seen the whole site.</li>",
+  ));
+  assert.ok(!out.includes("says how many pages were read"));
+});
+
+test("3c-i O2 and Q8: the counted-exclusions and AI clauses are unchanged", () => {
+  const out = aboutHtml();
+  assert.ok(out.includes("<li>Pages the site asked automated visitors not to read were left alone and counted. That is the site working as intended, not a fault.</li>"));
+  assert.ok(out.includes("<li>Where written commentary appears, it was produced by an AI from those findings and is labelled. It explains them; it does not decide them, and it cannot add, remove or re-grade anything.</li>"));
+});
+
+test("3c-i S3-D9: all 14 clauses are printed, in order, every time", () => {
+  const clauses = [...aboutClausesHtml().matchAll(/<li>(.*?)<\/li>/g)].map((m) => m[1]);
+  assert.deepEqual(clauses, ABOUT_CLAUSES);
+  assert.equal(aboutClausesHtml(), aboutClausesHtml(), "no clause depends on anything");
+});
+
+test("3c-i the clauses come without a section or a section heading, and the About section wraps them unchanged", () => {
+  const clauses = aboutClausesHtml();
+  assert.ok(!clauses.includes("<section"));
+  assert.ok(!clauses.includes("<h2"));
+  assert.equal(clauses.split(`<div class="caveat">`).length - 1, 4, "the four groups");
+  assert.equal(aboutHtml(), `<section class="about"><h2>About this report</h2>${clauses}</section>`);
 });
 
 // ---------------------------------------------------------------------------

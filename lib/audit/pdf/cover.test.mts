@@ -127,11 +127,19 @@ test("a partial audit is marked on the cover, in words", () => {
   assert.ok(out.includes("Partial website audit"), "and the status line");
 });
 
-test("a complete audit carries no partial marker", () => {
+test("a complete audit carries no partial marker, and no status line (CP1 F7)", () => {
   const out = coverHtml(cover({ partial: false, statusLine: "Website audit complete" }));
 
   assert.ok(!out.includes("Partial"));
-  assert.ok(out.includes("Website audit complete"));
+  assert.ok(!out.includes("Website audit complete"), "the internal complete-status line is not printed");
+  assert.ok(!out.includes(`class="cover-status"`), "no status line at all");
+});
+
+test("a partial audit's status line is the model's own text, in its place on the cover (CP1 F7)", () => {
+  const out = coverHtml(cover({ partial: true, statusLine: "Partial website audit" }));
+
+  assert.equal(out.split(`<p class="cover-status">Partial website audit</p>`).length - 1, 1, "printed once");
+  assert.ok(out.indexOf(`class="cover-status"`) > out.indexOf(`class="cover-date"`), "after the audit date");
 });
 
 // ---------------------------------------------------------------------------

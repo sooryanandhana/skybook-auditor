@@ -177,6 +177,11 @@ function addressee(cover: PdfCover): string {
  * crawl never to be presented as a whole-site audit, and this line, the partial
  * marker and the running head all say it, so a page read on its own cannot be
  * mistaken.
+ *
+ * ONLY FOR A PARTIAL AUDIT (CP1 F7, CP3 step 3c-i). The internal "complete"
+ * status line is no longer printed: a complete audit needs no marker, and the
+ * line read as an internal state rather than something a client needs. The
+ * text, when printed, is still the model's own `statusLine`.
  */
 function auditInfo(cover: PdfCover): string {
   const date =
@@ -185,7 +190,7 @@ function auditInfo(cover: PdfCover): string {
       : `<p class="eyebrow cover-eyebrow">Audit date</p>` +
         html`<p class="cover-date">Measured ${cover.checkedAt}</p>`;
 
-  const status = html`<p class="cover-status">${cover.statusLine}</p>`;
+  const status = cover.partial ? html`<p class="cover-status">${cover.statusLine}</p>` : "";
 
   return `<div class="cover-when">` + date + status + `</div>`;
 }

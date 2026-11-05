@@ -35,7 +35,14 @@ test("the headings on the page are the strings 7B prepared", () => {
   assert.ok(out.includes(document.coverage.headline));
   assert.ok(out.includes(document.siteFindings.heading));
   assert.ok(out.includes(document.pageFindings.heading));
-  assert.ok(out.includes(document.cover.statusLine));
+
+  // CP1 F7: the cover's status line is printed only for a partial audit.
+  assert.equal(document.cover.partial, false);
+  assert.ok(!out.includes(document.cover.statusLine), "a complete audit prints no status line");
+  const partial = testDocument({
+    cover: { ...document.cover, partial: true, statusLine: "Partial website audit" },
+  });
+  assert.ok(documentHtml(partial).includes("Partial website audit"), "a partial audit prints the model's status line");
 });
 
 test("a heading the document does not carry produces no block", () => {

@@ -37,6 +37,15 @@ function reasonGroup(group: PdfSkippedGroup): string {
 }
 
 /**
+ * Every reason and the checks it stopped, without a section or a heading
+ * (CP1 F10, CP3 step 3c-ii), so the Limitations section can reuse the same
+ * grouping. Nothing at all for an empty list.
+ */
+export function skippedGroupsHtml(groups: readonly PdfSkippedGroup[]): string {
+  return groups.map(reasonGroup).join("");
+}
+
+/**
  * The section, or nothing at all.
  *
  * 7A §19: with nothing skipped the section is omitted entirely. 7B passes null
@@ -50,7 +59,7 @@ export function skippedHtml(skipped: PdfSkipped | null): string {
     `<section class="skipped">` +
     html`<h2>${skipped.heading}</h2>` +
     html`<p class="lead">${skipped.intro}</p>` +
-    skipped.groups.map(reasonGroup).join("") +
+    skippedGroupsHtml(skipped.groups) +
     `</section>`
   );
 }

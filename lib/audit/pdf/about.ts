@@ -79,12 +79,16 @@ const CAVEATS: readonly Caveat[] = [
  *
  * ALL OF THEM, ALWAYS (S3-D9). No clause is chosen by what the audit found:
  * deciding which caveats "apply" would be this file judging the audit.
+ *
+ * THE GROUP HEADING LEVEL IS THE CALLER'S (CP3 step 3c-ii, A1). The About
+ * section uses the default, 3, under its own h2; the Limitations section nests
+ * the groups one level deeper, under its "About this audit" h3, and passes 4.
  */
-export function aboutClausesHtml(): string {
+export function aboutClausesHtml(level: 3 | 4 = 3): string {
   return CAVEATS.map(
     (caveat) =>
       `<div class="caveat">` +
-      `<h3>${caveat.heading}</h3>` +
+      `<h${level}>${caveat.heading}</h${level}>` +
       `<ul class="caveat-list">${caveat.points.map((point) => `<li>${point}</li>`).join("")}</ul>` +
       `</div>`,
   ).join("");

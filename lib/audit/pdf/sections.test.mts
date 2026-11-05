@@ -10,7 +10,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import { speedHtml } from "./speed.ts";
-import { skippedHtml } from "./skipped.ts";
+import { skippedGroupsHtml, skippedHtml } from "./skipped.ts";
 import { COVERAGE_DETAIL_HEADING, MEASURED_HEADING, factSectionsHtml } from "./factSections.ts";
 import { aboutClausesHtml, aboutHtml } from "./about.ts";
 import { testDocument } from "./testDocument.fixture.mts";
@@ -412,6 +412,71 @@ test("3c-i the clauses come without a section or a section heading, and the Abou
   assert.ok(!clauses.includes("<h2"));
   assert.equal(clauses.split(`<div class="caveat">`).length - 1, 4, "the four groups");
   assert.equal(aboutHtml(), `<section class="about"><h2>About this report</h2>${clauses}</section>`);
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 3c-ii (A1): the About group heading level
+// ---------------------------------------------------------------------------
+
+const ABOUT_GROUP_HEADINGS = [
+  "How the pages were read",
+  "The certificate and the domain records",
+  "How much of the site was seen",
+  "Where the writing came from",
+];
+
+test("3c-ii A1: the default level is h3, exactly as before, and the About section is unchanged", () => {
+  const out = aboutClausesHtml();
+  assert.equal(out, aboutClausesHtml(3));
+  assert.deepEqual([...out.matchAll(/<h3>([^<]*)<\/h3>/g)].map((m) => m[1]), ABOUT_GROUP_HEADINGS);
+  assert.ok(!out.includes("<h4"));
+  assert.equal(aboutHtml(), `<section class="about"><h2>About this report</h2>${out}</section>`);
+});
+
+test("3c-ii A1: level 4 gives h4 group headings and changes nothing else", () => {
+  const out = aboutClausesHtml(4);
+  assert.deepEqual([...out.matchAll(/<h4>([^<]*)<\/h4>/g)].map((m) => m[1]), ABOUT_GROUP_HEADINGS);
+  assert.ok(!out.includes("<h3"));
+  assert.equal(out.replace(/<(\/?)h4>/g, "<$1h3>"), aboutClausesHtml(3), "only the heading level differs");
+  assert.deepEqual([...out.matchAll(/<li>(.*?)<\/li>/g)].map((m) => m[1]), ABOUT_CLAUSES, "all 14 clauses, in order");
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 3c-ii (F10): the grouping, reusable on its own
+// ---------------------------------------------------------------------------
+
+const SKIPPED = {
+  heading: "Checks not evaluated",
+  intro: "These checks did not run, so nothing is claimed about them either way.",
+  count: 3,
+  groups: [
+    { reason: "The page carried too little readable text.", checks: ["Main heading", "Image descriptions"] },
+    { reason: "The lookup timed out.", checks: ["Email policy record"] },
+  ],
+};
+
+test("3c-ii F10: the exported grouping is the existing reason-group markup, in order", () => {
+  assert.equal(
+    skippedGroupsHtml(SKIPPED.groups),
+    `<div class="skipped-group"><ul class="skipped-checks"><li>Main heading</li><li>Image descriptions</li></ul>` +
+      `<p class="note">The page carried too little readable text.</p></div>` +
+      `<div class="skipped-group"><ul class="skipped-checks"><li>Email policy record</li></ul>` +
+      `<p class="note">The lookup timed out.</p></div>`,
+  );
+});
+
+test("3c-ii F10: the skipped section keeps its wrapper, heading and intro, around the exported grouping", () => {
+  assert.equal(
+    skippedHtml(SKIPPED),
+    `<section class="skipped"><h2>Checks not evaluated</h2>` +
+      `<p class="lead">These checks did not run, so nothing is claimed about them either way.</p>` +
+      skippedGroupsHtml(SKIPPED.groups) +
+      `</section>`,
+  );
+});
+
+test("3c-ii F10: an empty group list gives nothing at all", () => {
+  assert.equal(skippedGroupsHtml([]), "");
 });
 
 // ---------------------------------------------------------------------------

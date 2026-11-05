@@ -241,6 +241,8 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
     coverageCounts: {
       discovered: 128, evaluated: 128, unavailable: 0, notWebPages: 0, notVisited: 0,
       robotsExcluded: 4, includesStartingAddress: false,
+      // 120 + 8 = 128: no starting address counted outside the two sources.
+      fromLinks: 120, fromSitemap: 8,
     },
     coverageFlags: { partial: false, hasExclusions: true },
     configuredLimits: { maxPages: 150, maxDurationMs: 300_000 },
@@ -248,6 +250,12 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
     checklists: [],
     speedFindings: [],
     technicalFiles: { robots: "found", sitemap: "found" },
+    // The step 3a fields. No current renderer reads them.
+    searchMeasurement: {
+      pageUrl: "https://example.com/",
+      facts: [{ label: "Readable text", value: "2,400 characters" }],
+    },
+    configuredLimitsSentence: "Configured limits for this audit: up to 150 pages and 5 minutes.",
     ...overrides,
   };
 }

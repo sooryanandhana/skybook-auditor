@@ -35,14 +35,26 @@ export function factSectionsHtml(
   sections: readonly PdfFactSection[],
   className: string,
 ): string {
-  const groups = sections
-    .filter((section) => section.facts.length > 0)
-    .map((section) => html`<div class="fact-group"><h3>${section.heading}</h3>` + factTable(section.facts) + `</div>`)
-    .join("");
+  const groups = factGroupsHtml(sections);
 
   if (groups === "") return "";
 
   return html`<section class="${className}">` + html`<h2>${heading}</h2>` + groups + `</section>`;
+}
+
+/**
+ * The same titled fact groups, without a section or a section heading
+ * (CP1 F6, CP3 step 3a), for tables that sit inside another section.
+ *
+ * Each group keeps its own sub-heading. A group with no rows produces nothing,
+ * and nothing at all comes back when every group is empty, so the caller never
+ * prints a heading over an empty table.
+ */
+export function factGroupsHtml(sections: readonly PdfFactSection[]): string {
+  return sections
+    .filter((section) => section.facts.length > 0)
+    .map((section) => html`<div class="fact-group"><h3>${section.heading}</h3>` + factTable(section.facts) + `</div>`)
+    .join("");
 }
 
 /** 7A §6, section eight. The entry page's own measurements. */

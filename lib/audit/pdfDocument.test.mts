@@ -33,7 +33,7 @@ import { AI_CONTRACT_VERSION } from "../ai/contract.ts";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
 import type { AuditResult, Finding, SiteAuditResult, SpeedResult } from "../types.ts";
 import { coverageCheck } from "../report/coverageCheck.ts";
-import { discoverySourceFacts, sitemapDiscoveryFacts } from "../report/measurementsView.ts";
+import { configuredLimitsText, contentFacts, discoverySourceFacts, sitemapDiscoveryFacts } from "../report/measurementsView.ts";
 import { explainerFor } from "../report/findingExplainers.ts";
 import { AUDIT_RULES } from "../rules/all.ts";
 import { runRealAudit, runRealCertificateFailure } from "./pdf/realAudit.fixture.mts";
@@ -1530,6 +1530,9 @@ test("F13: reconciled counts are carried exactly as measured", async () => {
     notVisited: crawl.discovered - crawl.evaluated - crawl.unavailable.length - crawl.skippedNonHtml,
     robotsExcluded: 2,
     includesStartingAddress: true,
+    // CP3 step 3a (S3-D3): the two discovery sources, carried as counted.
+    fromLinks: crawl.sources.html,
+    fromSitemap: crawl.sources.sitemap,
   });
   assert.deepEqual(doc.coverageFlags, { partial: true, hasExclusions: true });
 
@@ -2165,4 +2168,170 @@ test("O4(b): a certificate failure at an IP address has no domain for its site c
   assert.equal(of("technical.robots.blocks-all"), null);
   assert.equal(of("security.ssl.expired"), null);
   assert.equal(of("security.dns.dmarc"), "mail.example.org", "a real domain beside it is unaffected");
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 3a: the additive fields the category sections read (M1-M5)
+// ---------------------------------------------------------------------------
+
+/** The document for a stored whole-site audit. */
+function documentOfStored(audit: SiteAuditResult = storedAudit()): PdfDocument {
+  const { store, jobId } = jobWith("completed", audit);
+  return documentFor(store, jobId);
+}
+
+/** The four recorded-but-ungraded headers, in the order the shared builder lists them (U1). */
+const INFORMATION_ONLY_LABELS = ["X-Frame-Options", "X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy"];
+
+/** A stored audit whose security block was collected from these inputs. */
+function auditWithSecurity(...args: Parameters<typeof runSecurityChecks>): SiteAuditResult {
+  const audit = storedAudit();
+  const data = { ...audit.data, security: runSecurityChecks(...args) };
+  return { ...audit, data, pages: [{ url: "https://example.com/", data }] } as unknown as SiteAuditResult;
+}
+
+/** Security collections that grow the shared row list in every way it can grow. */
+const SECURITY_VARIANTS: ReadonlyArray<[string, SiteAuditResult]> = [
+  ["plain", storedAudit()],
+  ["HTTP only", auditWithSecurity({ "content-type": "text/html" }, "<html><body><p>x</p></body></html>", false)],
+  [
+    "every header, cookies, mixed content, an insecure form and announced software",
+    auditWithSecurity(
+      {
+        "content-type": "text/html",
+        "strict-transport-security": "max-age=31536000",
+        "content-security-policy": "default-src 'self'",
+        "x-frame-options": "DENY",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "permissions-policy": "geolocation=()",
+        server: "nginx/1.2.3",
+      },
+      `<html><body><img src="http://cdn.example.com/a.png"><form action="http://example.com/send"></form></body></html>`,
+      true,
+      ["session=abc; Path=/", "pref=1; Secure; HttpOnly"],
+    ),
+  ],
+];
+
+test("3a U1: places 2 to 5 of the shared security rows are exactly the four ungraded headers, in order", () => {
+  /*
+   * THE GUARD ON THE FIXED-POSITION CHOICE. pdfDocument.ts marks these rows by
+   * place, so if the shared builder ever reorders, inserts or removes a row
+   * before or among them, this fails instead of a different row being marked.
+   */
+  for (const [name, audit] of SECURITY_VARIANTS) {
+    const rows = securityFacts(audit.data.security);
+    assert.deepEqual(rows.slice(2, 6).map((row) => row.label), INFORMATION_ONLY_LABELS, name);
+  }
+});
+
+test("3a U1: exactly the four ungraded header rows carry the information-only mark, and no other row does", () => {
+  for (const [name, audit] of SECURITY_VARIANTS) {
+    const doc = documentOfStored(audit);
+    const flagged = doc.measured.flatMap((section) =>
+      section.facts.filter((fact) => fact.informationOnly !== undefined).map((fact) => ({ key: section.key, fact })),
+    );
+    assert.deepEqual(flagged.map((entry) => entry.fact.label), INFORMATION_ONLY_LABELS, `${name}: the four, in order`);
+    for (const entry of flagged) {
+      assert.equal(entry.key, "security", `${name}: ${entry.fact.label} is a security row`);
+      assert.equal(entry.fact.informationOnly, true);
+      assert.equal(entry.fact.note, undefined, `${name}: ${entry.fact.label} carries no note of its own to overwrite`);
+    }
+    for (const section of doc.coverageDetail) {
+      assert.ok(section.facts.every((fact) => fact.informationOnly === undefined), `${name}: nothing in ${section.heading}`);
+    }
+    for (const card of allCards(doc)) {
+      assert.ok((card.evidencePanel?.facts ?? []).every((fact) => fact.informationOnly === undefined), `${name}: ${card.ruleId} panel`);
+    }
+  }
+});
+
+test("3a U1: the mark changes no label or value of the security rows", () => {
+  for (const [name, audit] of SECURITY_VARIANTS) {
+    const rows = documentOfStored(audit).measured.find((section) => section.key === "security")!.facts;
+    const shared = securityFacts(audit.data.security);
+    assert.deepEqual(rows.map((row) => row.label), shared.map((row) => row.label), name);
+    assert.deepEqual(rows.map((row) => row.value), shared.map((row) => row.documentValue ?? row.value), name);
+  }
+});
+
+test("3a U1: a certificate failure has no security rows, so nothing is marked", async () => {
+  const doc = documentOfAny(await certificateFailureAudit());
+  assert.ok(doc.measured.every((section) => section.facts.every((fact) => fact.informationOnly === undefined)));
+});
+
+test("3a-Q2: every measured section carries its own key, once; coverage detail carries none", async () => {
+  const doc = documentOfStored();
+  assert.deepEqual(doc.measured.map((section) => section.key), ["content", "security", "certificate", "domain"]);
+  assert.ok(doc.coverageDetail.every((section) => section.key === undefined));
+
+  const failure = documentOfAny(await certificateFailureAudit());
+  assert.deepEqual(failure.measured.map((section) => section.key), ["certificate", "domain"]);
+});
+
+test("3a S3-D3: the discovery sources are carried as counted, and only with reconciled counts", async () => {
+  const { valid, failing } = await coverageFixtures;
+  const counts = documentOf(valid).coverageCounts!;
+  assert.equal(counts.fromLinks, valid.crawl.sources.html);
+  assert.equal(counts.fromSitemap, valid.crawl.sources.sitemap);
+  for (const [name, audit] of Object.entries(failing)) {
+    assert.equal(documentOf(audit).coverageCounts, null, `${name}: no source counts either`);
+  }
+  assert.equal(documentOfAny(await certificateFailureAudit()).coverageCounts, null, "a certificate failure has none");
+});
+
+test("3a S3-D7: the search measurement is the measured-facts row and the cover's address", async () => {
+  const audit = storedAudit();
+  const doc = documentOfStored(audit);
+  assert.ok(doc.searchMeasurement !== null);
+  assert.deepEqual(doc.searchMeasurement.facts, contentFacts(audit.data.seo));
+  assert.equal(doc.searchMeasurement.pageUrl, doc.cover.auditedUrl);
+  const content = doc.measured.find((section) => section.key === "content")!.facts;
+  for (const row of doc.searchMeasurement.facts) {
+    assert.ok(content.some((fact) => JSON.stringify(fact) === JSON.stringify(row)), "the same row the tables print");
+  }
+
+  assert.equal(documentOfAny(await certificateFailureAudit()).searchMeasurement, null, "no page was read");
+});
+
+test("3a S3-D7: the search measurement's address carries no credentials", () => {
+  const audit = storedAudit();
+  const data = { ...audit.data, fetch: { ...audit.data.fetch, finalUrl: "https://user:secret@example.com/" } };
+  const doc = documentOfStored({ ...audit, data, pages: [{ url: "https://example.com/", data }] } as unknown as SiteAuditResult);
+  assert.ok(doc.searchMeasurement !== null);
+  assert.ok(!doc.searchMeasurement.pageUrl.includes("secret"));
+  assert.equal(doc.searchMeasurement.pageUrl, doc.cover.auditedUrl);
+});
+
+test("3a-Q6: the configured-limits sentence is the report layer's, with or without reconciled counts", async () => {
+  const { valid, failing } = await coverageFixtures;
+  for (const audit of [valid, ...Object.values(failing)]) {
+    assert.equal(documentOf(audit).configuredLimitsSentence, configuredLimitsText(audit.crawl.limits));
+  }
+  assert.equal(documentOfStored().configuredLimitsSentence, "Configured limits for this audit: up to 150 pages and 5 minutes.");
+
+  const certificate = await certificateFailureAudit();
+  assert.equal(documentOfAny(certificate).configuredLimitsSentence, configuredLimitsText(certificate.crawl.limits));
+});
+
+test("3a: a check-list issue always carries its finding's title", async () => {
+  const { valid, failing } = await coverageFixtures;
+  const docs = [documentOf(valid), ...Object.values(failing).map(documentOf), documentOfAny(await certificateFailureAudit())];
+  let issues = 0;
+  for (const doc of docs) {
+    for (const item of checklistItems(doc)) {
+      if (item.status !== "issue") continue;
+      issues += 1;
+      assert.ok(item.findingTitle !== null && item.findingTitle !== "", item.ruleId);
+    }
+  }
+  assert.ok(issues > 0, "the fixtures do contain issues");
+});
+
+test("3a: the new fields bring no banned key into the document", () => {
+  const wire = JSON.stringify(documentOfStored());
+  for (const leaked of ["skippedNonHtml", "queuedAtStop", "\"seo\":", "bodyTextLength", "\"sources\":"]) {
+    assert.ok(!wire.includes(leaked), `"${leaked}" reached the document`);
+  }
 });

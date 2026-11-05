@@ -39,6 +39,7 @@ import {
   categoryLabel,
   certificateFacts,
   certificateProblemFacts,
+  configuredLimitsText,
   contentFacts,
   crawlCountTiles,
   crawlLimitFacts,
@@ -165,13 +166,29 @@ function clientField(value: string | undefined): string | null {
 // The document
 // ---------------------------------------------------------------------------
 
-/** One label-and-value row, exactly as the results page renders facts. */
-export type PdfFact = FactRow;
+/**
+ * One label-and-value row, exactly as the results page renders facts.
+ *
+ * `informationOnly` MARKS A ROW THAT IS RECORDED BUT NOT GRADED (CP3 step 3a,
+ * S3-D7). It is a mark, not wording: the renderer that prints a category
+ * section supplies the approved label. Absent on every other row, and ignored
+ * by every renderer that does not look for it, so it changes no current output.
+ */
+export type PdfFact = FactRow & { readonly informationOnly?: true };
+
+/** Which measured group a fact section is, so a renderer never selects one by its heading. */
+export type PdfFactSectionKey = "content" | "security" | "certificate" | "domain";
 
 /** A titled group of fact rows. */
 export interface PdfFactSection {
   readonly heading: string;
   readonly facts: readonly PdfFact[];
+  /**
+   * Set on every section of `measured` (CP3 step 3a, 3a-Q2). Optional because
+   * the coverage-detail sections have no such identity, and so a section built
+   * without one stays a valid section. Never shown.
+   */
+  readonly key?: PdfFactSectionKey;
 }
 
 export interface PdfCover {
@@ -483,6 +500,21 @@ export interface PdfCoverageCounts {
   readonly notVisited: number;
   readonly robotsExcluded: number;
   readonly includesStartingAddress: boolean;
+  /** Addresses first found by following links (CP3 step 3a, S3-D3). */
+  readonly fromLinks: number;
+  /** Addresses first found in the sitemap (CP3 step 3a, S3-D3). */
+  readonly fromSitemap: number;
+}
+
+/**
+ * The search measurement the SEO section prints (CP3 step 3a, S3-D7): the
+ * readable-text row exactly as the measured-facts section has it, and the page
+ * it was measured on. Null when no page was read.
+ */
+export interface PdfSearchMeasurement {
+  /** The page measured, with any credentials removed: the same address as the cover's. */
+  readonly pageUrl: string;
+  readonly facts: readonly PdfFact[];
 }
 
 /** What may be said about the crawl without any figure. */
@@ -629,6 +661,14 @@ export interface PdfDocument {
   readonly speedFindings: readonly PdfFinding[];
   /** Null when the technical checks did not run. */
   readonly technicalFiles: PdfTechnicalFiles | null;
+  /** The SEO section's search measurement (CP3 step 3a). Null when no page was read. */
+  readonly searchMeasurement: PdfSearchMeasurement | null;
+  /**
+   * The configured limits as the approved S3-w2 sentence, written by the report
+   * layer's `configuredLimitsText` (CP3 step 3a, 3a-Q6). Settings, not
+   * measurements, so present whether or not the counts reconciled.
+   */
+  readonly configuredLimitsSentence: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -940,6 +980,9 @@ function coverageCountsFor(crawl: SiteAuditResult["crawl"], check: CoverageCheck
     notVisited: crawl.discovered - crawl.evaluated - unavailable - crawl.skippedNonHtml,
     robotsExcluded: crawl.robots.excluded,
     includesStartingAddress: check.includesStartingAddress,
+    // Counted by the frontier as it found each address; carried, never recomputed.
+    fromLinks: crawl.sources.html,
+    fromSitemap: crawl.sources.sitemap,
   };
 }
 
@@ -1023,10 +1066,34 @@ function toSpeed(performance: AuditData["performance"]): PdfSpeed {
 /** The entry page's own content measurements. */
 function contentSection(data: AuditData): PdfFactSection {
   return {
+    key: "content",
     heading: "Measured facts",
     facts: [...contentFacts(data.seo), ...certificateProblemFacts(data.fetch.certificateProblem)],
   };
 }
+
+/**
+ * Where in `securityFacts` the four recorded-but-ungraded headers sit
+ * (CP3 step 3a, S3-D7, U1 option a).
+ *
+ *   2  X-Frame-Options
+ *   3  X-Content-Type-Options
+ *   4  Referrer-Policy
+ *   5  Permissions-Policy
+ *
+ * WHY POSITIONS AND NOT LABELS. The shared builder (`securityFacts` in
+ * measurementsView.ts, CP2) gives its rows no identity other than their label
+ * and their place, and it is not changed for this. Its first rows are one fixed
+ * array literal -- HSTS, Content-Security-Policy, then these four, then
+ * cookies -- so their places are as fixed as their labels. Choosing by place
+ * keeps display wording out of this decision.
+ *
+ * GUARDED BY TESTS, NOT TRUSTED. pdfDocument.test.mts asserts that these four
+ * places hold exactly these four headers, in this order, and that no other row
+ * carries the mark. Any reordering, insertion or removal in the shared builder
+ * fails those tests instead of silently marking a different row.
+ */
+const INFORMATION_ONLY_SECURITY_ROWS: ReadonlySet<number> = new Set([2, 3, 4, 5]);
 
 /**
  * The security rows, with the response headers taken back out.
@@ -1054,11 +1121,13 @@ function contentSection(data: AuditData): PdfFactSection {
  */
 function securitySection(security: AuditData["security"]): PdfFactSection {
   return {
+    key: "security",
     heading: "Security",
-    facts: securityFacts(security).map((row) => ({
+    facts: securityFacts(security).map((row, index) => ({
       label: row.label,
       value: row.documentValue ?? row.value,
       note: row.rawHeaderNote ? undefined : row.note,
+      ...(INFORMATION_ONLY_SECURITY_ROWS.has(index) ? { informationOnly: true as const } : {}),
     })),
   };
 }
@@ -1189,6 +1258,7 @@ function certificateFailureDocument(
 
     measured: [
       {
+        key: "certificate",
         heading: "Certificate",
         facts: [
           ...certificateProblemFacts(audit.certificateProblem),
@@ -1196,6 +1266,7 @@ function certificateFailureDocument(
         ],
       },
       {
+        key: "domain",
         heading: "Domain and email records",
         facts: [...dnsFacts(audit.dns), ...spfFacts(audit.dns), ...dmarcFacts(audit.dns)],
       },
@@ -1213,6 +1284,9 @@ function certificateFailureDocument(
     // A speed check needs a page to measure, and none was read.
     speedFindings: [],
     technicalFiles: technicalFilesFrom(audit.technical),
+    // No page was read, so there is no search measurement to show.
+    searchMeasurement: null,
+    configuredLimitsSentence: configuredLimitsText(audit.crawl.limits),
   };
 }
 
@@ -1524,8 +1598,9 @@ export function buildPdfDocument(
       measured: [
         contentSection(data),
         securitySection(data.security),
-        { heading: "Certificate", facts: certificateFacts(data.ssl) },
+        { key: "certificate", heading: "Certificate", facts: certificateFacts(data.ssl) },
         {
+          key: "domain",
           heading: "Domain and email records",
           facts: [...dnsFacts(data.dns), ...spfFacts(data.dns), ...dmarcFacts(data.dns)],
         },
@@ -1569,6 +1644,9 @@ export function buildPdfDocument(
         .filter((finding) => finding.category === "speed")
         .map((finding) => toFinding(finding, "page", commentary, panels, context)),
       technicalFiles: technicalFilesFrom(data.technical),
+      // The same row the measured-facts section carries, and the same address as the cover.
+      searchMeasurement: { pageUrl: withoutCredentials(data.fetch.finalUrl), facts: contentFacts(data.seo) },
+      configuredLimitsSentence: configuredLimitsText(crawl.limits),
     },
   };
 }

@@ -276,10 +276,22 @@ test("the PDF renders, and reads as a partial audit naming the certificate probl
   assert.ok(pdf.includes(Buffer.from("%%EOF")));
 
   const text = extractText(pdf);
+  // Lines run together in the extracted text, so sentences are compared with whitespace removed.
+  const flat = text.replace(/\s+/g, "").toLowerCase();
+  const has = (sentence: string) => flat.includes(sentence.replace(/\s+/g, "").toLowerCase());
+
   assert.match(text, /Partial audit/, "the marker a reader cannot miss");
-  assert.match(text, /could not be fetched securely/);
-  assert.match(text, /security certificate has expired/);
+  assert.match(text, /Partial website audit/, "and the cover's status line");
+
+  // CP3 step 4b, R1 (a): the equivalents that name the certificate problem, in the redesigned sections.
+  assert.ok(has("No page could be read, so no page-level checks were made."), "Q9, in Page-Level Issues");
+  assert.ok(has("Certificate problem") && has("The certificate has expired"), "the certificate details, in Security Audit");
+  assert.ok(has("Site-Level Issues"), "the site-level subsection");
   assert.match(text, /TLS certificate has expired/, "and the graded finding itself");
+
+  // R1 (a): the retired coverage section's two sentences are not printed anywhere.
+  assert.ok(!has("The entry page could not be fetched securely, so no page on this site was read."));
+  assert.ok(!has("security certificate has expired"), "the page fetch's own reason is not shown as a stop reason (K4)");
 
   // The two sentences that would make it read as a finished whole-site audit.
   assert.doesNotMatch(text, /Website audit complete/);

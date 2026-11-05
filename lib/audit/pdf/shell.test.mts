@@ -28,13 +28,25 @@ test("the shell renders a titled document with a declared language", () => {
   assert.ok(out.includes("<main>"), "a main content region");
 });
 
-test("the headings on the page are the strings 7B prepared", () => {
+test("the headings on the page are the redesigned report's sections (CP3 step 4b, F1)", () => {
   const document = testDocument();
   const out = documentHtml(document);
 
-  assert.ok(out.includes(document.coverage.headline));
-  assert.ok(out.includes(document.siteFindings.heading));
-  assert.ok(out.includes(document.pageFindings.heading));
+  for (const heading of [
+    "<h2>Executive Summary</h2>",
+    "<h2>Page-Level Issues</h2>",
+    "<h2>SEO Audit</h2>",
+    "<h2>Security Audit</h2>",
+    "<h2>Speed</h2>",
+    "<h2>Technical Audit</h2>",
+    "<h2>Limitations and About This Audit</h2>",
+  ]) {
+    assert.equal(out.split(heading).length - 1, 1, `${heading} once`);
+  }
+  // The retired standalone sections carried these; none is printed any more.
+  for (const retired of [document.coverage.headline, document.siteFindings.heading, document.pageFindings.heading]) {
+    assert.ok(!out.includes(`<h2>${retired}</h2>`), `no "${retired}" section`);
+  }
 
   // CP1 F7: the cover's status line is printed only for a partial audit.
   assert.equal(document.cover.partial, false);
@@ -52,7 +64,7 @@ test("a heading the document does not carry produces no block", () => {
   assert.ok(!out.includes("Checks not evaluated"));
 });
 
-test("a skipped section that exists does produce a block", () => {
+test("skipped checks that exist are printed inside Limitations (CP3 step 4b, F8)", () => {
   const out = documentHtml(
     testDocument({
       skipped: {
@@ -64,17 +76,34 @@ test("a skipped section that exists does produce a block", () => {
     }),
   );
 
-  assert.ok(out.includes("Checks not evaluated"), "the heading, carried word for word");
-  assert.ok(out.includes("nothing is claimed about them either way"), "and its one line of context");
-  assert.ok(out.includes("The page could not be read"), "the reason");
+  const limitations = out.slice(out.indexOf(`<section class="limitations">`));
+  assert.ok(limitations.includes("<h3>Checks that could not be completed</h3>"), "the PDF's own heading");
+  assert.ok(limitations.includes("nothing is claimed about them either way"), "and its one line of context");
+  assert.ok(limitations.includes("The page could not be read"), "the reason");
+  assert.ok(!out.includes("Checks not evaluated"), "no standalone skipped section");
 });
 
-test("every fact section the document carries gets a block", () => {
-  const document = testDocument();
+test("only the keyed security, certificate and domain tables are printed, inside Security Audit", () => {
+  const document = testDocument({
+    measured: [
+      { key: "content", heading: "CONTENT-TABLE", facts: [{ label: "l", value: "v" }] },
+      { key: "security", heading: "SECURITY-TABLE", facts: [{ label: "l", value: "v" }] },
+      { key: "certificate", heading: "CERTIFICATE-TABLE", facts: [{ label: "l", value: "v" }] },
+      { key: "domain", heading: "DOMAIN-TABLE", facts: [{ label: "l", value: "v" }] },
+      { heading: "UNKEYED-TABLE", facts: [{ label: "l", value: "v" }] },
+    ],
+  });
   const out = documentHtml(document);
+  const security = out.slice(out.indexOf(`<section class="security-audit">`), out.indexOf(`<section class="speed">`));
 
-  for (const section of [...document.measured, ...document.coverageDetail]) {
-    assert.ok(out.includes(section.heading), `${section.heading} is on the page`);
+  for (const heading of ["SECURITY-TABLE", "CERTIFICATE-TABLE", "DOMAIN-TABLE"]) {
+    assert.equal(out.split(heading).length - 1, 1, `${heading} once`);
+    assert.ok(security.includes(heading), `${heading} in Security Audit`);
+  }
+  assert.ok(!out.includes("CONTENT-TABLE"), "the content group is not a table of its own");
+  assert.ok(!out.includes("UNKEYED-TABLE"), "an unkeyed group is never picked up");
+  for (const retired of ["What we measured", "Coverage detail"]) {
+    assert.ok(!out.includes(`<h2>${retired}</h2>`), `no "${retired}" section`);
   }
 });
 
@@ -87,13 +116,14 @@ test("the sentinel proves the block came from the document, not from the shell",
 // ---------------------------------------------------------------------------
 
 test("a script tag in a document value is rendered as text", () => {
+  // Keyed so it is printed in Security Audit; with one row, because an empty group draws nothing.
   const out = documentHtml(
     testDocument({
-      measured: [{ heading: HOSTILE, facts: [] }],
+      measured: [{ key: "security", heading: HOSTILE, facts: [{ label: "l", value: "v" }] }],
     }),
   );
 
-  assert.ok(out.includes("&lt;script&gt;"), "the tag appears escaped");
+  assert.ok(out.includes(`<h3>&lt;script&gt;`), "the tag appears escaped, in the printed table heading");
   assert.ok(!out.includes("<script>"), "and never as an element");
 });
 
@@ -114,13 +144,15 @@ test("the whole shell contains no element the shell did not write", () => {
    * count must equal the number of tags the shell itself opens. A document
    * value that became markup would raise it.
    */
+  // Keyed so the values are printed in Security Audit (CP3 step 4b).
   const withTags = documentHtml(
-    testDocument({ measured: [{ heading: "<b>x</b>", facts: [{ label: "<i>", value: "<u>" }] }] }),
+    testDocument({ measured: [{ key: "security", heading: "<b>x</b>", facts: [{ label: "<i>", value: "<u>" }] }] }),
   );
   // Both carry one fact, because a group with none renders nothing at all now.
   const withoutTags = documentHtml(
-    testDocument({ measured: [{ heading: "x", facts: [{ label: "l", value: "v" }] }] }),
+    testDocument({ measured: [{ key: "security", heading: "x", facts: [{ label: "l", value: "v" }] }] }),
   );
+  assert.ok(withTags.includes("&lt;b&gt;x&lt;/b&gt;"), "the value really is on the page");
 
   assert.equal(
     (withTags.match(/</g) ?? []).length,

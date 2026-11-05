@@ -524,12 +524,18 @@ test("each section is one section with one numbered heading, and escapes the aud
   }
 });
 
-test("not wired: the current document prints none of the new sections, and the shell does not import them", () => {
-  const whole = documentHtml(testDocument());
-  for (const heading of Object.values(CATEGORY_SECTION_HEADINGS)) assert.ok(!whole.includes(heading), heading);
-  assert.ok(!whole.includes(SITE_LEVEL_ISSUES_HEADING));
+test("wired (CP3 step 4b): the document prints each of the three sections exactly once, and the shell imports them", () => {
+  const doc = testDocument();
+  const whole = documentHtml(doc);
+  for (const [category, heading] of Object.entries(CATEGORY_SECTION_HEADINGS)) {
+    assert.equal(whole.split(`<h2>${heading}</h2>`).length - 1, 1, heading);
+    const own = category === "seo" ? seoSectionHtml(doc) : category === "security" ? securitySectionHtml(doc) : technicalSectionHtml(doc);
+    assert.ok(whole.includes(own), `${heading}: the section's own markup, unchanged`);
+  }
+  // The fixture's SPF card is a Security site finding, so Site-Level Issues appears under Security Audit.
+  assert.equal(whole.split(SITE_LEVEL_H3).length - 1, 1);
   const shell = fs.readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
-  assert.ok(!shell.includes("categorySections"));
+  assert.ok(shell.includes(`from "./categorySections.ts"`));
 });
 
 // ---------------------------------------------------------------------------

@@ -729,10 +729,16 @@ test("4a: the existing findings section is unchanged by the new one", () => {
   assert.ok(out.includes(`<p class="lead">${doc.pageFindings.intro}</p>`));
 });
 
-test("4a: not wired -- the shell does not call the new section, and the current document is unchanged by it", () => {
+test("wired (CP3 step 4b): the document prints Page-Level Issues straight after the Executive Summary, and only when it has something to show", () => {
   const shell = fs.readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
-  assert.ok(!shell.includes("pageLevelIssuesHtml"));
-  const page = documentHtml(testDocument());
-  assert.ok(!page.includes(PAGE_LEVEL_ISSUES_HEADING));
-  assert.ok(!page.includes(`class="findings page-level-issues"`));
+  assert.ok(shell.includes("pageLevelIssuesHtml(document)"));
+  const doc = testDocument();
+  const page = documentHtml(doc);
+  assert.equal(page.split(`<h2>${PAGE_LEVEL_ISSUES_HEADING}</h2>`).length - 1, 1);
+  assert.ok(page.includes(`</section>${pageLevelIssuesHtml(doc)}<section class="seo-audit">`), "between the summary and SEO Audit");
+  // D1: nothing at all for a whole-site audit with no page finding.
+  // The section heading, not the words: pointers elsewhere still say "see Page-Level Issues".
+  const empty = documentHtml(testDocument({ pageFindings: pageFindingsWith([]) }));
+  assert.ok(!empty.includes(`<h2>${PAGE_LEVEL_ISSUES_HEADING}</h2>`));
+  assert.ok(!empty.includes(`class="findings page-level-issues"`));
 });

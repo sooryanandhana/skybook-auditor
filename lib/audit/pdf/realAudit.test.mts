@@ -271,7 +271,8 @@ test("a real audit with validator-approved commentary carries it", async () => {
   assert.ok(withCommentary.length > 0, "and some findings carry writing");
 
   const text = extractText(await renderPdf(document));
-  assert.match(text, /AI SUMMARY/, "labelled as AI-written in the file itself");
+  // The D5 label, on the one AI paragraph in the Executive Summary (CP3 step 4b).
+  assert.match(text, /written by ai/i, "labelled as AI-written in the file itself");
 });
 
 test("the same audit without commentary is a complete report", async () => {
@@ -282,9 +283,10 @@ test("the same audit without commentary is a complete report", async () => {
 
   const text = extractText(await renderPdf(document));
 
-  assert.ok(!/AI SUMMARY/.test(text), "no empty panel");
+  assert.ok(!/written by ai/i.test(text), "no empty AI paragraph and no AI label");
   assert.ok(!/AI EXPLANATION/.test(text), "and no commentary labels");
-  assert.match(text, /Site-wide issues/, "the findings are all still there");
+  // The SPF card is a Security site finding, now under Site-Level Issues in Security Audit (CP3 step 4b).
+  assert.match(text, /Site-Level Issues/i, "the findings are all still there");
   assert.ok(
     !/unavailable|failed|error|could not be written/i.test(text.replace(/Could not be checked/gi, "")),
     "and nothing apologises for the absence",

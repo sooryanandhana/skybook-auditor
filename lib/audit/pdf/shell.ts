@@ -1,9 +1,19 @@
 /**
  * The document shell: the page the report sections will be poured into.
  *
- * ALL TEN SECTIONS, in the order 7A §6 sets out. Each is built by its own
- * module, and this file decides only what goes on the page and in what order.
- * There are no placeholders left.
+ * THE NINE SECTIONS OF THE REDESIGNED REPORT, in the order CP1 v6 §4 sets out
+ * (CP3 step 4b, F1): the cover, then -- numbered by the stylesheet, from the
+ * first section inside <main> -- the Executive Summary, Page-Level Issues, SEO
+ * Audit, Security Audit, Speed (with its finding cards straight after it),
+ * Technical Audit, the Skybook section, and Limitations and About This Audit.
+ * Each is built by its own module, and this file decides only what goes on
+ * the page and in what order.
+ *
+ * THE OLD STANDALONE SECTIONS ARE NO LONGER PRINTED. The overall summary, the
+ * AI summary, the coverage section, the separate site- and page-findings
+ * sections, the skipped checks, the final assessment, the measured-facts and
+ * coverage-detail tables and the About section have each been replaced by a
+ * part of the sections above. Their modules stay in the code base unchanged.
  *
  * IT ADDS NOTHING OF ITS OWN. Every section either returns markup or returns
  * an empty string, and a section that returns nothing leaves no heading, no
@@ -24,16 +34,12 @@
 import type { PdfDocument } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
 import { coverHtml } from "./cover.ts";
-import { aboutHtml } from "./about.ts";
-import { coverageHtml } from "./coverage.ts";
-import { COVERAGE_DETAIL_HEADING, MEASURED_HEADING, factSectionsHtml } from "./factSections.ts";
-import { findingsHtml } from "./findings.ts";
-import { skippedHtml } from "./skipped.ts";
+import { executiveSummarySectionHtml } from "./executiveSummary.ts";
+import { findingCardsHtml, pageLevelIssuesHtml } from "./findings.ts";
+import { securitySectionHtml, seoSectionHtml, technicalSectionHtml } from "./categorySections.ts";
 import { speedHtml } from "./speed.ts";
-import { executiveSummaryHtml } from "./executiveSummary.ts";
-import { clientSummaryHtml } from "./clientSummary.ts";
-import { overallSummaryHtml } from "./overallSummary.ts";
-import { finalAssessmentHtml } from "./finalAssessment.ts";
+import { pitchSectionHtml } from "./pitch.ts";
+import { limitationsSectionHtml } from "./limitations.ts";
 import { STYLESHEET } from "./styles.ts";
 import { runningHeadFootCss } from "./runningHeadFoot.ts";
 
@@ -53,43 +59,22 @@ export function documentHtml(document: PdfDocument): string {
   const cover = document.cover;
 
   /*
-   * A CLIENT-READY FLOW, and one rule in it is not negotiable. The measured
-   * coverage — "What we checked" — comes before any finding, because a reader has
-   * to know how much of the site was looked at before a list of problems means
-   * anything, and a partial crawl presented as a whole-site audit is the single
-   * most damaging thing this document could do (7A §6, §13).
+   * A CLIENT-READY FLOW (CP1 v6 §4). The Executive Summary leads: the grade,
+   * how much of the site was covered, each area's condition, the one labelled
+   * paragraph a model wrote from the verified findings, and every improvement
+   * worst first. The detail follows, each finding explained once, in the
+   * section it belongs to:
    *
-   * THE OVERVIEW LEADS: the executive summary opens the document with the grade,
-   * the severity split and the four category scores on one page, and the AI
-   * summary follows it so a reader meets the plain-English account of the audit
-   * before the detailed measured sections. The AI summary is clearly labelled as
-   * the model's, and it invents
-   * nothing — its overall summary, key findings and recommendations are the
-   * validated explanations, and its "what we checked" and "next steps" are
-   * derived from the measured findings.
+   *   Page-Level Issues   the page findings; for a certificate failure, the
+   *                       approved sentence that no page could be read
+   *   SEO, Security,      each area's check list, then its site-level cards
+   *   Technical           and its measured tables
+   *   Speed               unchanged, with its finding cards straight after it
+   *                       and no heading of their own
    *
-   * MEASURED DETAIL FOLLOWS: the coverage, the findings, the speed check and the
-   * measured facts come after it, each measured by this tool.
-   * The final assessment restates the measured grade, and the notes on the audit
-   * itself close the document on their own page.
-   *
-   * Site-wide findings come before page-level ones because one broken certificate
-   * outranks a missing meta description on nine pages, whatever the counts say.
+   * The Skybook section and the limitations close the document.
    */
   const labels = document.labels;
-
-  /*
-   * The provenance sentence and the honesty notes that ride with the AI section,
-   * built from the same validated answer the client summary was. Empty when no
-   * model answer was produced, in which case the section draws nothing anyway.
-   */
-  const ai = document.summary.ai;
-  const aiNote =
-    ai === null
-      ? ""
-      : [labels.aiProvenance, ai.rejectedNote, ai.coverageNote]
-          .filter((sentence) => sentence !== null && sentence !== "")
-          .join(" ");
 
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
@@ -102,30 +87,16 @@ export function documentHtml(document: PdfDocument): string {
     `<style>${STYLESHEET}${runningHeadFootCss(headOf(document), footOf(document))}</style></head><body>` +
     coverHtml(cover) +
     `<main>` +
-    executiveSummaryHtml({
-      score: document.score,
-      summary: document.summary,
-      coverage: document.coverage,
-      nextSteps: document.clientSummary.nextSteps,
-      siteFindings: document.siteFindings,
-      pageFindings: document.pageFindings,
-    }) +
-    /*
-     * THE OVERALL SUMMARY, WRITTEN BY CODE. It follows the executive summary
-     * and comes before the AI summary, so the plain-language account of every
-     * area is in the report whether or not a model answered.
-     */
-    overallSummaryHtml(document.overallSummary) +
-    clientSummaryHtml(document.clientSummary, labels, aiNote) +
-    coverageHtml(document.coverage) +
-    findingsHtml(document.siteFindings, labels) +
-    findingsHtml(document.pageFindings, labels) +
-    skippedHtml(document.skipped) +
+    executiveSummarySectionHtml(document) +
+    pageLevelIssuesHtml(document) +
+    seoSectionHtml(document) +
+    securitySectionHtml(document) +
     speedHtml(document.speed, labels, document.desktopSpeed) +
-    finalAssessmentHtml(document.score) +
-    factSectionsHtml(MEASURED_HEADING, document.measured, "measured") +
-    factSectionsHtml(COVERAGE_DETAIL_HEADING, document.coverageDetail, "coverage-detail") +
-    aboutHtml() +
+    // The speed cards follow the unchanged Speed section, with no heading of their own (CP3 rev 9 §1.18).
+    findingCardsHtml(document.speedFindings, labels) +
+    technicalSectionHtml(document) +
+    pitchSectionHtml() +
+    limitationsSectionHtml(document) +
     `</main>` +
     `</body></html>`
   );

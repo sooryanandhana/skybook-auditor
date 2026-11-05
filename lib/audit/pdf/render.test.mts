@@ -306,9 +306,10 @@ test("a table spanning a page break repeats its header row", async () => {
       value: `Result ${index}`,
     }));
 
-  const smallPdf = await renderPdf(testDocument({ measured: [{ heading: "Facts", facts: rows(8) }] }));
-  const midPdf = await renderPdf(testDocument({ measured: [{ heading: "Facts", facts: rows(20) }] }));
-  const longPdf = await renderPdf(testDocument({ measured: [{ heading: "Facts", facts: rows(120) }] }));
+  // Keyed so the table is printed, in Security Audit (CP3 step 4b).
+  const smallPdf = await renderPdf(testDocument({ measured: [{ key: "security", heading: "Facts", facts: rows(8) }] }));
+  const midPdf = await renderPdf(testDocument({ measured: [{ key: "security", heading: "Facts", facts: rows(20) }] }));
+  const longPdf = await renderPdf(testDocument({ measured: [{ key: "security", heading: "Facts", facts: rows(120) }] }));
 
   assert.ok(pageCount(longPdf) > pageCount(smallPdf), "the long table really does span more pages");
 
@@ -585,7 +586,8 @@ test("markup in a document value produces no element in the rendered DOM", async
       // omitted now, which is 7A §19 working.
       documentHtml(
         testDocument({
-          measured: [{ heading: "<b>BOLDSENTINEL</b>", facts: [{ label: "l", value: "v" }] }],
+          // Keyed so the value is printed, in Security Audit (CP3 step 4b).
+          measured: [{ key: "security", heading: "<b>BOLDSENTINEL</b>", facts: [{ label: "l", value: "v" }] }],
         }),
       ),
       { waitUntil: "load" },

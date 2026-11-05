@@ -79,13 +79,13 @@ test("empty lists draw no heading", () => {
   assert.ok(out.includes("How Skybook can help"), "help is always offered");
 });
 
-test("in the document it follows the executive summary and precedes the AI summary", () => {
+test("the standalone overall summary is no longer printed in the document (CP3 step 4b, F1)", () => {
+  // The module is kept and still renders on its own; the redesigned document does not call it.
+  assert.ok(overallSummaryHtml(SUMMARY).includes(`<h2>${OVERALL_SUMMARY_HEADING}</h2>`));
   const page = documentHtml(testDocument({ overallSummary: SUMMARY }));
-  const exec = page.indexOf("Executive summary");
-  const overall = page.indexOf(`<h2>${OVERALL_SUMMARY_HEADING}</h2>`);
-  const ai = page.indexOf("<h2>AI summary</h2>");
-  assert.ok(exec >= 0 && overall > exec, "after the executive summary");
-  assert.ok(ai > overall, "before the AI summary");
+  assert.ok(!page.includes(`<h2>${OVERALL_SUMMARY_HEADING}</h2>`));
+  assert.ok(!page.includes("HELP-INTRO"), "none of its parts either");
+  assert.ok(!page.includes("<h2>AI summary</h2>"), "nor the standalone AI summary");
 });
 
 test("a document without an overall summary is unchanged by it", () => {

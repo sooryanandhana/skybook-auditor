@@ -890,12 +890,15 @@ test("3b-ii a real certificate failure: M6 statuses, Q22, no AI, no R3 and no st
 // Not wired, and nothing new is asked or calculated
 // ---------------------------------------------------------------------------
 
-test("3b-ii not wired: the shell does not use the new section, and the current document is unchanged by it", () => {
+test("wired (CP3 step 4b): the document opens with the new section, once, and the old one is not printed", () => {
   const shell = fs.readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
-  assert.ok(!shell.includes("executiveSummarySectionHtml"));
-  const page = documentHtml(testDocument());
-  assert.ok(!page.includes(`<section class="exec-summary">`));
-  assert.ok(!page.includes(AREAS_HEADING_NEW));
+  assert.ok(shell.includes("executiveSummarySectionHtml(document)"));
+  assert.ok(!shell.includes("executiveSummaryHtml("), "the old section is no longer called");
+  const doc = testDocument();
+  const page = documentHtml(doc);
+  assert.equal(page.split(`<section class="exec-summary">`).length - 1, 1);
+  assert.ok(page.includes(`<main>${executiveSummarySectionHtml(doc)}`), "first inside main, unchanged");
+  assert.ok(!page.includes("<h2>Executive summary</h2>"), "no old executive summary");
 });
 
 test("3b-ii the new section asks no AI and computes no score", () => {

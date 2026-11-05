@@ -46,10 +46,11 @@ test("the source carries the [COMPANY] confirmation note", () => {
   assert.ok(source.includes("brand name must be confirmed by Skybook"));
 });
 
-test("not wired: the shell does not use this section, and the current document carries none of it", () => {
+test("wired (CP3 step 4b): the document carries this section once, immediately before Limitations", () => {
   const shell = fs.readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
-  assert.ok(!shell.includes("pitch"));
+  assert.ok(shell.includes("pitchSectionHtml()"));
   const page = documentHtml(testDocument());
-  assert.ok(!page.includes(`<section class="pitch">`));
-  assert.ok(!page.includes(escapeHtml(PITCH_HEADING)));
+  assert.equal(page.split(`<section class="pitch">`).length - 1, 1);
+  assert.ok(page.includes(`${pitchSectionHtml()}<section class="limitations">`), "straight before Limitations (CP1 §10)");
+  assert.equal(page.split(escapeHtml(PITCH_HEADING)).length - 1, 1);
 });

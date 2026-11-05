@@ -177,7 +177,17 @@ test("the outline starts at the document title", () => {
 test("every section that a reader would navigate to is a second-level heading", () => {
   const levels = outline(documentHtml(testDocument()));
 
-  for (const section of ["Executive summary", "What we checked", "Speed", "About this report"]) {
+  // The redesigned report's sections (CP3 step 4b, F1). The fixture has page findings, so Page-Level Issues is there.
+  for (const section of [
+    "Executive Summary",
+    "Page-Level Issues",
+    "SEO Audit",
+    "Security Audit",
+    "Speed",
+    "Technical Audit",
+    "Let&#39;s Make Your Website Work Better for Your Business", // as escaped in the markup the outline reads
+    "Limitations and About This Audit",
+  ]) {
     const heading = levels.find((one) => one.text === section);
     assert.ok(heading, `${section} is a heading`);
     assert.equal(heading.level, 2, `${section} is a section`);

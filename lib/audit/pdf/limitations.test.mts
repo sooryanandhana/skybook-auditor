@@ -377,10 +377,13 @@ test("a real certificate failure: the reasons that stopped every check, no count
 // Not wired
 // ---------------------------------------------------------------------------
 
-test("not wired: the shell does not use this section, and the current document is unchanged by it", () => {
+test("wired (CP3 step 4b): the document closes with this section, once, and the old About and skipped sections are gone", () => {
   const shell = fs.readFileSync(new URL("./shell.ts", import.meta.url), "utf8");
-  assert.ok(!shell.includes("limitations"));
-  const pageHtml = documentHtml(testDocument());
-  assert.ok(!pageHtml.includes(`<section class="limitations">`));
-  assert.ok(!pageHtml.includes(LIMITATIONS_HEADING));
+  assert.ok(shell.includes("limitationsSectionHtml(document)"));
+  const doc = testDocument();
+  const pageHtml = documentHtml(doc);
+  assert.equal(pageHtml.split(`<section class="limitations">`).length - 1, 1);
+  assert.ok(pageHtml.includes(`${limitationsSectionHtml(doc)}</main>`), "last inside main, unchanged");
+  assert.ok(!pageHtml.includes("<h2>About this report</h2>"), "no standalone About section");
+  assert.ok(!pageHtml.includes(`<section class="skipped">`), "no standalone skipped section");
 });

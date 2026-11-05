@@ -499,17 +499,32 @@ function securityArea(input: OverallSummaryInput): SummaryArea {
 // Certificate
 // ---------------------------------------------------------------------------
 
+/**
+ * The certificate area's status, and nothing else (CP3 step 3b-i, B11).
+ *
+ * STATUS ONLY. It reads the certificate record and the certificate findings,
+ * so it can be asked about an audit that read no page -- a certificate failure
+ * -- as well as about a whole-site audit. `certificateArea` below uses it, so
+ * the two can never disagree.
+ */
+export function certificateStatus(ssl: AuditData["ssl"], findings: readonly Finding[]): AreaStatus {
+  if (ssl.status === "not-applicable") return "not-measured";
+  if (ssl.status !== "checked" || ssl.certificate === null) return "incomplete";
+  return problemsIn(findings, (finding) => SSL_IDS.has(finding.id)).length > 0 ? "attention" : "good";
+}
+
 function certificateArea(input: OverallSummaryInput): SummaryArea {
   const ssl = input.data.ssl;
   const heading = "SSL/TLS certificate";
+  const status = certificateStatus(ssl, input.findings);
 
   if (ssl.status === "not-applicable") {
-    return area("certificate", heading, "not-measured", [
+    return area("certificate", heading, status, [
       "No certificate was checked, because the site was not served over HTTPS.",
     ]);
   }
   if (ssl.status !== "checked" || ssl.certificate === null) {
-    return area("certificate", heading, "incomplete", [
+    return area("certificate", heading, status, [
       `The certificate could not be checked: ${ssl.message} ${NOT_A_VERDICT}`,
     ]);
   }
@@ -547,7 +562,7 @@ function certificateArea(input: OverallSummaryInput): SummaryArea {
     "A valid certificate confirms that the connection is encrypted and identifies the website. It does not by itself show that every other part of the site's security is in order.",
   );
 
-  return area("certificate", heading, problems.length > 0 ? "attention" : "good", paragraphs);
+  return area("certificate", heading, status, paragraphs);
 }
 
 // ---------------------------------------------------------------------------
@@ -560,10 +575,23 @@ const DMARC_POLICY_MEANING: Record<string, string> = {
   reject: "which asks receiving email systems to refuse failing messages",
 };
 
+/**
+ * The domain area's status, and nothing else (CP3 step 3b-i, B11).
+ *
+ * A DNS finding needs attention; otherwise any of the five lookups the area
+ * reports on (A, NS, MX, SPF, DMARC) failing leaves it partly checked. These
+ * are exactly the lookups whose failure `domainArea` describes, and its status
+ * is this function's answer.
+ */
+export function domainStatus(dns: AuditData["dns"], findings: readonly Finding[]): AreaStatus {
+  if (problemsIn(findings, (finding) => DNS_IDS.has(finding.id)).length > 0) return "attention";
+  const lookups = [dns.a.status, dns.ns.status, dns.mx.status, dns.spf.status, dns.dmarc.status];
+  return lookups.includes("error") ? "incomplete" : "good";
+}
+
 function domainArea(input: OverallSummaryInput): SummaryArea {
   const dns = input.data.dns;
   const paragraphs: string[] = [];
-  let failed = 0;
 
   switch (dns.a.status) {
     case "found":
@@ -573,7 +601,6 @@ function domainArea(input: OverallSummaryInput): SummaryArea {
       paragraphs.push("No web server addresses (A records) were found for the domain.");
       break;
     case "error":
-      failed += 1;
       paragraphs.push("The lookup of the domain's web server addresses failed, so they could not be determined.");
       break;
   }
@@ -581,7 +608,6 @@ function domainArea(input: OverallSummaryInput): SummaryArea {
   if (dns.ns.status === "found") {
     paragraphs.push(`Its name servers, which manage the domain's records, were found (${listed(dns.ns.records)}).`);
   } else if (dns.ns.status === "error") {
-    failed += 1;
     paragraphs.push("The lookup of the domain's name servers failed, so they could not be determined.");
   } else {
     paragraphs.push("No name servers were found for the domain.");
@@ -595,7 +621,6 @@ function domainArea(input: OverallSummaryInput): SummaryArea {
         : `Mail servers are published for the domain (${plural(dns.mx.records.length, "MX record", "MX records")}).`,
     );
   } else if (dns.mx.status === "error") {
-    failed += 1;
     paragraphs.push("The lookup of the domain's mail servers failed, so they could not be determined.");
   } else {
     paragraphs.push("No mail servers (MX records) were found for the domain.");
@@ -604,7 +629,6 @@ function domainArea(input: OverallSummaryInput): SummaryArea {
   if (dns.spf.status === "found") {
     paragraphs.push("An SPF record was found. It lists which servers may send email for the domain.");
   } else if (dns.spf.status === "error") {
-    failed += 1;
     paragraphs.push("The SPF lookup failed, so whether the domain publishes an SPF record could not be determined.");
   } else {
     paragraphs.push("No SPF record was found. SPF lists which servers may send email for the domain.");
@@ -618,7 +642,6 @@ function domainArea(input: OverallSummaryInput): SummaryArea {
       `A DMARC policy was found${policy === null ? "" : ` with the setting "${policy}"`}${meaning}${where}.`,
     );
   } else if (dns.dmarc.status === "error") {
-    failed += 1;
     paragraphs.push("The DMARC lookup failed, so whether the domain publishes a DMARC policy could not be determined.");
   } else {
     paragraphs.push(
@@ -631,9 +654,7 @@ function domainArea(input: OverallSummaryInput): SummaryArea {
     "A missing record does not by itself mean that the domain's email is failing to arrive. Any changes should be reviewed by whoever manages the domain.",
   );
 
-  const problems = problemsIn(input.findings, (finding) => DNS_IDS.has(finding.id));
-  const status: AreaStatus = problems.length > 0 ? "attention" : failed > 0 ? "incomplete" : "good";
-  return area("domain", "Domain and email records", status, paragraphs);
+  return area("domain", "Domain and email records", domainStatus(dns, input.findings), paragraphs);
 }
 
 // ---------------------------------------------------------------------------
@@ -671,7 +692,12 @@ function siteArea(input: OverallSummaryInput): SummaryArea {
   }
 
   const problems = problemsIn(input.findings, (finding) => finding.category === "technical");
-  return area("site", "Pages read and instructions for search engines", technicalStatus(input, problems.length), paragraphs);
+  return area(
+    "site",
+    "Pages read and instructions for search engines",
+    technicalStatusOf(technical, problems.length, input.crawl.complete),
+    paragraphs,
+  );
 }
 
 /**
@@ -688,9 +714,17 @@ function siteArea(input: OverallSummaryInput): SummaryArea {
  * first is a known fact and the second is not (D2, U4). Whether the crawl was
  * complete is a flag, not a count, so this never depends on counts that might
  * not reconcile.
+ *
+ * STATUS ONLY, AND EXPORTED (CP3 step 3b-i, B11), so the certificate-failure
+ * document can be given the same answer without a second copy of the rules.
+ * The caller says whether the crawl counts as complete; a certificate failure
+ * passes false (B10).
  */
-function technicalStatus(input: OverallSummaryInput, problemCount: number): AreaStatus {
-  const technical = input.data.technical;
+export function technicalStatusOf(
+  technical: AuditData["technical"],
+  problemCount: number,
+  crawlComplete: boolean,
+): AreaStatus {
   if (problemCount > 0) return "attention";
   if (technical !== null && (technical.robotsTxtStatus === "absent" || technical.sitemapStatus === "absent")) {
     return "improve";
@@ -698,7 +732,7 @@ function technicalStatus(input: OverallSummaryInput, problemCount: number): Area
   if (technical === null || technical.robotsTxtStatus === "unavailable" || technical.sitemapStatus === "unavailable") {
     return "incomplete";
   }
-  return input.crawl.complete ? "good" : "incomplete";
+  return crawlComplete ? "good" : "incomplete";
 }
 
 /** How serious each status is, for combining areas: the higher number wins. */
@@ -716,8 +750,10 @@ const STATUS_RANK: Record<AreaStatus, number> = {
  * "Room for improvement" outranks "Partly checked": a shortfall that was found
  * is a known fact, an unfinished lookup is not. "Not measured" ranks lowest, so
  * it decides nothing unless every status is "Not measured".
+ *
+ * Exported unchanged (CP3 step 3b-i, B11).
  */
-function mostSerious(statuses: readonly AreaStatus[]): AreaStatus {
+export function mostSerious(statuses: readonly AreaStatus[]): AreaStatus {
   return statuses.reduce<AreaStatus>(
     (worst, status) => (STATUS_RANK[status] > STATUS_RANK[worst] ? status : worst),
     "not-measured",

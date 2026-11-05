@@ -256,6 +256,18 @@ export function testDocument(overrides: Partial<PdfDocument> = {}): PdfDocument 
       facts: [{ label: "Readable text", value: "2,400 characters" }],
     },
     configuredLimitsSentence: "Configured limits for this audit: up to 150 pages and 5 minutes.",
+    // The step 3b-i fields: the two problem findings above, in their order.
+    certificateFailureAreas: null,
+    improvements: [
+      {
+        ruleId: FIXTURE_RULE_IDS[0], title: "No SPF record", severityLabel: "High",
+        category: "security", categoryLabel: "Security", destination: "security-audit",
+      },
+      {
+        ruleId: FIXTURE_RULE_IDS[1], title: "No meta description", severityLabel: "Medium",
+        category: "seo", categoryLabel: "Search visibility", destination: "page-level",
+      },
+    ],
     ...overrides,
   };
 }

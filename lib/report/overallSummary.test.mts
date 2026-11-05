@@ -16,7 +16,11 @@ import {
   NOT_EVERY_PAGE_CHECKED,
   PASSED,
   buildOverallSummary,
+  certificateStatus,
+  domainStatus,
+  mostSerious,
   skybookHelp,
+  technicalStatusOf,
   type OverallSummary,
   type OverallSummaryInput,
 } from "./overallSummary.ts";
@@ -689,4 +693,99 @@ test("F16 O6: a page finding is never called site-wide because its reach is unkn
   const site = buildOverallSummary(input({ findings: [finding("security.headers.csp", "medium", "security")], coverage: null }));
   assert.match(areaText(site, "security"), /\(site-wide\)/);
   assert.equal(site.priorities[0].reach, "Site-wide");
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 3b-i (B11): the status-only helpers give the areas' own answers
+// ---------------------------------------------------------------------------
+
+const certificateFinding = () => finding("security.ssl.expired", "critical", "security");
+const dnsFinding = () => finding("security.dns.spf", "high", "security");
+const DNS_LOOKUPS = ["a", "ns", "mx", "spf", "dmarc"] as const;
+
+/** The audit data with one DNS lookup failed. */
+function dnsFailed(lookup: (typeof DNS_LOOKUPS)[number]): AuditData {
+  const data = auditData();
+  return { ...data, dns: { ...data.dns, [lookup]: { ...data.dns[lookup], status: "error", error: "Timed out." } } } as AuditData;
+}
+
+test("3b-i: certificateStatus is the certificate area's status in every state", () => {
+  const base = auditData();
+  const cases: ReadonlyArray<[string, AuditData, Finding[]]> = [
+    ["checked, no finding", base, []],
+    ["checked, a certificate finding", base, [certificateFinding()]],
+    ["checked, a non-certificate finding only", base, [dnsFinding()]],
+    ["not applicable", { ...base, ssl: { ...base.ssl, status: "not-applicable", certificate: null } } as AuditData, []],
+    ["not applicable, with a certificate finding", { ...base, ssl: { ...base.ssl, status: "not-applicable", certificate: null } } as AuditData, [certificateFinding()]],
+    ["connection failed", { ...base, ssl: { ...base.ssl, status: "unreachable", certificate: null } } as AuditData, []],
+    ["address refused", { ...base, ssl: { ...base.ssl, status: "blocked", certificate: null } } as AuditData, [certificateFinding()]],
+    ["checked, but no certificate read", { ...base, ssl: { ...base.ssl, certificate: null } } as AuditData, [certificateFinding()]],
+  ];
+  const seen = new Set<string>();
+  for (const [name, data, findings] of cases) {
+    const expected = areaStatus(buildOverallSummary(input({ data, findings })), "certificate");
+    assert.equal(certificateStatus(data.ssl, findings), expected, name);
+    seen.add(String(expected));
+  }
+  assert.deepEqual([...seen].sort(), ["attention", "good", "incomplete", "not-measured"], "every status the area can give is covered");
+});
+
+test("3b-i: domainStatus is the domain area's status in every state", () => {
+  const cases: Array<[string, AuditData, Finding[]]> = [
+    ["every lookup answered, no finding", auditData(), []],
+    ["a DNS finding", auditData(), [dnsFinding()]],
+    ["a non-DNS finding only", auditData(), [certificateFinding()]],
+  ];
+  for (const lookup of DNS_LOOKUPS) {
+    cases.push([`${lookup} lookup failed`, dnsFailed(lookup), []]);
+    cases.push([`${lookup} lookup failed, with a DNS finding`, dnsFailed(lookup), [dnsFinding()]]);
+  }
+  // AAAA and TXT are not among the lookups the area reports, so a failure there changes nothing.
+  for (const unreported of ["aaaa", "txt"] as const) {
+    const data = auditData();
+    cases.push([`${unreported} lookup failed`, { ...data, dns: { ...data.dns, [unreported]: { ...data.dns[unreported], status: "error" } } } as AuditData, []]);
+  }
+  const seen = new Set<string>();
+  for (const [name, data, findings] of cases) {
+    const expected = areaStatus(buildOverallSummary(input({ data, findings })), "domain");
+    assert.equal(domainStatus(data.dns, findings), expected, name);
+    seen.add(String(expected));
+  }
+  assert.deepEqual([...seen].sort(), ["attention", "good", "incomplete"]);
+});
+
+test("3b-i: technicalStatusOf is the Technical status for every case of the §4 matrix", () => {
+  const states: ReadonlyArray<FileState | "not-run"> = ["found", "absent", "unavailable", "not-run"];
+  for (const robots of states) {
+    for (const sitemap of states) {
+      for (const complete of [true, false]) {
+        for (const withFinding of [false, true]) {
+          const tech = robots === "not-run" || sitemap === "not-run" ? null : technical(robots, sitemap);
+          const findings = withFinding ? [robotsFinding()] : [];
+          const expected = areaStatus(
+            buildOverallSummary(input({ data: auditData({ technical: tech }), crawl: complete ? crawl() : partialCrawl(), findings })),
+            "site",
+          );
+          assert.equal(technicalStatusOf(tech, findings.length, complete), expected, `${robots}/${sitemap}/${complete}/${withFinding}`);
+        }
+      }
+    }
+  }
+});
+
+test("3b-i: the Security status is mostSerious of the three areas, as before", () => {
+  const cases: ReadonlyArray<[string, Partial<OverallSummaryInput>]> = [
+    ["no findings", {}],
+    ["a certificate finding", { findings: [certificateFinding()] }],
+    ["a DNS lookup failed", { data: dnsFailed("mx") }],
+    ["not served over HTTPS", { data: auditData({ ssl: { ...auditData().ssl, status: "not-applicable", certificate: null } }) }],
+  ];
+  for (const [name, over] of cases) {
+    const summary = buildOverallSummary(input(over));
+    const statuses = ["security", "certificate", "domain"].map((key) => areaStatus(summary, key)!);
+    assert.equal(summary.securityStatus, mostSerious(statuses), name);
+  }
+  assert.equal(mostSerious([]), "not-measured");
+  assert.equal(mostSerious(["improve", "incomplete"]), "improve", "C2: improve outranks incomplete");
+  assert.equal(mostSerious(["not-measured", "good"]), "good", "not measured decides nothing");
 });

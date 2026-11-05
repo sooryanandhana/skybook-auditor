@@ -35,8 +35,9 @@ import type { AuditResult, Finding, SiteAuditResult, SpeedResult } from "../type
 import { coverageCheck } from "../report/coverageCheck.ts";
 import { configuredLimitsText, contentFacts, discoverySourceFacts, sitemapDiscoveryFacts } from "../report/measurementsView.ts";
 import { explainerFor } from "../report/findingExplainers.ts";
-import { AUDIT_RULES } from "../rules/all.ts";
+import { AUDIT_RULES, SPEED_RULES } from "../rules/all.ts";
 import { runRealAudit, runRealCertificateFailure } from "./pdf/realAudit.fixture.mts";
+import { certificateStatus, domainStatus, mostSerious, technicalStatusOf } from "../report/overallSummary.ts";
 
 const META = "seo.meta-description.missing";
 const SPF_RULE = "security.dns.spf.missing";
@@ -2327,6 +2328,163 @@ test("3a: a check-list issue always carries its finding's title", async () => {
     }
   }
   assert.ok(issues > 0, "the fixtures do contain issues");
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 3b-i: certificate-failure area statuses (M6) and improvements (M7)
+// ---------------------------------------------------------------------------
+
+test("3b-i M6: a whole-site audit carries no certificate-failure statuses", async () => {
+  assert.equal(documentOfStored().certificateFailureAreas, null);
+  const { valid, failing } = await coverageFixtures;
+  for (const audit of [valid, ...Object.values(failing)]) assert.equal(documentOf(audit).certificateFailureAreas, null);
+});
+
+test("3b-i M6: a certificate failure's statuses come from the shared helpers, never from a page", async () => {
+  const audit = await certificateFailureAudit();
+  const areas = documentOfAny(audit).certificateFailureAreas;
+  assert.ok(areas !== null);
+  assert.equal(areas.seo, "not-measured", "R6: no page, no SEO");
+  assert.equal(areas.speed, "not-measured", "B13: no page, no speed");
+  assert.equal(
+    areas.security,
+    mostSerious([certificateStatus(audit.ssl, audit.site.findings), domainStatus(audit.dns, audit.site.findings)]),
+  );
+  assert.equal(areas.security, "attention", "an expired certificate needs attention");
+  const technicalProblems = audit.site.findings.filter((f) => f.severity !== "good" && f.category === "technical").length;
+  assert.equal(areas.technical, technicalStatusOf(audit.technical, technicalProblems, false));
+});
+
+test("3b-i M6: with no certificate finding, a failed DNS lookup leaves Security partly checked", async () => {
+  const audit = await certificateFailureAudit();
+  audit.site.findings = audit.site.findings.filter((f) => !f.id.startsWith("security.ssl.") && !f.id.startsWith("security.dns."));
+  audit.dns.mx = { ...audit.dns.mx, status: "error", records: [], error: "The lookup timed out." } as typeof audit.dns.mx;
+  const areas = documentOfAny(audit).certificateFailureAreas!;
+  assert.equal(areas.security, mostSerious([certificateStatus(audit.ssl, audit.site.findings), "incomplete"]));
+  assert.notEqual(areas.security, "good");
+});
+
+test("3b-i M6 (B10): a certificate failure is never 'In good shape' for Technical, even when its queue reports complete", async () => {
+  const audit = await certificateFailureAudit();
+  audit.technical = { robotsTxtStatus: "found", sitemapStatus: "found", robotsBlocksEverything: false, sitemapUrl: null } as typeof audit.technical;
+  audit.crawl.complete = true;
+  audit.site.findings = audit.site.findings.filter((f) => f.category !== "technical");
+  assert.equal(technicalStatusOf(audit.technical, 0, true), "good", "the complete flag alone would say good");
+  assert.equal(documentOfAny(audit).certificateFailureAreas!.technical, "incomplete", "treated as partial (P4)");
+});
+
+test("3b-i M6: a robots finding on a certificate failure needs attention", async () => {
+  const audit = await certificateFailureAudit();
+  audit.site.findings.push(problem("technical.robots.blocks-all", "robots.txt blocks all search engines", "site"));
+  assert.equal(documentOfAny(audit).certificateFailureAreas!.technical, "attention");
+});
+
+/** A stored audit whose site findings are exactly these, in this order. */
+function auditWithFindings(list: readonly Finding[]): SiteAuditResult {
+  const audit = storedAudit();
+  const data = { ...audit.data, findings: [...list] };
+  return { ...audit, data, pages: [{ url: "https://example.com/", data }], site: { ...audit.site, findings: [...list] } } as unknown as SiteAuditResult;
+}
+
+const SPEED_ID = SPEED_RULES[0].id;
+
+/** One finding of each destination, plus passing checks, in aggregator order. */
+const MIXED: readonly Finding[] = [
+  { ...problem("security.ssl.expired", "TLS certificate has expired", "site"), severity: "critical" },
+  { ...problem("security.headers.hsts", "No usable HSTS header", "page"), severity: "high" },
+  { ...problem("seo.title.missing", "No page title", "page"), severity: "high" },
+  { ...problem("security.dns.spf", "No SPF record", "site"), severity: "high" },
+  { ...problem(SPEED_ID, "Slow largest content", "page"), category: "speed", severity: "medium" },
+  { ...problem("seo.lang.missing", "Language", "page"), severity: "good", title: "Language declared" },
+  { ...problem("technical.robots.blocks-all", "robots.txt blocks all search engines", "site"), severity: "medium" },
+] as unknown as Finding[];
+
+test("3b-i M7: every problem finding is listed once, in the aggregator's order, with its approved destination", () => {
+  const doc = documentOfStored(auditWithFindings(MIXED));
+  const problems = MIXED.filter((f) => f.severity !== "good");
+  assert.deepEqual(doc.improvements.map((item) => item.ruleId), problems.map((f) => f.id), "same findings, same order");
+  assert.equal(doc.improvements.length, doc.summary.severityCounts.reduce((sum, entry) => sum + entry.count, 0), "matches the severity split");
+  assert.deepEqual(
+    doc.improvements.map((item) => [item.ruleId, item.destination]),
+    [
+      ["security.ssl.expired", "security-audit"],
+      ["security.headers.hsts", "page-level"],
+      ["seo.title.missing", "page-level"],
+      ["security.dns.spf", "security-audit"],
+      [SPEED_ID, "speed"],
+      ["technical.robots.blocks-all", "technical-audit"],
+    ],
+  );
+  const first = doc.improvements[0];
+  assert.deepEqual(first, {
+    ruleId: "security.ssl.expired",
+    title: "TLS certificate has expired",
+    severityLabel: "Critical",
+    category: "security",
+    categoryLabel: "Security",
+    destination: "security-audit",
+  }, "the finding's own words, and nothing else: no figure, address or explanation");
+});
+
+test("3b-i M7: a finding with no approved destination is left out, and nothing else is", () => {
+  const stray = { ...problem("seo.title.missing", "No page title", "site"), severity: "high" } as unknown as Finding;
+  const doc = documentOfStored(auditWithFindings([stray, ...MIXED.filter((f) => f.id !== "seo.title.missing")]));
+  assert.ok(!doc.improvements.some((item) => item.ruleId === "seo.title.missing"), "an SEO site finding has nowhere approved to point");
+  assert.equal(doc.improvements.length, MIXED.filter((f) => f.severity !== "good").length - 1);
+});
+
+test("3b-i M7: a repeated rule is listed once, at its first place", () => {
+  const repeated = [...MIXED.slice(0, 3), { ...MIXED[0], title: "A second copy" }, ...MIXED.slice(3)] as Finding[];
+  const doc = documentOfStored(auditWithFindings(repeated));
+  const ids = doc.improvements.map((item) => item.ruleId);
+  assert.equal(new Set(ids).size, ids.length, "no rule twice");
+  assert.equal(doc.improvements[0].title, "TLS certificate has expired", "the first occurrence is kept");
+});
+
+test("3b-i M7: a speed finding attached by the speed check is listed, pointing to Speed & Performance", () => {
+  const { store, jobId } = jobWith();
+  store.attach(jobId, {
+    data: { ...storedAudit().data.performance, status: "checked" },
+    findings: [{ ...problem(SPEED_ID, "Slow largest content", "page"), category: "speed", severity: "high" }],
+    skippedChecks: [],
+  } as unknown as SpeedResult);
+  const doc = documentFor(store, jobId);
+  const speed = doc.improvements.filter((item) => item.destination === "speed");
+  assert.deepEqual(speed.map((item) => item.ruleId), [SPEED_ID]);
+  assert.equal(doc.improvements.length, doc.summary.severityCounts.reduce((sum, entry) => sum + entry.count, 0));
+  // In the merged order withSpeed gives: the high speed finding before the medium page finding.
+  assert.deepEqual(doc.improvements.map((item) => item.ruleId), [SPF_RULE, SPEED_ID, META]);
+});
+
+test("3b-i M7: real audits list every problem finding, in order, once", async () => {
+  const { valid, failing } = await coverageFixtures;
+  const certificate = await certificateFailureAudit();
+  const cases: ReadonlyArray<[string, PdfDocument, readonly Finding[]]> = [
+    ["valid", documentOf(valid), valid.site.findings],
+    ...Object.entries(failing).map(([name, audit]) => [name, documentOf(audit), audit.site.findings] as [string, PdfDocument, readonly Finding[]]),
+    ["certificate failure", documentOfAny(certificate), certificate.site.findings],
+  ];
+  for (const [name, doc, source] of cases) {
+    const problems = source.filter((f) => f.severity !== "good");
+    assert.ok(problems.length > 0, `${name}: the fixture has problems`);
+    assert.deepEqual(doc.improvements.map((item) => item.ruleId), problems.map((f) => f.id), name);
+    assert.equal(doc.improvements.length, doc.summary.severityCounts.reduce((sum, entry) => sum + entry.count, 0), name);
+    assert.equal(new Set(doc.improvements.map((item) => item.ruleId)).size, doc.improvements.length, name);
+  }
+  const certDoc = documentOfAny(certificate);
+  assert.ok(certDoc.improvements.every((item) => item.destination !== "page-level" && item.destination !== "speed"), "no page was read");
+});
+
+test("3b-i: the new fields carry no figure, address or banned key", async () => {
+  const docs = [documentOfStored(auditWithFindings(MIXED)), documentOfAny(await certificateFailureAudit())];
+  for (const doc of docs) {
+    const wire = JSON.stringify({ areas: doc.certificateFailureAreas, improvements: doc.improvements });
+    assert.doesNotMatch(wire, /https?:\/\//, "no address");
+    assert.doesNotMatch(wire, /\d+ of \d+/, "no scope figure");
+    for (const key of ["affected", "evaluatedPages", "evidence", "remediation", "explanation", "reach"]) {
+      assert.ok(!wire.includes(`"${key}"`), key);
+    }
+  }
 });
 
 test("3a: the new fields bring no banned key into the document", () => {

@@ -24,13 +24,21 @@
 import { withSpeed } from "./withSpeed.ts";
 import { withoutCredentials } from "../collector/url.ts";
 import { EVIDENCE_PANEL_HEADINGS, explainerFor, whoFixesLabel } from "../report/findingExplainers.ts";
-import { buildOverallSummary, type OverallSummary } from "../report/overallSummary.ts";
+import {
+  buildOverallSummary,
+  certificateStatus,
+  domainStatus,
+  mostSerious,
+  technicalStatusOf,
+  type AreaStatus,
+  type OverallSummary,
+} from "../report/overallSummary.ts";
 
 /*
  * The summary's shape, passed through for the renderer. The renderer imports
  * only from this file, so the report layer's types reach it from here.
  */
-export type { OverallSummary, SummaryArea, SummaryPriority } from "../report/overallSummary.ts";
+export type { AreaStatus, OverallSummary, SummaryArea, SummaryPriority } from "../report/overallSummary.ts";
 import type { AuditJobStore } from "../jobs/auditJobs.ts";
 import { MAX_EXPLAINED_FINDINGS } from "../ai/contract.ts";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
@@ -83,6 +91,7 @@ import {
   crawlView,
   isCertificateFailureAudit,
   SPEED_NOT_MEASURED_WITHOUT_PAGE,
+  findingScope,
   partitionByScope,
   scopeLabel,
   stopReasonText,
@@ -517,6 +526,43 @@ export interface PdfSearchMeasurement {
   readonly facts: readonly PdfFact[];
 }
 
+/**
+ * The four areas' statuses for an audit that read no page (CP3 step 3b-i,
+ * S3-D2). Statuses, not wording: a renderer supplies the approved labels.
+ *
+ * SEO and Speed need a page and so were not measured (R6, B13). Security is the
+ * most serious of what could be measured without one -- the certificate and
+ * the domain records (Q2a, C2); the page-header part needs a page. Technical
+ * follows the CP1 §4 precedence with the crawl counted as partial (B10).
+ */
+export interface PdfCertificateFailureAreas {
+  readonly seo: "not-measured";
+  readonly security: AreaStatus;
+  readonly speed: "not-measured";
+  readonly technical: AreaStatus;
+}
+
+/**
+ * Which section of the report explains an improvement (CP3 step 3b-i, M7).
+ * A structural key; the renderer supplies the printed name.
+ */
+export type PdfImprovementDestination = "page-level" | "security-audit" | "technical-audit" | "speed";
+
+/**
+ * One line of the Executive Summary's improvements list (CP3 step 3b-i, M7).
+ *
+ * The finding's own title, severity word and category, and where it is
+ * explained. No figure, address or explanation is carried.
+ */
+export interface PdfImprovement {
+  readonly ruleId: string;
+  readonly title: string;
+  readonly severityLabel: string;
+  readonly category: Category;
+  readonly categoryLabel: string;
+  readonly destination: PdfImprovementDestination;
+}
+
 /** What may be said about the crawl without any figure. */
 export interface PdfCoverageFlags {
   readonly partial: boolean;
@@ -669,6 +715,13 @@ export interface PdfDocument {
    * measurements, so present whether or not the counts reconciled.
    */
   readonly configuredLimitsSentence: string;
+  /** The area statuses of an audit that read no page (CP3 step 3b-i, S3-D2). Null for a whole-site audit. */
+  readonly certificateFailureAreas: PdfCertificateFailureAreas | null;
+  /**
+   * Every problem finding, in the order the aggregator gave them -- worst
+   * first, then by rule id -- each with where it is explained (CP3 step 3b-i, M7).
+   */
+  readonly improvements: readonly PdfImprovement[];
 }
 
 // ---------------------------------------------------------------------------
@@ -991,6 +1044,81 @@ function technicalFilesFrom(technical: AuditData["technical"] | null): PdfTechni
 }
 
 // ---------------------------------------------------------------------------
+// The Executive Summary's data (CP3 step 3b-i)
+// ---------------------------------------------------------------------------
+
+/**
+ * The area statuses of a certificate failure (S3-D2), from the shared status
+ * helpers the overall summary itself uses, so the two cannot disagree.
+ */
+function certificateFailureAreasFor(audit: CertificateFailureAudit): PdfCertificateFailureAreas {
+  const findings = audit.site.findings;
+  const technicalProblems = findings.filter(
+    (finding) => finding.severity !== "good" && finding.category === "technical",
+  ).length;
+  return {
+    seo: "not-measured",
+    security: mostSerious([certificateStatus(audit.ssl, findings), domainStatus(audit.dns, findings)]),
+    speed: "not-measured",
+    // No page was read, so the crawl is never counted as complete here (B10),
+    // whatever the drained queue reported.
+    technical: technicalStatusOf(audit.technical, technicalProblems, false),
+  };
+}
+
+/**
+ * Where a finding is explained, or null when no approved section explains it.
+ *
+ * Speed findings belong to Speed & Performance whatever their scope. A site
+ * finding is explained in its own category's section; a page finding under
+ * Page-Level Issues. SEO has no site rule, so an SEO site finding has nowhere
+ * approved to point and is left out rather than pointed somewhere invented.
+ */
+function destinationOf(finding: Finding): PdfImprovementDestination | null {
+  if (finding.category === "speed") return "speed";
+  if (findingScope(finding) === "site") {
+    if (finding.category === "security") return "security-audit";
+    if (finding.category === "technical") return "technical-audit";
+    return null;
+  }
+  return finding.category === "seo" || finding.category === "security" || finding.category === "technical"
+    ? "page-level"
+    : null;
+}
+
+/**
+ * Every problem finding, in the order it arrived (M7).
+ *
+ * THE AGGREGATOR'S ORDER, NOT OURS. `findings` is already worst first, then by
+ * rule id (aggregate.ts, runner.ts, withSpeed.ts); nothing here compares one
+ * severity with another.
+ *
+ * ONE LINE PER RULE. Rule ids are unique across the audit, each rule run gives
+ * a rule at most one outcome, and a rule's problem severity is a constant, so
+ * no two genuine problem findings share an id. The check below is a guard on
+ * that, not a choice between findings.
+ */
+function improvementsFrom(findings: readonly Finding[]): PdfImprovement[] {
+  const seen = new Set<string>();
+  const out: PdfImprovement[] = [];
+  for (const finding of findings) {
+    if (finding.severity === "good" || seen.has(finding.id)) continue;
+    const destination = destinationOf(finding);
+    if (destination === null) continue;
+    seen.add(finding.id);
+    out.push({
+      ruleId: finding.id,
+      title: finding.title,
+      severityLabel: severityLabel(finding.severity),
+      category: finding.category,
+      categoryLabel: categoryLabel(finding.category),
+      destination,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Speed
 // ---------------------------------------------------------------------------
 
@@ -1287,6 +1415,8 @@ function certificateFailureDocument(
     // No page was read, so there is no search measurement to show.
     searchMeasurement: null,
     configuredLimitsSentence: configuredLimitsText(audit.crawl.limits),
+    certificateFailureAreas: certificateFailureAreasFor(audit),
+    improvements: improvementsFrom(findings),
   };
 }
 
@@ -1647,6 +1777,8 @@ export function buildPdfDocument(
       // The same row the measured-facts section carries, and the same address as the cover.
       searchMeasurement: { pageUrl: withoutCredentials(data.fetch.finalUrl), facts: contentFacts(data.seo) },
       configuredLimitsSentence: configuredLimitsText(crawl.limits),
+      certificateFailureAreas: null,
+      improvements: improvementsFrom(findings),
     },
   };
 }

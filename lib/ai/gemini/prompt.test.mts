@@ -175,3 +175,61 @@ test("neither module imports a client, a key or the network", () => {
     assert.ok(!source.includes("await "), `${file} does something asynchronous`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// CP3 step 5 (F21): the executive-summary paragraphs, as approved in CP1 v6 §8
+//
+// TEXT ONLY. These read the production `SYSTEM_INSTRUCTION` and check that it
+// says what was approved. They cannot show how a model behaves, and do not
+// claim to (CP1 v6 §8); AI1 remains unverified.
+// ---------------------------------------------------------------------------
+
+/**
+ * Line wraps and blank lines in the brief are layout, not wording, so both
+ * sides are compared with every run of whitespace collapsed to one space.
+ * Nothing else is normalised: punctuation and the em dash must match exactly.
+ */
+const words = (text: string) => text.replace(/\s+/g, " ").trim();
+const BRIEF = words(SYSTEM_INSTRUCTION);
+
+/** The CP1 v6 §8 replacement text, word for word, its paragraphs in order. */
+const APPROVED_SECTION_8 = [
+  "Keep each of those three under 1200 characters and the executive summary under 2000.",
+  "THE EXECUTIVE SUMMARY",
+  "The report already shows the list of findings, their severities, every measurement, the scores and the recommended actions, each produced by code. Do not repeat any of them. The executive summary has one job: to explain, in plain and professional language, what the verified findings mean for the website and the business that owns it, including their implications for visitors, search visibility, trust and protection, and website performance—but only in the areas the findings actually concern.",
+  "Describe the overall picture rather than walking through the findings one by one. Do not list findings, quote measurements, scores, page counts or percentages, or restate the recommendations. Do not speculate beyond the findings, predict results, or promise outcomes. A check that could not be completed is neither a problem nor a pass, and must not be described as either.",
+  "If the audit produced no findings, that is a good result and the summary should say so plainly. Do not manufacture concerns to fill the space. The summary follows every rule above.",
+].join(" ");
+
+test("F21: the brief states the executive summary's one job, exactly, with a true em dash", () => {
+  assert.ok(BRIEF.includes(
+    "The executive summary has one job: to explain, in plain and professional language, what the verified findings mean for the website and the business that owns it, including their implications for visitors, search visibility, trust and protection, and website performance—but only in the areas the findings actually concern.",
+  ));
+  assert.ok(SYSTEM_INSTRUCTION.includes("performance—but"), "U+2014, not a substitute");
+  assert.ok(!SYSTEM_INSTRUCTION.includes("performance--but"));
+});
+
+test("F21: the brief tells the model not to repeat what code already produced", () => {
+  assert.ok(BRIEF.includes(
+    "The report already shows the list of findings, their severities, every measurement, the scores and the recommended actions, each produced by code. Do not repeat any of them.",
+  ));
+});
+
+test("F21: the brief keeps the no-findings paragraph, now ending with the rule that it follows every rule above", () => {
+  assert.ok(BRIEF.includes(
+    "If the audit produced no findings, that is a good result and the summary should say so plainly. Do not manufacture concerns to fill the space. The summary follows every rule above.",
+  ));
+});
+
+test("F21: the whole approved replacement appears as one passage, between the per-finding guidance and the JSON instruction", () => {
+  assert.ok(BRIEF.includes(APPROVED_SECTION_8), "the §8 text, contiguous and in order");
+  // In its place: straight after the per-finding guidance, straight before the closing instruction.
+  assert.ok(BRIEF.includes(`No blame, no scare tactics, no sales pitch. ${APPROVED_SECTION_8} Answer with JSON matching the supplied schema, and nothing else.`));
+  assert.ok(BRIEF.endsWith("Answer with JSON matching the supplied schema, and nothing else."), "the closing instruction is unchanged");
+  // THE EXECUTIVE SUMMARY is a heading on its own line, like the brief's other headings.
+  assert.ok(SYSTEM_INSTRUCTION.includes("\n\nTHE EXECUTIVE SUMMARY\n\n"));
+});
+
+test("F21: the replaced sentence is gone", () => {
+  assert.ok(!BRIEF.includes("The summary describes the audit as a whole"));
+});

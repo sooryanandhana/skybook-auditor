@@ -23,6 +23,7 @@
  * revision 9 are pinned there literally.
  */
 import type {
+  AreaStatus,
   PdfChecklist,
   PdfChecklistItem,
   PdfDocument,
@@ -39,6 +40,19 @@ import { findingCardsHtml } from "./findings.ts";
 // ---------------------------------------------------------------------------
 // Wording
 // ---------------------------------------------------------------------------
+
+/**
+ * Each area status in words. Equal to `AREA_STATUS_LABELS` in
+ * lib/report/overallSummary.ts (CP3 C3, R6). Shared with the Executive Summary,
+ * so the report names a status the same way wherever it prints one.
+ */
+export const AREA_STATUS_LABEL_TEXT: Readonly<Record<AreaStatus, string>> = {
+  good: "In good shape",
+  improve: "Room for improvement",
+  attention: "Needs attention",
+  incomplete: "Partly checked",
+  "not-measured": "Not measured",
+};
 
 /** The three sections' printed headings (CP3 revision 9, §4). */
 export const CATEGORY_SECTION_HEADINGS = {
@@ -306,8 +320,15 @@ function crawlTableHtml(doc: PdfDocument): string {
  * configured limits, which are settings rather than measurements.
  */
 export function technicalSectionHtml(doc: PdfDocument): string {
-  // From the overall summary only. A certificate failure has none yet (3a-Q1).
-  const status = doc.overallSummary?.areas.find((area) => area.key === "site")?.statusLabel ?? null;
+  /*
+   * From the overall summary when there is one; a certificate failure has
+   * none, and takes its Technical status from the model's own certificate-
+   * failure statuses instead (CP3 step 3b-ii, B16). Never worked out here.
+   */
+  const fallback = doc.certificateFailureAreas;
+  const status =
+    doc.overallSummary?.areas.find((area) => area.key === "site")?.statusLabel ??
+    (fallback === null ? null : AREA_STATUS_LABEL_TEXT[fallback.technical]);
   const files = doc.technicalFiles;
 
   const body =

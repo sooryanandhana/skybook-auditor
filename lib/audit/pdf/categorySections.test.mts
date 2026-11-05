@@ -32,7 +32,9 @@ import {
   seoSectionHtml,
   siteIssueLine,
   technicalSectionHtml,
+  AREA_STATUS_LABEL_TEXT,
 } from "./categorySections.ts";
+import { AREA_STATUS_LABELS } from "../../report/overallSummary.ts";
 import { documentHtml } from "./shell.ts";
 import { HOSTILE, testDocument } from "./testDocument.fixture.mts";
 import { runRealAudit, runRealCertificateFailure, type FakeSite } from "./realAudit.fixture.mts";
@@ -570,7 +572,7 @@ test("a real audit whose counts do not reconcile: no crawl table and no coverage
   assert.ok(out.includes(doc.configuredLimitsSentence), "the configured limits stay");
 });
 
-test("a real certificate failure: page checks not checked, site lines and cards, no measurement, no table, no status", async () => {
+test("a real certificate failure: page checks not checked, site lines and cards, no measurement, no table, the M6 status", async () => {
   const { certificate } = await realAudits;
   const doc = documentOf(certificate);
 
@@ -590,6 +592,43 @@ test("a real certificate failure: page checks not checked, site lines and cards,
 
   const technical = technicalSectionHtml(doc);
   assert.ok(!technical.includes("<table"), "no crawl table");
-  assert.ok(!technical.includes("section-status"), "the certificate-failure status arrives in step 3b");
+  // B16 (CP3 step 3b-ii): the Technical status comes from the model's certificate-failure statuses.
+  assert.ok(doc.certificateFailureAreas !== null);
+  const label = AREA_STATUS_LABEL_TEXT[doc.certificateFailureAreas.technical];
+  assert.ok(
+    technical.includes(`<p class="lead">${CATEGORY_SECTION_INTROS.technical}</p><p class="section-status">${label}</p>`),
+    "the certificate-failure Technical status, alone, straight after the introduction",
+  );
   assert.ok(text(technical).includes("Search engine access (robots.txt)"));
+});
+
+// ---------------------------------------------------------------------------
+// CP3 step 3b-ii: the shared status labels and the B16 fallback
+// ---------------------------------------------------------------------------
+
+test("3b-ii: the area status labels are the report layer's own", () => {
+  assert.deepEqual(AREA_STATUS_LABEL_TEXT, AREA_STATUS_LABELS);
+});
+
+test("3b-ii B16: every certificate-failure Technical status is printed with its own label", () => {
+  for (const status of ["good", "improve", "attention", "incomplete", "not-measured"] as const) {
+    const doc = testDocument({
+      overallSummary: null,
+      certificateFailureAreas: { seo: "not-measured", security: "attention", speed: "not-measured", technical: status },
+    });
+    assert.ok(
+      technicalSectionHtml(doc).includes(`<p class="section-status">${AREA_STATUS_LABELS[status]}</p>`),
+      status,
+    );
+  }
+});
+
+test("3b-ii B16: the overall summary's own Technical status still wins whenever there is one", () => {
+  const doc = testDocument({
+    overallSummary: summaryWith("Room for improvement"),
+    certificateFailureAreas: { seo: "not-measured", security: "good", speed: "not-measured", technical: "attention" },
+  });
+  const out = technicalSectionHtml(doc);
+  assert.ok(out.includes(`<p class="section-status">Room for improvement</p>`));
+  assert.ok(!out.includes("Needs attention"));
 });

@@ -32,6 +32,15 @@ import { buildPdfDocument, type PdfDocument } from "../pdfDocument.ts";
 import { createJobStore } from "../../jobs/jobStore.ts";
 import type { ExplainResult } from "../../ai/gemini/explain.ts";
 import type { AuditResult, SiteAuditResult, SpeedResult } from "../../types.ts";
+// CP4 stage 4c.
+import { REAL_VISITOR_REFERENCE } from "./limitations.ts";
+import { explainsRealVisitorData } from "./speed.ts";
+import {
+  REAL_VISITOR_HEADING,
+  REAL_VISITOR_REFERENCE as APPROVED_REAL_VISITOR_REFERENCE,
+  realVisitorExplanation,
+} from "../../report/reportSections.ts";
+import type { PdfSpeed } from "../pdfDocument.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -386,4 +395,87 @@ test("wired (CP3 step 4b): the document closes with this section, once, and the 
   assert.ok(pageHtml.includes(`${limitationsSectionHtml(doc)}</main>`), "last inside main, unchanged");
   assert.ok(!pageHtml.includes("<h2>About this report</h2>"), "no standalone About section");
   assert.ok(!pageHtml.includes(`<section class="skipped">`), "no standalone skipped section");
+});
+
+// ---------------------------------------------------------------------------
+// CP4 stage 4c: the short real-visitor reference (decision record rev. 3: P-7, P-8, P-10, U-5)
+// ---------------------------------------------------------------------------
+
+const REFERENCE = `<p>${escapeHtml(APPROVED_REAL_VISITOR_REFERENCE)}</p>`;
+
+/** A measured speed result with the parts that decide the reference; the rest is fixed. */
+const speedOf = (over: { fieldAvailable: boolean; labAvailable: boolean; labScore: number | null }): PdfSpeed => ({
+  measured: true, status: "checked", device: "Mobile simulation", overall: null,
+  fieldAvailable: over.fieldAvailable, field: [], labAvailable: over.labAvailable, labScore: over.labScore, lab: [],
+  notInspected: [], measuredAddress: "https://example.com/",
+});
+const NOT_MEASURED: PdfSpeed = { measured: false, status: "not-requested", message: "Speed was not measured." };
+
+test("CP4 4c: the reference is the approved wording, word for word", () => {
+  assert.equal(REAL_VISITOR_REFERENCE, APPROVED_REAL_VISITOR_REFERENCE);
+  assert.equal(
+    REAL_VISITOR_REFERENCE,
+    "Google's real-visitor speed data was not available for this site; see Speed & Performance for what this means.",
+  );
+});
+
+test("CP4 4c: the reference prints if and only if the explanation prints and mobile has no real-visitor data", () => {
+  const cases: Array<[string, PdfSpeed, PdfSpeed | null, boolean]> = [
+    ["mobile not measured", NOT_MEASURED, null, false],
+    ["real-visitor data and a score", speedOf({ fieldAvailable: true, labAvailable: true, labScore: 74 }), null, false],
+    ["real-visitor data, no score", speedOf({ fieldAvailable: true, labAvailable: false, labScore: null }), null, false],
+    ["no real-visitor data, a score", speedOf({ fieldAvailable: false, labAvailable: true, labScore: 74 }), null, true],
+    ["no real-visitor data, simulated rows without a score", speedOf({ fieldAvailable: false, labAvailable: true, labScore: null }), null, false],
+    ["no real-visitor data, failed simulation", speedOf({ fieldAvailable: false, labAvailable: false, labScore: null }), null, false],
+    // Desktop is never read (P-10).
+    ["desktop alone has no real-visitor data", NOT_MEASURED, speedOf({ fieldAvailable: false, labAvailable: true, labScore: 74 }), false],
+    ["mobile decides even when desktop has data", speedOf({ fieldAvailable: false, labAvailable: true, labScore: 74 }), speedOf({ fieldAvailable: true, labAvailable: true, labScore: 74 }), true],
+    ["mobile has data, desktop has none", speedOf({ fieldAvailable: true, labAvailable: true, labScore: 74 }), speedOf({ fieldAvailable: false, labAvailable: true, labScore: 74 }), false],
+  ];
+  for (const [name, speed, desktopSpeed, expected] of cases) {
+    const out = render({ speed, desktopSpeed });
+    assert.equal(count(out, REFERENCE), expected ? 1 : 0, name);
+    // Never without the explanation it points to (U-1 option i).
+    if (expected) assert.ok(explainsRealVisitorData(speed), `${name}: the explanation prints too`);
+  }
+});
+
+test("CP4 4c: the reference is a plain paragraph after the skipped checks and before the pages that could not be checked", () => {
+  const out = render({
+    skipped: SKIPPED,
+    coverageCounts: { ...COUNTS, unavailable: 2 },
+    speed: speedOf({ fieldAvailable: false, labAvailable: true, labScore: 74 }),
+  });
+  assert.equal(count(out, REFERENCE), 1);
+  assert.ok(out.indexOf(skippedGroupsHtml(SKIPPED.groups)) < out.indexOf(REFERENCE), "after the skipped checks");
+  assert.ok(out.indexOf(REFERENCE) < out.indexOf(h3(LIMITATIONS_SUBHEADINGS.pages)), "before the pages that could not be checked");
+  assert.ok(out.includes(skippedGroupsHtml(SKIPPED.groups) + REFERENCE + h3(LIMITATIONS_SUBHEADINGS.pages)), "nothing between, and no heading of its own");
+});
+
+test("CP4 4c: apart from the reference, the section is exactly what it was", () => {
+  for (const over of [
+    {},
+    { skipped: SKIPPED, coverageCounts: { ...COUNTS, unavailable: 2 } },
+    { coverage: { ...testDocument().coverage, partial: true, stopReason: "STOP-REASON" }, coverageCounts: null },
+  ] as Array<Partial<PdfDocument>>) {
+    const before = render({ ...over, speed: NOT_MEASURED });
+    const after = render({ ...over, speed: speedOf({ fieldAvailable: false, labAvailable: true, labScore: 74 }) });
+    assert.notEqual(after, before, "the reference was added");
+    assert.equal(after.replace(REFERENCE, ""), before);
+  }
+});
+
+test("CP4 4c: the full explanation is never repeated in Limitations", () => {
+  const out = render({ speed: speedOf({ fieldAvailable: false, labAvailable: true, labScore: 74 }) });
+  assert.ok(!out.includes(escapeHtml(REAL_VISITOR_HEADING)));
+  for (const paragraph of realVisitorExplanation("https://example.com/")) {
+    assert.ok(!out.includes(escapeHtml(paragraph)), paragraph.slice(0, 40));
+  }
+});
+
+test("CP4 4c: a real certificate failure has no reference", async () => {
+  const { certificate } = await fixtures;
+  const doc = documentOf(certificate);
+  assert.equal(doc.speed.measured, false);
+  assert.ok(!limitationsSectionHtml(doc).includes(REFERENCE));
 });

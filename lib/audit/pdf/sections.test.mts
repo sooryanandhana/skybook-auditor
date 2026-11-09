@@ -9,16 +9,28 @@
  */
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { speedHtml } from "./speed.ts";
+import {
+  GLOSSARY,
+  GLOSSARY_HEADING,
+  GLOSSARY_ORDER,
+  REAL_VISITOR_HEADING as REAL_VISITOR_HEADING_RENDERED,
+  explainsRealVisitorData,
+  realVisitorParagraphs,
+  speedHtml,
+} from "./speed.ts";
+import { escapeHtml } from "./escape.ts";
+import { REAL_VISITOR_HEADING, SPEED_GLOSSARY, SPEED_GLOSSARY_HEADING, realVisitorExplanation } from "../../report/reportSections.ts";
 import { skippedGroupsHtml, skippedHtml } from "./skipped.ts";
 import { COVERAGE_DETAIL_HEADING, MEASURED_HEADING, factSectionsHtml } from "./factSections.ts";
 import { aboutClausesHtml, aboutHtml } from "./about.ts";
 import { testDocument } from "./testDocument.fixture.mts";
-import type { PdfLabels, PdfMetric, PdfSpeed } from "../pdfDocument.ts";
+import type { PdfLabels, PdfMetric, PdfSpeed, PdfSpeedMetricKey } from "../pdfDocument.ts";
 
 const LABELS: PdfLabels = testDocument().labels;
 
-const metric = (label: string, value: string | null, rating: string | null = null): PdfMetric => ({
+/** The key is passed explicitly, as `toSpeed` sets it; never worked out from the label. */
+const metric = (key: PdfSpeedMetricKey, label: string, value: string | null, rating: string | null = null): PdfMetric => ({
+  key,
   label,
   value,
   rating,
@@ -30,11 +42,12 @@ const measured = (over: Partial<Extract<PdfSpeed, { measured: true }>> = {}): Pd
   device: "Mobile simulation",
   overall: "Slow",
   fieldAvailable: true,
-  field: [metric("LCP", "4.20 s", "Poor"), metric("CLS", "0.250", "Needs work")],
+  field: [metric("lcp", "LCP", "4.20 s", "Poor"), metric("cls", "CLS", "0.250", "Needs work")],
   labAvailable: true,
   labScore: 31,
-  lab: [metric("LCP", "5.10 s"), metric("TBT", "890 ms")],
+  lab: [metric("lcp", "LCP", "5.10 s"), metric("tbt", "TBT", "890 ms")],
   notInspected: ["Pages other than the address measured."],
+  measuredAddress: "https://example.com/",
   ...over,
 });
 
@@ -141,7 +154,7 @@ test("an unavailable half is omitted rather than shown empty", () => {
 
 test("a metric Google did not report reads as such, never as zero", () => {
   // 7A §10 and §14. An absence of knowledge never becomes a bad number.
-  const out = speedHtml(measured({ field: [metric("LCP", "Not reported", null)] }), LABELS);
+  const out = speedHtml(measured({ field: [metric("lcp", "LCP", "Not reported", null)] }), LABELS);
 
   assert.ok(out.includes("Not reported"));
   assert.ok(!out.includes(">0<"));
@@ -498,4 +511,162 @@ test("speed without a desktop result is the section it has always been", () => {
   const doc = testDocument();
   assert.equal(speedHtml(doc.speed, doc.labels, null), speedHtml(doc.speed, doc.labels));
   assert.ok(!speedHtml(doc.speed, doc.labels).includes("speed-device"));
+});
+
+// ---------------------------------------------------------------------------
+// CP4 stage 4b: the glossary and the real-visitor explanation (decision record rev. 3)
+//
+// The expected block is built from the ORIGINAL wording in reportSections.ts,
+// never from the renderer's copies, so a drift in either is caught.
+// ---------------------------------------------------------------------------
+
+/** Every real-visitor row and every simulated row, as toSpeed builds them. */
+const ALL_FIELD = [
+  metric("lcp", "LCP", "2.40 s", "Needs work"), metric("inp", "INP", "180 ms", "Good"), metric("cls", "CLS", "0.12", "Needs work"),
+  metric("fcp", "FCP", "1.80 s", "Needs work"), metric("ttfb", "TTFB", "700 ms", "Needs work"),
+];
+const ALL_LAB = [
+  metric("lcp", "LCP", "3.10 s"), metric("fcp", "FCP", "1.20 s"), metric("tbt", "TBT", "240 ms"),
+  metric("speedIndex", "Speed Index", "2.60 s"), metric("cls", "CLS", "0.045"),
+];
+
+const NOT_MEASURED: PdfSpeed = { measured: false, status: "not-requested", message: "Speed was not measured. It is an optional extra check." };
+
+/** The glossary block the approved wording gives for these keys, in the approved order. */
+function expectedGlossary(keys: ReadonlyArray<keyof typeof SPEED_GLOSSARY>): string {
+  const order = Object.keys(SPEED_GLOSSARY) as Array<keyof typeof SPEED_GLOSSARY>;
+  const items = order.filter((key) => keys.includes(key)).map((key) => `<li>${escapeHtml(SPEED_GLOSSARY[key])}</li>`).join("");
+  return `<div class="speed-glossary"><h3>${escapeHtml(SPEED_GLOSSARY_HEADING)}</h3><ul>${items}</ul></div>`;
+}
+
+/** The explanation block the approved wording gives for this address. */
+function expectedExplanation(url: string): string {
+  const paragraphs = realVisitorExplanation(url).map((p) => `<p>${escapeHtml(p)}</p>`).join("");
+  return `<div class="speed-real-visitor"><h3>${escapeHtml(REAL_VISITOR_HEADING)}</h3>${paragraphs}</div>`;
+}
+
+/** Which glossary entries a section prints, by key, in printed order. */
+function glossaryKeysIn(out: string): string[] {
+  const block = /<div class="speed-glossary">[\s\S]*?<\/div>/.exec(out)?.[0] ?? "";
+  return (Object.keys(SPEED_GLOSSARY) as Array<keyof typeof SPEED_GLOSSARY>)
+    .map((key) => [key, block.indexOf(`<li>${escapeHtml(SPEED_GLOSSARY[key])}</li>`)] as const)
+    .filter(([, at]) => at >= 0)
+    .sort((a, b) => a[1] - b[1])
+    .map(([key]) => key);
+}
+
+const explains = (out: string) => out.includes(`<h3>${escapeHtml(REAL_VISITOR_HEADING)}</h3>`);
+
+/**
+ * The Speed section as it was printed before CP4, for the same inputs, taken
+ * from the CP3 step 0 baseline (A1, A3): everything up to the closing tag.
+ */
+const A1_BEFORE_CLOSE =
+  `<section class="speed"><h2>Speed</h2><div class="speed-block"><h3>Real visitors</h3><p class="note">Slow</p><table class="facts"><thead><tr><th scope="col">Metric</th><th scope="col">Result</th><th scope="col">Rating</th></tr></thead><tbody><tr><th scope="row">LCP</th><td>4.20 s</td><td>Poor</td></tr><tr><th scope="row">CLS</th><td>0.250</td><td>Needs work</td></tr></tbody></table></div><div class="speed-block"><h3>Simulated load</h3><p class="note">Mobile simulation</p><p class="speed-score">31<span class="speed-score-of"> / 100</span></p><table class="facts"><thead><tr><th scope="col">Metric</th><th scope="col">Result</th></tr></thead><tbody><tr><th scope="row">LCP</th><td>5.10 s</td></tr><tr><th scope="row">TBT</th><td>890 ms</td></tr></tbody></table></div><div class="speed-limits"><p class="caveat-label">What this does not cover</p><ul class="caveat-list"><li>Pages other than the address measured.</li></ul></div>`;
+const A3_BEFORE_CLOSE =
+  `<section class="speed"><h2>Speed</h2><p class="lead">Mobile and desktop speed are measured separately and can differ. Real-visitor results come from Google's records of real visits. The simulated score comes from a single test load, which Google classes as good (90–100), needs improvement (50–89) or poor (below 50); it helps to find problems but does not measure every visitor's experience.</p><div class="speed-device"><h3 class="sub">Mobile</h3><div class="speed-block"><h3>Real visitors</h3><p class="note">Slow</p><table class="facts"><thead><tr><th scope="col">Metric</th><th scope="col">Result</th><th scope="col">Rating</th></tr></thead><tbody><tr><th scope="row">LCP</th><td>4.20 s</td><td>Poor</td></tr><tr><th scope="row">CLS</th><td>0.250</td><td>Needs work</td></tr></tbody></table></div><div class="speed-block"><h3>Simulated load</h3><p class="note">Mobile simulation</p><p class="speed-score">31<span class="speed-score-of"> / 100</span></p><table class="facts"><thead><tr><th scope="col">Metric</th><th scope="col">Result</th></tr></thead><tbody><tr><th scope="row">LCP</th><td>5.10 s</td></tr><tr><th scope="row">TBT</th><td>890 ms</td></tr></tbody></table></div><div class="speed-limits"><p class="caveat-label">What this does not cover</p><ul class="caveat-list"><li>Pages other than the address measured.</li></ul></div></div><div class="speed-device"><h3 class="sub">Desktop</h3><p class="lead">DESKTOP-NOT-MEASURED</p></div>`;
+
+test("CP4 4b: the renderer's wording is the approved wording in reportSections.ts", () => {
+  assert.equal(GLOSSARY_HEADING, SPEED_GLOSSARY_HEADING);
+  assert.deepEqual({ ...GLOSSARY }, { ...SPEED_GLOSSARY });
+  assert.deepEqual(GLOSSARY_ORDER, Object.keys(SPEED_GLOSSARY), "U-2: the SPEED_GLOSSARY order");
+  assert.deepEqual(GLOSSARY_ORDER.map((key) => GLOSSARY[key].split(":")[0]), ["LCP (Largest Contentful Paint)", "FCP (First Contentful Paint)", "TBT (Total Blocking Time)", "Speed Index", "CLS (Cumulative Layout Shift)", "INP (Interaction to Next Paint)", "TTFB (Time to First Byte)"]);
+  assert.equal(REAL_VISITOR_HEADING_RENDERED, REAL_VISITOR_HEADING);
+  for (const url of ["https://example.com/", "https://example.com/shop?a=1&b=2", "https://www.example.org/path/<x>"]) {
+    assert.deepEqual(realVisitorParagraphs(url), realVisitorExplanation(url), url);
+  }
+});
+
+test("CP4 4b: R1 and N1 are printed word for word", () => {
+  const out = speedHtml(measured({ field: ALL_FIELD }), LABELS);
+  assert.ok(out.includes(`<li>${escapeHtml("INP (Interaction to Next Paint): how quickly the page responds visually after a visitor interacts with it, such as clicking a button or tapping a menu.")}</li>`), "R1");
+  assert.ok(out.includes(`<li>${escapeHtml("TTFB (Time to First Byte): how long it takes for the server to begin sending a response after a visitor requests a page.")}</li>`), "N1");
+});
+
+test("CP4 4b: a measured section is exactly what it was, with the block appended before the closing tag", () => {
+  // A1: mobile only. Printed rows: LCP, CLS (real visitors), LCP, TBT (simulated).
+  assert.equal(
+    speedHtml(measured(), LABELS, null),
+    A1_BEFORE_CLOSE + expectedGlossary(["lcp", "cls", "tbt"]) + expectedExplanation("https://example.com/") + `</section>`,
+  );
+  // A3: mobile measured, desktop not. The block follows both device parts, once.
+  assert.equal(
+    speedHtml(measured(), LABELS, { measured: false, status: "error", message: "DESKTOP-NOT-MEASURED" }),
+    A3_BEFORE_CLOSE + expectedGlossary(["lcp", "cls", "tbt"]) + expectedExplanation("https://example.com/") + `</section>`,
+  );
+});
+
+test("CP4 4b: with nothing measured on either device nothing is appended, byte for byte", () => {
+  assert.equal(speedHtml(NOT_MEASURED, LABELS), `<section class="speed"><h2>Speed</h2><p class="lead">Speed was not measured. It is an optional extra check.</p></section>`);
+  for (const status of ["not-requested", "pending", "no-api-key", "error"] as const) {
+    const out = speedHtml({ measured: false, status, message: `M-${status}` }, LABELS, { measured: false, status, message: "D" });
+    assert.ok(!out.includes("speed-glossary") && !out.includes("speed-real-visitor"), status);
+  }
+});
+
+test("CP4 4b: a glossary entry appears exactly when its metric row is printed (P-3)", () => {
+  const cases: Array<[string, PdfSpeed, PdfSpeed | null, string[]]> = [
+    ["real visitors only", measured({ field: ALL_FIELD, labAvailable: false, lab: [], labScore: null }), null, ["lcp", "fcp", "cls", "inp", "ttfb"]],
+    ["simulated only", measured({ fieldAvailable: false, field: [], lab: ALL_LAB }), null, ["lcp", "fcp", "tbt", "speedIndex", "cls"]],
+    ["both halves", measured({ field: ALL_FIELD, lab: ALL_LAB }), null, ["lcp", "fcp", "tbt", "speedIndex", "cls", "inp", "ttfb"]],
+    // Rows that are carried but not printed (their half is unavailable) bring no entry.
+    ["real-visitor rows not printed", measured({ fieldAvailable: false, field: ALL_FIELD, lab: [metric("tbt", "TBT", "240 ms")] }), null, ["tbt"]],
+    ["simulated rows not printed", measured({ field: [metric("inp", "INP", "180 ms", "Good")], labAvailable: false, lab: ALL_LAB }), null, ["inp"]],
+    ["nothing printed on mobile", measured({ fieldAvailable: false, field: [], labAvailable: false, lab: [], labScore: null }), null, []],
+  ];
+  for (const [name, mobile, desktop, keys] of cases) {
+    const out = speedHtml(mobile, LABELS, desktop);
+    assert.deepEqual(glossaryKeysIn(out), keys, name);
+    if (keys.length === 0) assert.ok(!out.includes("speed-glossary"), `${name}: no glossary at all`);
+  }
+});
+
+test("CP4 4b: rows reading \"Not reported\" or nothing still count as printed (P-3)", () => {
+  const out = speedHtml(
+    measured({ field: [metric("ttfb", "TTFB", "Not reported", null)], lab: [metric("speedIndex", "Speed Index", null)] }),
+    LABELS,
+  );
+  assert.deepEqual(glossaryKeysIn(out), ["speedIndex", "ttfb"]);
+});
+
+test("CP4 4b: one glossary covers the metrics printed on either device, in the approved order (P-2, U-2)", () => {
+  const mobile = measured({ field: [metric("inp", "INP", "180 ms", "Good")], labAvailable: false, lab: [], labScore: null });
+  const desktop = measured({ device: "Desktop simulation", fieldAvailable: false, field: [], lab: [metric("tbt", "TBT", "240 ms"), metric("lcp", "LCP", "3.10 s")] });
+  const out = speedHtml(mobile, LABELS, desktop);
+  assert.deepEqual(glossaryKeysIn(out), ["lcp", "tbt", "inp"]);
+  assert.equal(out.split(`<div class="speed-glossary">`).length - 1, 1, "one glossary");
+  assert.ok(out.indexOf("speed-glossary") > out.lastIndexOf(`<div class="speed-device">`), "after both devices");
+  assert.ok(out.endsWith(`</div></section>`) && out.indexOf("speed-glossary") < out.indexOf("</section>"), "inside the section");
+});
+
+test("CP4 4b: the explanation prints if and only if the MOBILE result is measured with real-visitor data or a simulated score (P-4)", () => {
+  const cases: Array<[string, PdfSpeed, PdfSpeed | null, boolean]> = [
+    ["mobile not measured", NOT_MEASURED, null, false],
+    ["real-visitor data, no score", measured({ labAvailable: false, lab: [], labScore: null }), null, true],
+    ["no real-visitor data, a score", measured({ fieldAvailable: false, field: [], labScore: 31 }), null, true],
+    ["both", measured(), null, true],
+    ["no real-visitor data, simulated rows but no score", measured({ fieldAvailable: false, field: [], labScore: null, lab: ALL_LAB }), null, false],
+    // Desktop never decides it, either way.
+    ["desktop measured, mobile not", NOT_MEASURED, measured({ device: "Desktop simulation" }), false],
+    ["desktop has data, mobile has neither", measured({ fieldAvailable: false, field: [], labScore: null }), measured({ device: "Desktop simulation" }), false],
+    ["mobile has data, desktop not measured", measured(), { measured: false, status: "error", message: "D" }, true],
+  ];
+  for (const [name, mobile, desktop, expected] of cases) {
+    const out = speedHtml(mobile, LABELS, desktop);
+    assert.equal(explains(out), expected, name);
+    assert.equal(explainsRealVisitorData(mobile), expected, `${name}: the rule itself`);
+  }
+});
+
+test("CP4 4b: when it prints, the explanation appears once, all three paragraphs, with the mobile address", () => {
+  const mobile = measured({ measuredAddress: "https://example.com/shop?item=7&ref=mail" });
+  const desktop = measured({ device: "Desktop simulation", measuredAddress: "https://desktop.example.net/" });
+  const out = speedHtml(mobile, LABELS, desktop);
+  assert.equal(out.split(`<h3>${escapeHtml(REAL_VISITOR_HEADING)}</h3>`).length - 1, 1, "once");
+  assert.ok(out.includes(expectedExplanation("https://example.com/shop?item=7&ref=mail")), "the three paragraphs, query kept, escaped");
+  assert.ok(!out.includes("desktop.example.net"), "never the desktop address");
+  // P-11: the third paragraph is printed as approved even with no desktop result.
+  assert.ok(speedHtml(mobile, LABELS).includes(`<p>${escapeHtml("Speed is measured on https://example.com/shop?item=7&ref=mail. Desktop results are shown for information and do not affect the grade.")}</p>`));
+  // The glossary comes first, then the explanation.
+  assert.ok(out.indexOf("speed-glossary") < out.indexOf("speed-real-visitor"));
 });

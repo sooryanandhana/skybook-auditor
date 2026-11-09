@@ -614,7 +614,16 @@ export interface PdfSkipped {
   readonly groups: readonly PdfSkippedGroup[];
 }
 
+/**
+ * Which speed metric a row is (CP4, decision P-6). An identifier, not wording:
+ * the Speed renderer maps it to its glossary entry, so no printed label is ever
+ * matched. The values are the keys of `SPEED_GLOSSARY` in lib/report/reportSections.ts.
+ */
+export type PdfSpeedMetricKey = "lcp" | "inp" | "cls" | "fcp" | "ttfb" | "tbt" | "speedIndex";
+
 export interface PdfMetric {
+  /** Set where the row is built, in `toSpeed`; never derived from the label. */
+  readonly key: PdfSpeedMetricKey;
   readonly label: string;
   /** Display-ready, or null where the panel shows nothing. */
   readonly value: string | null;
@@ -649,6 +658,11 @@ export type PdfSpeed =
       readonly lab: readonly PdfMetric[];
       /** What the speed check cannot tell you. */
       readonly notInspected: readonly string[];
+      /**
+       * The address the speed check was asked to measure, with any username and
+       * password removed (CP4, decision P-5). Data, not wording; no fallback.
+       */
+      readonly measuredAddress: string;
     };
 
 export interface PdfDocument {
@@ -1146,10 +1160,12 @@ function toSpeed(performance: AuditData["performance"]): PdfSpeed {
   const lab = performance.lab;
 
   const fieldMetric = (
+    key: PdfSpeedMetricKey,
     label: string,
     value: string | null,
     rating?: PerformanceRating,
   ): PdfMetric => ({
+    key,
     label,
     value: value ?? METRIC_NOT_REPORTED,
     rating: rating === undefined ? null : ratingLabel(rating),
@@ -1164,11 +1180,11 @@ function toSpeed(performance: AuditData["performance"]): PdfSpeed {
     field:
       field.status === "found"
         ? [
-            fieldMetric("LCP", metricDurationText(field.lcp?.percentileMs), field.lcp?.category),
-            fieldMetric("INP", metricDurationText(field.inp?.percentileMs), field.inp?.category),
-            fieldMetric("CLS", fieldShiftText(field.cls), field.cls?.category),
-            fieldMetric("FCP", metricDurationText(field.fcp?.percentileMs), field.fcp?.category),
-            fieldMetric("TTFB", metricDurationText(field.ttfb?.percentileMs), field.ttfb?.category),
+            fieldMetric("lcp", "LCP", metricDurationText(field.lcp?.percentileMs), field.lcp?.category),
+            fieldMetric("inp", "INP", metricDurationText(field.inp?.percentileMs), field.inp?.category),
+            fieldMetric("cls", "CLS", fieldShiftText(field.cls), field.cls?.category),
+            fieldMetric("fcp", "FCP", metricDurationText(field.fcp?.percentileMs), field.fcp?.category),
+            fieldMetric("ttfb", "TTFB", metricDurationText(field.ttfb?.percentileMs), field.ttfb?.category),
           ]
         : [],
     labAvailable: lab.status !== "error",
@@ -1177,13 +1193,14 @@ function toSpeed(performance: AuditData["performance"]): PdfSpeed {
       lab.status === "error"
         ? []
         : [
-            { label: "LCP", value: metricDurationText(lab.lcpMs), rating: null },
-            { label: "FCP", value: metricDurationText(lab.fcpMs), rating: null },
-            { label: "TBT", value: metricDurationText(lab.tbtMs), rating: null },
-            { label: "Speed Index", value: metricDurationText(lab.speedIndexMs), rating: null },
-            { label: "CLS", value: labShiftText(lab.cls), rating: null },
+            { key: "lcp", label: "LCP", value: metricDurationText(lab.lcpMs), rating: null },
+            { key: "fcp", label: "FCP", value: metricDurationText(lab.fcpMs), rating: null },
+            { key: "tbt", label: "TBT", value: metricDurationText(lab.tbtMs), rating: null },
+            { key: "speedIndex", label: "Speed Index", value: metricDurationText(lab.speedIndexMs), rating: null },
+            { key: "cls", label: "CLS", value: labShiftText(lab.cls), rating: null },
           ],
     notInspected: [...performance.notInspected],
+    measuredAddress: withoutCredentials(performance.requestedUrl),
   };
 }
 

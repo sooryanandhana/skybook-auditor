@@ -1081,6 +1081,123 @@ test("an unreported speed metric uses the shared wording", () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// CP4 stage 4a: the metric key and the measured address (decision record rev. 3, P-5, P-6, P-9)
+// ---------------------------------------------------------------------------
+
+/** A checked mobile speed result, with the real-visitor and simulated halves as given. */
+function checkedSpeed(over: { requestedUrl?: string; fieldFound?: boolean; labFound?: boolean } = {}): SpeedResult {
+  const fieldFound = over.fieldFound ?? true;
+  const labFound = over.labFound ?? true;
+  return {
+    data: {
+      status: "checked", strategy: "mobile", requestedUrl: over.requestedUrl ?? "https://example.com/", failureReason: null,
+      field: fieldFound
+        ? {
+            status: "found", measuredUrl: "https://example.com/", scope: "page", overall: "AVERAGE",
+            lcp: { percentileMs: 2400, category: "AVERAGE" }, inp: { percentileMs: 180, category: "FAST" },
+            cls: { percentile: 0.12, category: "AVERAGE" }, fcp: { percentileMs: 1800, category: "AVERAGE" },
+            ttfb: { percentileMs: 700, category: "AVERAGE" }, error: null,
+          }
+        : { status: "absent", measuredUrl: null, scope: null, overall: null, lcp: null, inp: null, cls: null, fcp: null, ttfb: null, error: null },
+      lab: labFound
+        ? { status: "found", measuredUrl: "https://example.com/", score: 74, lcpMs: 3100, fcpMs: 1200, tbtMs: 240, speedIndexMs: 2600, cls: 0.045, error: null }
+        : { status: "error", measuredUrl: null, score: null, lcpMs: null, fcpMs: null, tbtMs: null, speedIndexMs: null, cls: null, error: "No lab result." },
+      notInspected: [], message: "Measured.",
+    },
+    findings: [], skippedChecks: [],
+  } as unknown as SpeedResult;
+}
+
+test("CP4 4a: every speed row carries its structured key, set where the row is built", () => {
+  const { store, jobId } = jobWith();
+  store.attach(jobId, checkedSpeed());
+  const doc = documentFor(store, jobId);
+  assert.ok(doc.speed.measured);
+  if (!doc.speed.measured) return;
+
+  // Keys and labels together, in the order toSpeed builds them.
+  assert.deepEqual(doc.speed.field.map((m) => [m.key, m.label]), [
+    ["lcp", "LCP"], ["inp", "INP"], ["cls", "CLS"], ["fcp", "FCP"], ["ttfb", "TTFB"],
+  ]);
+  assert.deepEqual(doc.speed.lab.map((m) => [m.key, m.label]), [
+    ["lcp", "LCP"], ["fcp", "FCP"], ["tbt", "TBT"], ["speedIndex", "Speed Index"], ["cls", "CLS"],
+  ]);
+});
+
+test("CP4 4a: keys follow the halves that are present: none for an absent or failed half", () => {
+  for (const [fieldFound, labFound] of [[true, false], [false, true]] as const) {
+    const { store, jobId } = jobWith();
+    store.attach(jobId, checkedSpeed({ fieldFound, labFound }));
+    const doc = documentFor(store, jobId);
+    assert.ok(doc.speed.measured);
+    if (!doc.speed.measured) return;
+    assert.deepEqual(doc.speed.field.map((m) => m.key), fieldFound ? ["lcp", "inp", "cls", "fcp", "ttfb"] : []);
+    assert.deepEqual(doc.speed.lab.map((m) => m.key), labFound ? ["lcp", "fcp", "tbt", "speedIndex", "cls"] : []);
+  }
+});
+
+test("CP4 4a: the key is never worked out from the printed label", () => {
+  const source = fs.readFileSync(new URL("./pdfDocument.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function toSpeed(");
+  const end = source.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start, "toSpeed is found");
+  const body = source.slice(start, end).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  // Every key is written as a literal beside its row, and no label is looked up or compared.
+  for (const key of ["lcp", "inp", "cls", "fcp", "ttfb", "tbt", "speedIndex"]) {
+    assert.ok(body.includes(`"${key}"`), `${key} is assigned in toSpeed`);
+  }
+  assert.ok(!/label\s*===|===\s*label|\.label\b|toLowerCase/.test(body), "no key is derived from a label");
+});
+
+test("CP4 4a: the measured address is the requested address, with credentials removed and nothing else changed", () => {
+  for (const [requested, expected] of [
+    ["https://example.com/", "https://example.com/"],
+    ["https://example.com/shop?item=7&ref=mail", "https://example.com/shop?item=7&ref=mail"],
+    ["https://user:secret@example.com/start", "https://example.com/start"],
+  ] as const) {
+    const { store, jobId } = jobWith();
+    store.attach(jobId, checkedSpeed({ requestedUrl: requested }));
+    const doc = documentFor(store, jobId);
+    assert.ok(doc.speed.measured);
+    if (!doc.speed.measured) return;
+    assert.equal(doc.speed.measuredAddress, expected, requested);
+    assert.ok(!JSON.stringify(doc).includes("secret"), "the password reaches no part of the document");
+  }
+});
+
+test("CP4 4a: the measured address is the requested one, not either half's own measured address", () => {
+  const { store, jobId } = jobWith();
+  const speed = checkedSpeed({ requestedUrl: "https://example.com/requested" });
+  const data = speed.data as unknown as { field: { measuredUrl: string }; lab: { measuredUrl: string } };
+  data.field.measuredUrl = "https://example.com/";
+  data.lab.measuredUrl = "https://www.example.com/redirected";
+  store.attach(jobId, speed);
+  const doc = documentFor(store, jobId);
+  assert.ok(doc.speed.measured);
+  if (!doc.speed.measured) return;
+  assert.equal(doc.speed.measuredAddress, "https://example.com/requested");
+});
+
+test("CP4 4a: an unmeasured speed result carries no measured address", () => {
+  const { store, jobId } = jobWith();
+  const doc = documentFor(store, jobId);
+  assert.equal(doc.speed.measured, false);
+  assert.ok(!("measuredAddress" in doc.speed));
+});
+
+test("CP4 4a: the desktop result gets the same key and address treatment", () => {
+  const { store, jobId } = jobWith();
+  store.attach(jobId, checkedSpeed());
+  const desktop = checkedSpeed({ requestedUrl: "https://user:secret@example.com/" }).data as unknown as Record<string, unknown>;
+  store.attachDesktop(jobId, { ...desktop, strategy: "desktop" } as never);
+  const doc = documentFor(store, jobId);
+  assert.ok(doc.desktopSpeed !== null && doc.desktopSpeed.measured);
+  if (doc.desktopSpeed === null || !doc.desktopSpeed.measured) return;
+  assert.equal(doc.desktopSpeed.measuredAddress, "https://example.com/");
+  assert.deepEqual(doc.desktopSpeed.lab.map((m) => m.key), ["lcp", "fcp", "tbt", "speedIndex", "cls"]);
+});
+
 test("the projection writes no user-facing wording of its own", () => {
   /*
    * Structure it may decide -- which sections exist, which metrics appear.

@@ -2109,3 +2109,82 @@ test("missingFieldMetrics names every gap when the section is sound", () => {
   assert.equal(notes.length, 4);
   assert.ok(!notes.some((n) => n.includes("Largest Contentful Paint")));
 });
+
+// ---------------------------------------------------------------------------
+// CP4 U-5: a real-visitor read error never reaches a "checked" result
+//
+// The PDF's short real-visitor reference reads "no real-visitor data" as
+// `!fieldAvailable` (decision U-5 option A). That is sound only while a
+// real-visitor READ ERROR cannot sit inside a checked result, which today holds
+// because such an error means the reply was not a PageSpeed result at all, so
+// the simulated half fails too and the check reports an error. These tests pin
+// that, on representative replies. They cannot prove it for every reply a
+// future version might receive; a collector change that breaks it on any of
+// these replies fails here.
+// ---------------------------------------------------------------------------
+
+/** A reply as Google might send it: a JSON body, or raw text that is not JSON. */
+type ReplyCase = { name: string; body: unknown; raw?: string };
+
+const UNREADABLE_REPLIES: ReplyCase[] = [
+  { name: "an empty object", body: {} },
+  { name: "null", body: null },
+  { name: "an unparseable reply", body: "<html>502 Bad Gateway</html>", raw: "<html>502 Bad Gateway</html>" },
+  { name: "an object with none of the PageSpeed keys", body: { kind: "pagespeedonline#result", id: "https://example.com/", analysisUTCTimestamp: "2026-11-09T00:00:00Z" } },
+];
+
+const SIMULATION_REPLIES: ReplyCase[] = [
+  { name: "a simulated result alone", body: labResult() },
+  { name: "a simulated result with real-visitor data but no metrics", body: { ...labResult(), loadingExperience: { overall_category: "FAST" } } },
+  { name: "a simulated result with real-visitor metrics", body: { ...labResult(), loadingExperience: { overall_category: "AVERAGE", metrics: fieldMetrics() } } },
+];
+
+/** The whole check on one reply, through the production entry point. */
+function runReply(reply: ReplyCase): Promise<PerformanceData> {
+  if (reply.raw === undefined) return run(reply.body);
+  return run(null, { fetchImpl: stubFetch(null, { raw: reply.raw }).impl });
+}
+
+test("U-5: an unreadable reply fails both halves, and the check is an error, never checked", async () => {
+  for (const reply of UNREADABLE_REPLIES) {
+    assert.equal(readFieldData(reply.body).status, "error", `${reply.name}: real-visitor half`);
+    assert.equal(readLabData(reply.body).status, "error", `${reply.name}: simulated half`);
+    const result = await runReply(reply);
+    assert.equal(result.status, "error", `${reply.name}: the check`);
+    assert.notEqual(result.status, "checked", reply.name);
+    assert.equal(result.failureReason, "unreadable-response", reply.name);
+  }
+});
+
+test("U-5: when the simulated test succeeds, real-visitor data is found or absent, never an error, and the check is checked", async () => {
+  const expected: Record<string, "found" | "absent"> = {
+    "a simulated result alone": "absent",
+    "a simulated result with real-visitor data but no metrics": "absent",
+    "a simulated result with real-visitor metrics": "found",
+  };
+  for (const reply of SIMULATION_REPLIES) {
+    assert.equal(readLabData(reply.body).status, "found", `${reply.name}: simulated half`);
+    const field = readFieldData(reply.body).status;
+    assert.notEqual(field, "error", `${reply.name}: real-visitor half`);
+    assert.equal(field, expected[reply.name], reply.name);
+    const result = await runReply(reply);
+    assert.equal(result.status, "checked", `${reply.name}: the check`);
+    assert.equal(result.field.status, expected[reply.name], `${reply.name}: as recorded`);
+    assert.equal(result.lab.status, "found", `${reply.name}: as recorded`);
+  }
+});
+
+test("U-5: across every reply above, a real-visitor read error always comes with a failed simulation and an unchecked result", async () => {
+  let errors = 0;
+  for (const reply of [...UNREADABLE_REPLIES, ...SIMULATION_REPLIES]) {
+    const result = await runReply(reply);
+    if (readFieldData(reply.body).status === "error") {
+      errors += 1;
+      assert.equal(readLabData(reply.body).status, "error", reply.name);
+      assert.notEqual(result.status, "checked", reply.name);
+    }
+    // And the converse, as the PDF relies on it: a checked result never carries a read error.
+    if (result.status === "checked") assert.notEqual(result.field.status, "error", reply.name);
+  }
+  assert.equal(errors, UNREADABLE_REPLIES.length, "the property was exercised on every unreadable reply");
+});

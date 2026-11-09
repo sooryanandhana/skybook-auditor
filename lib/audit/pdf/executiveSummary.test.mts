@@ -381,6 +381,7 @@ function measuredSpeed(over: { fieldAvailable: boolean; overall: string | null; 
     measured: true, status: "checked", device: "Mobile",
     overall: over.overall, fieldAvailable: over.fieldAvailable, field: [],
     labAvailable: over.labScore !== null, labScore: over.labScore, lab: [], notInspected: [],
+    measuredAddress: "https://example.com/",
   };
 }
 

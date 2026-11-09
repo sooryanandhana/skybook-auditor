@@ -19,7 +19,7 @@
  * THE WORDING IS COPIED HERE, NOT IMPORTED, for the same reason as in the other
  * section renderers: renderer files may import only from this folder and the
  * document model. limitations.test.mts holds each copy equal to its
- * report-layer original. The real-visitor reference is CP4's, not this step's.
+ * report-layer original. The real-visitor reference was added in CP4 (part 2a).
  */
 import type { PdfDocument, PdfFact } from "../pdfDocument.ts";
 import { aboutClausesHtml } from "./about.ts";
@@ -27,10 +27,19 @@ import { CRAWL_TABLE_LABELS, ROBOTS_EXCLUSION_WITHOUT_COUNT } from "./categorySe
 import { html } from "./escape.ts";
 import { factTable } from "./facts.ts";
 import { skippedGroupsHtml } from "./skipped.ts";
+import { explainsRealVisitorData } from "./speed.ts";
 
 // ---------------------------------------------------------------------------
 // Wording
 // ---------------------------------------------------------------------------
+
+/**
+ * Equal to `REAL_VISITOR_REFERENCE` in lib/report/reportSections.ts (CP4; CP1 v6
+ * wording §9.4). The short reference only: the full explanation is printed in
+ * the Speed section and nowhere else.
+ */
+export const REAL_VISITOR_REFERENCE =
+  "Google's real-visitor speed data was not available for this site; see Speed & Performance for what this means.";
 
 /** The section's printed heading (CP1 §4, item 9). */
 export const LIMITATIONS_HEADING = "Limitations and About This Audit";
@@ -72,6 +81,24 @@ function checksNotCompletedHtml(doc: PdfDocument): string {
     html`<p>${skipped.intro}</p>` +
     skippedGroupsHtml(skipped.groups)
   );
+}
+
+/**
+ * 2a. The short real-visitor reference (CP4, decisions P-7, P-10, U-5 option A),
+ * in the place CP1 v6 wording §9.4 lists it: after the checks that could not be
+ * completed, before the pages that could not be checked. A plain paragraph with
+ * no heading of its own, like the other short Limitations notes (A2).
+ *
+ * Printed only when the Speed section prints the full explanation it points to
+ * (the P-4 rule, from speed.ts, on the MOBILE result) and that result has no
+ * real-visitor data. Within that rule, "no real-visitor data" is read as
+ * `!fieldAvailable`: a real-visitor read error never reaches a measured result,
+ * which lib/collector/performanceChecks.test.mts pins (U-5). Desktop is never read.
+ */
+function realVisitorReferenceHtml(doc: PdfDocument): string {
+  const mobile = doc.speed;
+  if (!mobile.measured || !explainsRealVisitorData(mobile) || mobile.fieldAvailable) return "";
+  return html`<p>${REAL_VISITOR_REFERENCE}</p>`;
 }
 
 /**
@@ -143,6 +170,7 @@ export function limitationsSectionHtml(doc: PdfDocument): string {
     html`<h2>${LIMITATIONS_HEADING}</h2>` +
     html`<p class="lead">${LIMITATIONS_INTRO}</p>` +
     checksNotCompletedHtml(doc) +
+    realVisitorReferenceHtml(doc) +
     pagesNotCheckedHtml(doc) +
     stopReasonAndExclusionsHtml(doc) +
     notPartOfThisAuditHtml() +

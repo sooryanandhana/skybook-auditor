@@ -21,11 +21,101 @@
  * becomes a bad number. The projection has already made that string; this file
  * prints whatever it was given.
  */
-import type { PdfLabels, PdfMetric, PdfSpeed } from "../pdfDocument.ts";
+import type { PdfLabels, PdfMetric, PdfSpeed, PdfSpeedMetricKey } from "../pdfDocument.ts";
 import { html } from "./escape.ts";
 
 /** The section's title. See the note in `coverage.ts` on why it lives here. */
 const SPEED_HEADING = "Speed";
+
+// ---------------------------------------------------------------------------
+// CP4 (F5): the glossary and the real-visitor explanation
+//
+// Approved wording, copied here because renderer files may import only from
+// this folder and the document model; sections.test.mts holds each one equal
+// to its original in lib/report/reportSections.ts.
+// ---------------------------------------------------------------------------
+
+/** Equal to `SPEED_GLOSSARY_HEADING` in lib/report/reportSections.ts. */
+export const GLOSSARY_HEADING = "What these measurements mean";
+
+/** Equal to `SPEED_GLOSSARY` in lib/report/reportSections.ts, entry for entry. */
+export const GLOSSARY: Readonly<Record<PdfSpeedMetricKey, string>> = {
+  lcp: "LCP (Largest Contentful Paint): how long the main visible content of the page takes to appear.",
+  fcp: "FCP (First Contentful Paint): how long it takes before anything first appears on the screen.",
+  tbt: "TBT (Total Blocking Time): how much time the browser is too busy to respond to the visitor while the page loads.",
+  speedIndex: "Speed Index: how quickly the visible parts of the page are filled in.",
+  cls: "CLS (Cumulative Layout Shift): how much the page's content unexpectedly moves around while it loads.",
+  inp: "INP (Interaction to Next Paint): how quickly the page responds visually after a visitor interacts with it, such as clicking a button or tapping a menu.",
+  ttfb: "TTFB (Time to First Byte): how long it takes for the server to begin sending a response after a visitor requests a page.",
+};
+
+/** The printed order (decision U-2): the key order of `SPEED_GLOSSARY`. */
+export const GLOSSARY_ORDER: readonly PdfSpeedMetricKey[] = ["lcp", "fcp", "tbt", "speedIndex", "cls", "inp", "ttfb"];
+
+/** Equal to `REAL_VISITOR_HEADING` in lib/report/reportSections.ts. */
+export const REAL_VISITOR_HEADING = "About real-visitor data";
+
+/** Equal to `realVisitorExplanation(url)` in lib/report/reportSections.ts, for any address. */
+export function realVisitorParagraphs(url: string): readonly string[] {
+  return [
+    "Google records how fast pages load for real people who visit them using the Chrome browser, collected over recent weeks. Where a page has enough visits, Google reports how fast it was for most of those visitors. Many smaller websites do not receive enough visits for Google to report these figures.",
+    "When real-visitor figures are not available, the report relies on a simulated test: Google loads the page once on a simulated mobile phone and network. A simulated test is useful for finding what slows a page down, but it is a single run under fixed conditions, so its results can differ from what real visitors experience. Missing real-visitor data says nothing, good or bad, about how fast the site is.",
+    `Speed is measured on ${url}. Desktop results are shown for information and do not affect the grade.`,
+  ];
+}
+
+/**
+ * The keys on the metric rows one device actually prints (decision P-3): its
+ * real-visitor rows when that half is available, its simulated rows when that
+ * half is, whatever their values say, including "Not reported" or nothing.
+ * Read from the structured keys (P-6), never from a printed label.
+ */
+function printedKeys(speed: PdfSpeed | null): PdfSpeedMetricKey[] {
+  if (speed === null || !speed.measured) return [];
+  return [
+    ...(speed.fieldAvailable ? speed.field.map((metric) => metric.key) : []),
+    ...(speed.labAvailable ? speed.lab.map((metric) => metric.key) : []),
+  ];
+}
+
+/**
+ * Whether the real-visitor explanation is printed (decision P-4): only for a
+ * MOBILE result the Executive Summary also treats as measured. This is the
+ * same test as its Speed sentence, so the explanation can never sit beside
+ * "Speed could not be measured for this report." Desktop is never consulted.
+ */
+export function explainsRealVisitorData(mobile: PdfSpeed): boolean {
+  return mobile.measured && (mobile.fieldAvailable || mobile.labScore !== null);
+}
+
+/**
+ * The appended block (decisions P-1, P-2, P-11): one glossary for every metric
+ * printed on either device, in the approved order, then the explanation when
+ * P-4 holds, with the mobile result's credential-free address. Nothing at all
+ * when there is neither, so a section with no metrics is byte-for-byte as before.
+ */
+function explanationBlock(mobile: PdfSpeed, desktop: PdfSpeed | null): string {
+  const printed = new Set([...printedKeys(mobile), ...printedKeys(desktop)]);
+  const entries = GLOSSARY_ORDER.filter((key) => printed.has(key));
+
+  const glossary =
+    entries.length === 0
+      ? ""
+      : `<div class="speed-glossary">` +
+        html`<h3>${GLOSSARY_HEADING}</h3>` +
+        `<ul>${entries.map((key) => html`<li>${GLOSSARY[key]}</li>`).join("")}</ul>` +
+        `</div>`;
+
+  const explanation =
+    mobile.measured && explainsRealVisitorData(mobile)
+      ? `<div class="speed-real-visitor">` +
+        html`<h3>${REAL_VISITOR_HEADING}</h3>` +
+        realVisitorParagraphs(mobile.measuredAddress).map((paragraph) => html`<p>${paragraph}</p>`).join("") +
+        `</div>`
+      : "";
+
+  return glossary + explanation;
+}
 
 /**
  * A block of metrics.
@@ -135,6 +225,7 @@ export function speedHtml(speed: PdfSpeed, labels: PdfLabels, desktop: PdfSpeed 
     `<p class="lead">${DEVICES_LEAD}</p>` +
     `<div class="speed-device"><h3 class="sub">Mobile</h3>${deviceBody(speed, labels)}</div>` +
     `<div class="speed-device"><h3 class="sub">Desktop</h3>${deviceBody(desktop, labels)}</div>` +
+    explanationBlock(speed, desktop) +
     `</section>`
   );
 }
@@ -163,5 +254,5 @@ function mobileOnlyHtml(speed: PdfSpeed, labels: PdfLabels): string {
        */
       html`<p class="lead">${speed.message}</p>`;
 
-  return `<section class="speed">` + `<h2>${SPEED_HEADING}</h2>` + body + `</section>`;
+  return `<section class="speed">` + `<h2>${SPEED_HEADING}</h2>` + body + explanationBlock(speed, null) + `</section>`;
 }

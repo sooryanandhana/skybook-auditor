@@ -39,6 +39,11 @@ import type { AuditResult, SiteAuditResult, SpeedResult } from "../../types.ts";
 import { CHECK_LABELS, CHECK_STATUS_LINES, SITE_NO_ISSUE_LINE, siteIssueLine } from "./categorySections.ts";
 import { ruleTitle } from "../../report/measurementsView.ts";
 import { AUDIT_RULES } from "../../rules/all.ts";
+// CP4 stage 4b (kept separate so the earlier lines are unchanged).
+import { SPEED_NOT_MEASURED } from "./executiveSummary.ts";
+import { REAL_VISITOR_HEADING, SPEED_GLOSSARY_HEADING, realVisitorExplanation } from "../../report/reportSections.ts";
+// CP4 stage 4c (kept separate so the earlier lines are unchanged).
+import { REAL_VISITOR_REFERENCE as APPROVED_REFERENCE } from "../../report/reportSections.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1006,4 +1011,163 @@ test("T-6: a partly checked rule keeps its status, and the check lists stay iden
 
   assert.deepEqual(changed.checklists, original.checklists, "the check lists are identical");
   assert.deepEqual(t1, pristine, "the shared fixture is exactly as it was");
+});
+
+// ===========================================================================
+// CP4 stage 4b: the Speed glossary and real-visitor explanation, in the whole
+// document (decision record rev. 3: P-1, P-4, P-5, P-11).
+// ===========================================================================
+
+/**
+ * A checked mobile speed result attached the way the speed check attaches it,
+ * with the real-visitor half found or absent and the simulated half scored,
+ * found without a score, or failed.
+ */
+function checkedMobileSpeed(over: {
+  field: boolean;
+  lab: "score" | "no-score" | "error";
+  requestedUrl?: string;
+  withFinding?: boolean;
+}): SpeedResult {
+  const field = over.field
+    ? {
+        status: "found", measuredUrl: "https://example.com/", scope: "page", overall: "AVERAGE",
+        lcp: { percentileMs: 2400, category: "AVERAGE" }, inp: { percentileMs: 180, category: "FAST" },
+        cls: { percentile: 0.12, category: "AVERAGE" }, fcp: { percentileMs: 1800, category: "AVERAGE" },
+        ttfb: { percentileMs: 700, category: "AVERAGE" }, error: null,
+      }
+    : { status: "absent", measuredUrl: null, scope: null, overall: null, lcp: null, inp: null, cls: null, fcp: null, ttfb: null, error: null };
+  const lab =
+    over.lab === "error"
+      ? { status: "error", measuredUrl: null, score: null, lcpMs: null, fcpMs: null, tbtMs: null, speedIndexMs: null, cls: null, error: "No lab result." }
+      : { status: "found", measuredUrl: "https://example.com/", score: over.lab === "score" ? 74 : null, lcpMs: 3100, fcpMs: 1200, tbtMs: 240, speedIndexMs: 2600, cls: 0.045, error: null };
+  return {
+    data: {
+      status: "checked", strategy: "mobile", requestedUrl: over.requestedUrl ?? "https://example.com/", failureReason: null,
+      field, lab, notInspected: [], message: "Measured.",
+    },
+    findings: over.withFinding
+      ? [{ id: SPEED_RULES[0].id, title: "SPEED-FINDING-TITLE", category: "speed", severity: "high", evidence: "Measured.", remediation: "Fix it." }]
+      : [],
+    skippedChecks: [],
+  } as unknown as SpeedResult;
+}
+
+const REAL_VISITOR_H3 = `<h3>${escapeHtml(REAL_VISITOR_HEADING)}</h3>`;
+
+test("CP4 4b: the explanation is printed exactly when the Executive Summary does not say speed could not be measured", async () => {
+  const { partial } = await fixtures;
+  const cases: Array<[string, SpeedResult | undefined, boolean]> = [
+    ["not requested", undefined, false],
+    ["real-visitor data and a score", checkedMobileSpeed({ field: true, lab: "score" }), true],
+    ["real-visitor data, failed simulation", checkedMobileSpeed({ field: true, lab: "error" }), true],
+    ["no real-visitor data, a score", checkedMobileSpeed({ field: false, lab: "score" }), true],
+    ["no real-visitor data, simulation without a score", checkedMobileSpeed({ field: false, lab: "no-score" }), false],
+    ["checked, but nothing usable", checkedMobileSpeed({ field: false, lab: "error" }), false],
+  ];
+  for (const [name, speed, expected] of cases) {
+    const doc = documentOf(partial, speed);
+    const out = documentHtml(doc);
+    const saysNotMeasured = sectionOf(out, "exec-summary").includes(escapeHtml(SPEED_NOT_MEASURED));
+    const explains = sectionOf(out, "speed").includes(REAL_VISITOR_H3);
+    assert.equal(explains, expected, `${name}: explanation`);
+    assert.equal(saysNotMeasured, !expected, `${name}: the Executive Summary agrees`);
+    assert.ok(!(explains && saysNotMeasured), `${name}: never both`);
+  }
+});
+
+test("CP4 4b: the explanation names the requested address with credentials removed and the query kept", async () => {
+  const { partial } = await fixtures;
+  const doc = documentOf(partial, checkedMobileSpeed({ field: true, lab: "score", requestedUrl: "https://user:secret@example.com/shop?item=7&ref=mail" }));
+  const speed = sectionOf(documentHtml(doc), "speed");
+  const third = realVisitorExplanation("https://example.com/shop?item=7&ref=mail")[2];
+  assert.ok(speed.includes(`<p>${escapeHtml(third)}</p>`));
+  assert.ok(!documentHtml(doc).includes("secret"), "the password is printed nowhere");
+});
+
+test("CP4 4b: the full real-visitor text appears once, only inside the Speed section", async () => {
+  const { partial } = await fixtures;
+  const out = documentHtml(documentOf(partial, checkedMobileSpeed({ field: false, lab: "score" })));
+  const first = escapeHtml(realVisitorExplanation("https://example.com/")[0]);
+  assert.equal(count(out, first), 1);
+  assert.equal(count(sectionOf(out, "speed"), first), 1);
+  assert.equal(count(out, REAL_VISITOR_H3), 1);
+  assert.equal(count(out, `<h3>${escapeHtml(SPEED_GLOSSARY_HEADING)}</h3>`), 1);
+});
+
+test("CP4 4b: the block closes the Speed section, and the CP3 Speed cards still follow it straight away", async () => {
+  const { partial } = await fixtures;
+  const doc = documentOf(partial, checkedMobileSpeed({ field: true, lab: "score", withFinding: true }));
+  assert.equal(doc.speedFindings.length, 1, "the fixture carries a speed finding");
+  const out = documentHtml(doc);
+  const speed = speedHtml(doc.speed, doc.labels, doc.desktopSpeed);
+  assert.ok(speed.includes(REAL_VISITOR_H3) && speed.includes("speed-glossary"), "the block is printed");
+  assert.ok(/<div class="speed-real-visitor">[\s\S]*<\/div><\/section>$/.test(speed), "the block is the last thing in the section");
+  assert.equal(count(out, speed), 1, "the Speed section, byte for byte");
+  assert.ok(out.includes(speed + findingCardsHtml(doc.speedFindings, doc.labels) + `<section class="technical-audit">`), "cards straight after, then Technical");
+  assert.ok(!sectionOf(out, "findings page-level-issues").includes("SPEED-FINDING-TITLE"), "never in Page-Level Issues");
+});
+
+test("CP4 4b: a certificate failure's Speed section gains nothing", async () => {
+  const { certificate } = await fixtures;
+  const doc = documentOf(certificate);
+  const speed = sectionOf(documentHtml(doc), "speed");
+  assert.ok(!speed.includes("speed-glossary") && !speed.includes("speed-real-visitor"));
+});
+
+// ===========================================================================
+// CP4 stage 4c: the short real-visitor reference in Limitations, in the whole
+// document (decision record rev. 3: P-7, P-8, P-10, U-5; CP1 §10 item 2).
+// ===========================================================================
+
+const REAL_VISITOR_REFERENCE_P = `<p>${escapeHtml(APPROVED_REFERENCE)}</p>`;
+
+test("CP4 4c: the reference is printed exactly when the explanation is and mobile has no real-visitor data", async () => {
+  const { partial } = await fixtures;
+  const cases: Array<[string, SpeedResult | undefined, boolean, boolean]> = [
+    // name, speed, explanation expected, reference expected
+    ["not requested", undefined, false, false],
+    ["real-visitor data and a score", checkedMobileSpeed({ field: true, lab: "score" }), true, false],
+    ["real-visitor data, failed simulation", checkedMobileSpeed({ field: true, lab: "error" }), true, false],
+    ["no real-visitor data, a score", checkedMobileSpeed({ field: false, lab: "score" }), true, true],
+    ["no real-visitor data, simulation without a score", checkedMobileSpeed({ field: false, lab: "no-score" }), false, false],
+    ["checked, but nothing usable", checkedMobileSpeed({ field: false, lab: "error" }), false, false],
+  ];
+  for (const [name, speed, explanation, reference] of cases) {
+    const out = documentHtml(documentOf(partial, speed));
+    assert.equal(sectionOf(out, "speed").includes(REAL_VISITOR_H3), explanation, `${name}: explanation`);
+    assert.equal(count(out, REAL_VISITOR_REFERENCE_P), reference ? 1 : 0, `${name}: reference, once`);
+    if (reference) {
+      assert.equal(count(sectionOf(out, "limitations"), REAL_VISITOR_REFERENCE_P), 1, `${name}: in Limitations`);
+      assert.ok(explanation, `${name}: never without the explanation it points to`);
+    }
+  }
+});
+
+test("CP4 4c: the full real-visitor text only in Speed, just the reference in Limitations (CP1 §10 item 2)", async () => {
+  const { partial } = await fixtures;
+  const out = documentHtml(documentOf(partial, checkedMobileSpeed({ field: false, lab: "score" })));
+  const limitations = sectionOf(out, "limitations");
+  assert.equal(count(limitations, REAL_VISITOR_REFERENCE_P), 1);
+  assert.ok(!limitations.includes(REAL_VISITOR_H3));
+  for (const paragraph of realVisitorExplanation("https://example.com/")) {
+    const printed = escapeHtml(paragraph);
+    assert.equal(count(out, printed), 1, `once: ${paragraph.slice(0, 40)}`);
+    assert.equal(count(sectionOf(out, "speed"), printed), 1, `in Speed: ${paragraph.slice(0, 40)}`);
+  }
+});
+
+test("CP4 4c: apart from the reference, the Limitations section is what the same audit printed without speed", async () => {
+  const { partial } = await fixtures;
+  const without = sectionOf(documentHtml(documentOf(partial)), "limitations");
+  const withRef = sectionOf(documentHtml(documentOf(partial, checkedMobileSpeed({ field: false, lab: "score" }))), "limitations");
+  assert.notEqual(withRef, without);
+  assert.equal(withRef.replace(REAL_VISITOR_REFERENCE_P, ""), without);
+});
+
+test("CP4 4c: certificate failures and counts that do not reconcile print no reference", async () => {
+  const { certificate, failing } = await fixtures;
+  for (const [name, audit] of [["certificate failure", certificate], ...Object.entries(failing)] as Array<[string, AuditResult]>) {
+    assert.ok(!documentHtml(documentOf(audit)).includes(REAL_VISITOR_REFERENCE_P), name);
+  }
 });

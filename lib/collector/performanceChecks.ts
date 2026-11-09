@@ -22,6 +22,7 @@
  * sent, and the URL is public anyway, but it does leave our machine.
  */
 import type { Deadline } from "./deadline";
+import { withoutCredentials } from "./url.ts";
 import type {
   FieldPerformance,
   FieldShiftMetric,
@@ -994,10 +995,23 @@ async function attemptPagespeed(
  * audit.
  */
 export async function runPerformanceChecks(
-  requestedUrl: string,
+  submittedUrl: string,
   deadline: Deadline,
   options: PerformanceOptions = {},
 ): Promise<PerformanceData> {
+  /*
+   * ANY USERNAME AND PASSWORD ARE REMOVED HERE, ONCE, before anything else.
+   *
+   * The crawl audits a site without authenticating to it (crawlUrl.ts drops
+   * credentials from every address), and the speed check follows the same
+   * policy: credentials are never sent to Google, never recorded in the result,
+   * and never printed in its notes or summary. Everything else in the address --
+   * scheme, host, port, path, query, fragment -- is kept, and an address with no
+   * credentials is used exactly as given. A page that needs a login may then not
+   * be reachable by Google's test; that is the consequence of not forwarding a
+   * secret, and it is the same for the crawl.
+   */
+  const requestedUrl = withoutCredentials(submittedUrl);
   const strategy = options.strategy ?? "mobile";
   const apiKey = (options.apiKey ?? process.env.PAGESPEED_API_KEY ?? "").trim();
 
@@ -1085,6 +1099,12 @@ export async function runPerformanceChecks(
     );
   }
 
+  /*
+   * The notes and the summary compare with, and print, the same credential-free
+   * address that was sent and is recorded: they are shown on the dashboard,
+   * printed in the PDF and passed to the AI, and a credential alone is never
+   * mistaken for a redirect.
+   */
   return {
     status: "checked",
     strategy,

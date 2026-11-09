@@ -23,7 +23,7 @@
  * defaults are the real ones.
  */
 import { runPerformanceChecks } from "../collector/performanceChecks.ts";
-import { normalizeUrl } from "../collector/url.ts";
+import { normalizeUrl, withoutCredentials } from "../collector/url.ts";
 import { createDeadline } from "../collector/deadline.ts";
 import { callerKey, checkRateLimit, type RateLimitResult } from "../rateLimit.ts";
 import { accountLimitKey } from "../accountLimitKey.ts";
@@ -153,6 +153,37 @@ function strategyFrom(request: Request): "mobile" | "desktop" {
   return new URL(request.url).searchParams.get("strategy") === "desktop" ? "desktop" : "mobile";
 }
 
+/** The refusal when a request names an audit but not that audit's own address (existing wording). */
+const UNREADABLE_REQUEST = "Could not read the request.";
+
+/**
+ * The address a finished whole-site audit actually read: the entry page's
+ * final address, as the crawl recorded it. Null for anything else -- a job
+ * still running, one that failed, or a certificate failure, which read no page
+ * -- because there is no audited address for a speed result to belong beside.
+ */
+function auditedAddressOf(job: NonNullable<ReturnType<AuditJobStore["get"]>>): string | null {
+  if (job.status !== "completed" && job.status !== "partial") return null;
+  const result = job.result;
+  if (result === null || !("data" in result) || ("kind" in result && result.kind === "certificate-failure")) return null;
+  return result.data.fetch.finalUrl;
+}
+
+/**
+ * Whether a posted address is the audit's own address, compared the way the
+ * route already reads addresses: both through `normalizeUrl` (scheme added,
+ * fragment dropped, the URL parser's own spelling), with any username and
+ * password set aside because they are never sent or recorded. Nothing broader:
+ * a different host, path or query is a different page.
+ */
+function isAuditedAddress(posted: string, audited: string): boolean {
+  const spell = (address: string) => {
+    const normalized = normalizeUrl(address);
+    return withoutCredentials(normalized.ok ? normalized.url.toString() : address);
+  };
+  return spell(posted) === spell(audited);
+}
+
 /**
  * POST /api/audit — start an audit and hand back a receipt.
  *
@@ -240,6 +271,39 @@ export async function performanceRoute(
   const url = await readUrl<PerformanceResponse>(request);
   if (!url.ok) return url.refusal;
 
+  /*
+   * WHICH AUDIT, IF ANY, THIS RESULT MAY BE FILED BESIDE -- decided BEFORE
+   * anything is measured, so no PageSpeed quota is spent on a request that
+   * names somebody else's audit, or names the caller's own audit with a
+   * different address.
+   *
+   *   - no job named, or one we do not hold: measured and returned, filed
+   *     nowhere (the standalone lookup this endpoint has always offered);
+   *   - somebody else's audit, or one with no owner: refused as not found, the
+   *     same answer every other route gives, and nothing is measured;
+   *   - the caller's own finished whole-site audit: measured and filed only
+   *     when the posted address IS that audit's address, refused otherwise;
+   *   - the caller's own audit with no audited address yet (running, failed, a
+   *     certificate failure): measured and returned, filed nowhere.
+   */
+  const named = jobIdFrom(request);
+  let fileUnder: string | null = null;
+  if (named !== "" && deps.userId !== undefined) {
+    const job = (deps.store ?? auditJobs()).get(named);
+    if (job !== null) {
+      if (ownedBy(job, deps.userId) === null) {
+        return { status: 404, body: { ok: false, error: JOB_NOT_FOUND } };
+      }
+      const audited = auditedAddressOf(job);
+      if (audited !== null) {
+        if (!isAuditedAddress(url.url, audited)) {
+          return { status: 400, body: { ok: false, error: UNREADABLE_REQUEST } };
+        }
+        fileUnder = named;
+      }
+    }
+  }
+
   const measure = deps.measure ?? runPerformanceChecks;
 
   /*
@@ -266,11 +330,8 @@ export async function performanceRoute(
      * best-effort, owner-only rule as the mobile attachment below.
      */
     if (strategy === "desktop") {
-      const desktopJobId = jobIdFrom(request);
-      if (desktopJobId !== "" && deps.userId !== undefined) {
-        const store = deps.store ?? auditJobs();
-        if (ownedBy(store.get(desktopJobId), deps.userId) !== null) store.attachDesktop(desktopJobId, performance);
-      }
+      // Only beside the caller's own audit, for that audit's own address (decided above).
+      if (fileUnder !== null) (deps.store ?? auditJobs()).attachDesktop(fileUnder, performance);
       return {
         status: 200,
         body: { ok: true, data: performance, findings: [], skippedChecks: [] },
@@ -311,11 +372,8 @@ export async function performanceRoute(
      * owner, is treated exactly as an unknown one: nothing is attached, and the
      * measurement -- of an address the requester named -- is returned as usual.
      */
-    const jobId = jobIdFrom(request);
-    if (jobId !== "" && deps.userId !== undefined) {
-      const store = deps.store ?? auditJobs();
-      if (ownedBy(store.get(jobId), deps.userId) !== null) store.attach(jobId, speed);
-    }
+    // Only beside the caller's own audit, for that audit's own address (decided above).
+    if (fileUnder !== null) (deps.store ?? auditJobs()).attach(fileUnder, speed);
 
     return { status: 200, body: { ok: true, ...speed } };
   } catch {

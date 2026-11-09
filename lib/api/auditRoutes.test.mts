@@ -1432,15 +1432,21 @@ test("ownership: a job with no owner is explained for nobody", async () => {
 
 test("ownership: another account's speed check is not filed beside the audit", async () => {
   const { store, jobId } = storeWithFinishedAudit();
+  let measuredCount = 0;
 
   const answer = await performanceRoute(speedRequestFor(jobId), {
-    measure: async () => measured(),
+    measure: async () => {
+      measuredCount += 1;
+      return measured();
+    },
     store,
     userId: STRANGER,
   });
 
-  // The measurement of the address they named is theirs; the audit is not.
-  assert.equal(answer.status, 200);
+  // Naming somebody else's audit is refused as not found, and no PageSpeed quota is spent on it.
+  assert.equal(answer.status, 404);
+  assert.deepEqual(answer.body, { ok: false, error: JOB_NOT_FOUND });
+  assert.equal(measuredCount, 0, "nothing was measured");
   assert.equal(store.get(jobId)?.attached, null, "nothing was attached to somebody else's audit");
 
   // The owner's own speed check still files.
@@ -1536,4 +1542,155 @@ test("performance (desktop): a mobile check still fills only the graded slot", a
   await ownersSpeedCheck(speedRequestFor(jobId), { measure: async () => measured(), store });
   assert.ok(store.get(jobId)?.attached);
   assert.equal(store.get(jobId)?.desktop, null);
+});
+
+// ---------------------------------------------------------------------------
+// Security: a speed result is filed only beside the caller's own audit, for
+// that audit's own address; somebody else's audit costs no PageSpeed quota
+// ---------------------------------------------------------------------------
+
+/** A `measure` stand-in that counts its calls. */
+function countingMeasure(strategy: "mobile" | "desktop" = "mobile") {
+  const calls: string[] = [];
+  const measure = async (url: string) => {
+    calls.push(url);
+    return measured({ strategy });
+  };
+  return { calls, measure };
+}
+
+const UNREADABLE = { ok: false, error: "Could not read the request." };
+
+test("association: the owner's own address is measured and filed, mobile and desktop each in its own slot", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+  const mobile = countingMeasure();
+  const desktop = countingMeasure("desktop");
+
+  const m = await ownersSpeedCheck(speedRequestFor(jobId, "https://example.com/"), { measure: mobile.measure, store });
+  const d = await ownersSpeedCheck(desktopRequestFor(jobId, "https://example.com/"), { measure: desktop.measure, store });
+
+  assert.equal(m.status, 200);
+  assert.equal(d.status, 200);
+  assert.deepEqual(mobile.calls, ["https://example.com/"]);
+  assert.deepEqual(desktop.calls, ["https://example.com/"]);
+  assert.equal(store.get(jobId)?.attached?.data.strategy, "mobile", "mobile in the graded slot");
+  assert.equal(store.get(jobId)?.desktop?.strategy, "desktop", "desktop in its own slot");
+});
+
+test("association: equivalent spellings of the audited address are accepted", async () => {
+  for (const spelling of ["example.com", "https://example.com", "https://example.com/#top", "  https://example.com/  "]) {
+    const { store, jobId } = storeWithFinishedAudit();
+    const { calls, measure } = countingMeasure();
+    const answer = await ownersSpeedCheck(speedRequestFor(jobId, spelling), { measure, store });
+    assert.equal(answer.status, 200, spelling);
+    assert.equal(calls.length, 1, `${spelling}: measured`);
+    assert.ok(store.get(jobId)?.attached, `${spelling}: filed`);
+  }
+});
+
+test("association: a different host or path on the owner's own audit is refused, unmeasured and unfiled", async () => {
+  for (const other of ["https://other.example/", "https://www.example.com/", "https://example.com/about", "https://example.com/?page=2", "http://example.com/"]) {
+    const { store, jobId } = storeWithFinishedAudit();
+    const mobile = countingMeasure();
+    const desktop = countingMeasure("desktop");
+
+    const m = await ownersSpeedCheck(speedRequestFor(jobId, other), { measure: mobile.measure, store });
+    const d = await ownersSpeedCheck(desktopRequestFor(jobId, other), { measure: desktop.measure, store });
+
+    for (const [name, answer] of [["mobile", m], ["desktop", d]] as const) {
+      assert.equal(answer.status, 400, `${other} ${name}`);
+      assert.deepEqual(answer.body, UNREADABLE, `${other} ${name}: the existing refusal`);
+    }
+    assert.equal(mobile.calls.length + desktop.calls.length, 0, `${other}: no PageSpeed quota spent`);
+    assert.equal(store.get(jobId)?.attached, null, `${other}: nothing in the graded slot`);
+    assert.equal(store.get(jobId)?.desktop, null, `${other}: nothing in the desktop slot`);
+  }
+});
+
+test("association: another account's audit, or an ownerless one, is never measured or filed, mobile or desktop", async () => {
+  for (const [owner, caller] of [[OWNER, STRANGER], [null, OWNER]] as const) {
+    const { store, jobId } = storeWithFinishedAudit(owner);
+    const { calls, measure } = countingMeasure();
+    for (const request of [speedRequestFor(jobId), desktopRequestFor(jobId)]) {
+      const answer = await performanceRoute(request, { measure, store, userId: caller });
+      assert.equal(answer.status, 404);
+      assert.deepEqual(answer.body, { ok: false, error: JOB_NOT_FOUND });
+    }
+    assert.equal(calls.length, 0, "no PageSpeed quota spent");
+    assert.equal(store.get(jobId)?.attached, null);
+    assert.equal(store.get(jobId)?.desktop, null);
+  }
+});
+
+test("association: an unknown or missing job id keeps the standalone lookup: measured, returned, filed nowhere", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+  for (const request of [speedRequestFor(NO_SUCH_JOB, "https://unrelated.example/"), speedRequest({ url: "https://unrelated.example/" })]) {
+    const { calls, measure } = countingMeasure();
+    const answer = await ownersSpeedCheck(request, { measure, store });
+    assert.equal(answer.status, 200);
+    assert.ok(answer.body.ok, "the usual successful shape");
+    assert.deepEqual(calls, ["https://unrelated.example/"]);
+  }
+  assert.equal(store.get(jobId)?.attached, null, "the real audit took nothing");
+});
+
+test("association: an expired, unfinished, failed or certificate-failure audit takes nothing", async () => {
+  // Expired: gone from the store, so the request is a standalone lookup.
+  let clock = 0;
+  const expiring = createJobStore<SiteAuditResult, SpeedResult, never, PerformanceData>({ ttlMs: 1_000, now: () => clock });
+  const old = expiring.create("https://example.com", OWNER);
+  expiring.finish(old.id, "completed", storedAudit());
+  clock = 5_000;
+  const expired = await ownersSpeedCheck(speedRequestFor(old.id), { measure: countingMeasure().measure, store: expiring });
+  assert.equal(expired.status, 200);
+  assert.equal(expiring.get(old.id), null);
+
+  // Unfinished and failed: the owner's job, but no audited address yet, so measured and filed nowhere.
+  const store = createJobStore<AuditResult, SpeedResult, never, PerformanceData>();
+  const running = store.create("https://example.com", OWNER);
+  const failed = store.create("https://example.com", OWNER);
+  store.fail(failed.id, "The website could not be reached.");
+  const cert = store.create("https://example.com", OWNER);
+  store.finish(cert.id, "partial", { kind: "certificate-failure" } as unknown as AuditResult);
+
+  for (const id of [running.id, failed.id, cert.id]) {
+    for (const request of [speedRequestFor(id), desktopRequestFor(id)]) {
+      const answer = await ownersSpeedCheck(request, { measure: countingMeasure().measure, store: store as never });
+      assert.equal(answer.status, 200, id);
+    }
+    assert.equal(store.get(id)?.attached, null, `${id}: no speed result`);
+    assert.equal(store.get(id)?.desktop, null, `${id}: no desktop result`);
+  }
+});
+
+test("association: repeated requests keep first-write-wins, and a refused request never displaces a filed one", async () => {
+  const { store, jobId } = storeWithFinishedAudit();
+
+  await ownersSpeedCheck(speedRequestFor(jobId), { measure: async () => measured({ message: "FIRST" }), store });
+  await ownersSpeedCheck(speedRequestFor(jobId), { measure: async () => measured({ message: "SECOND" }), store });
+  assert.equal(store.get(jobId)?.attached?.data.message, "FIRST", "the first matching result stays");
+
+  await ownersSpeedCheck(desktopRequestFor(jobId), { measure: async () => measured({ strategy: "desktop", message: "D-FIRST" }), store });
+  await ownersSpeedCheck(desktopRequestFor(jobId), { measure: async () => measured({ strategy: "desktop", message: "D-SECOND" }), store });
+  assert.equal(store.get(jobId)?.desktop?.message, "D-FIRST");
+
+  // Mismatched requests afterwards change neither slot.
+  await ownersSpeedCheck(speedRequestFor(jobId, "https://other.example/"), { measure: async () => measured({ message: "SPOOF" }), store });
+  await ownersSpeedCheck(desktopRequestFor(jobId, "https://other.example/"), { measure: async () => measured({ strategy: "desktop", message: "SPOOF" }), store });
+  assert.equal(store.get(jobId)?.attached?.data.message, "FIRST");
+  assert.equal(store.get(jobId)?.desktop?.message, "D-FIRST");
+});
+
+test("association: a mismatched desktop request leaves the mobile result alone, and the reverse", async () => {
+  const first = storeWithFinishedAudit();
+  await ownersSpeedCheck(speedRequestFor(first.jobId), { measure: async () => measured(), store: first.store });
+  await ownersSpeedCheck(desktopRequestFor(first.jobId, "https://other.example/"), { measure: async () => measured({ strategy: "desktop" }), store: first.store });
+  assert.ok(first.store.get(first.jobId)?.attached, "mobile kept");
+  assert.equal(first.store.get(first.jobId)?.desktop, null, "desktop not filed");
+
+  const second = storeWithFinishedAudit();
+  await ownersSpeedCheck(desktopRequestFor(second.jobId), { measure: async () => measured({ strategy: "desktop" }), store: second.store });
+  await ownersSpeedCheck(speedRequestFor(second.jobId, "https://other.example/"), { measure: async () => measured(), store: second.store });
+  assert.ok(second.store.get(second.jobId)?.desktop, "desktop kept");
+  assert.equal(second.store.get(second.jobId)?.attached, null, "mobile not filed");
 });

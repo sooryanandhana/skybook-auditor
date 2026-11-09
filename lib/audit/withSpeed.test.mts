@@ -362,3 +362,88 @@ test("this layer measures nothing and grades nothing", () => {
   assert.ok(!/fetch\(|await\s+\w+\(/.test(source), "nothing is measured here");
   assert.ok(!/\bgemini\b|@google\/genai|anthropic|openai/i.test(source), "no provider");
 });
+
+// ---------------------------------------------------------------------------
+// Security: a speed finding never carries the measured address's credentials
+//
+// `requestedUrl` keeps a username and password if one was typed. A speed
+// finding's affected address is printed (the PDF's speed card names it twice),
+// so it is stripped with the shared `withoutCredentials`; every other part of
+// the address is kept, and the measurement itself is not touched.
+// ---------------------------------------------------------------------------
+
+/** The affected addresses of the joined speed finding, for a measurement of `requestedUrl`. */
+const affectedFor = (requestedUrl: string) =>
+  withSpeed(auditResult(), speedResult({ data: performanceData({ requestedUrl }) }))
+    .site.findings.find((f) => f.id === "speed.field.lcp.slow")
+    ?.affected?.map((a) => a.url);
+
+test("security: a username and password never reach a speed finding's address; everything else is kept", () => {
+  assert.deepEqual(
+    affectedFor("https://username:password@example.com/path?ref=mail#section"),
+    ["https://example.com/path?ref=mail#section"],
+    "scheme, host, path, query and fragment kept",
+  );
+  // A port is kept too.
+  assert.deepEqual(affectedFor("https://username:password@example.com:8443/a?b=1&c=2"), ["https://example.com:8443/a?b=1&c=2"]);
+});
+
+test("security: an address with no credentials is passed through exactly as it was", () => {
+  for (const url of ["https://example.com/", "https://example.com", "https://example.com/shop?item=7&ref=mail", "http://example.com:8080/x#y"]) {
+    assert.deepEqual(affectedFor(url), [url], url);
+  }
+});
+
+test("security: a username alone, or a password alone, is removed as well", () => {
+  const userOnly = affectedFor("https://username@example.com/path?ref=mail");
+  assert.deepEqual(userOnly, ["https://example.com/path?ref=mail"]);
+  assert.ok(!JSON.stringify(userOnly).includes("username"));
+
+  // The WHATWG URL parser accepts an empty username with a password.
+  assert.equal(new URL("https://:password@example.com/").password, "password", "the parser supports a password-only address");
+  const passwordOnly = affectedFor("https://:password@example.com/path?ref=mail");
+  assert.deepEqual(passwordOnly, ["https://example.com/path?ref=mail"]);
+  assert.ok(!JSON.stringify(passwordOnly).includes("password"));
+});
+
+test("security: the measurement keeps the address it was made for; only the finding's address is stripped", () => {
+  const requested = "https://username:password@example.com/path?ref=mail";
+  const joined = withSpeed(auditResult(), speedResult({ data: performanceData({ requestedUrl: requested }) }));
+  assert.equal(joined.data.performance.requestedUrl, requested, "the measurement record is not rewritten");
+  for (const finding of [...joined.site.findings, ...joined.data.findings].filter((f) => f.category === "speed")) {
+    assert.ok(!JSON.stringify(finding).includes("password") && !JSON.stringify(finding).includes("username"), finding.id);
+  }
+  // Findings that are not speed findings are untouched.
+  assert.deepEqual(
+    joined.site.findings.filter((f) => f.category !== "speed"),
+    auditResult().site.findings.filter((f) => f.category !== "speed"),
+  );
+});
+
+test("security: the PDF's speed card shows the address without credentials, query kept", async () => {
+  const { buildPdfDocument } = await import("./pdfDocument.ts");
+  const { createJobStore } = await import("../jobs/jobStore.ts");
+  const { documentHtml } = await import("./pdf/shell.ts");
+  const { escapeHtml } = await import("./pdf/escape.ts");
+  const { runRealAudit } = await import("./pdf/realAudit.fixture.mts");
+
+  // A complete audit through the production crawler and rules (the minimal fixture above is not a full PDF input).
+  const audit = await runRealAudit({
+    site: { "https://example.com/": { html: `<!doctype html><html lang="en"><head><title>Example</title></head><body><h1>Welcome</h1><p>We sell widgets to businesses across the country and have done so since 1994.</p></body></html>` } },
+  });
+  const store = createJobStore<SiteAuditResult, SpeedResult, never, PerformanceData>();
+  const job = store.create("https://example.com/");
+  store.finish(job.id, "completed", audit);
+  store.attach(job.id, speedResult({ data: performanceData({ requestedUrl: "https://username:password@example.com/path?ref=mail" }) }));
+  const outcome = buildPdfDocument(job.id, store);
+  assert.ok(outcome.ok);
+  if (!outcome.ok) return;
+
+  assert.equal(outcome.document.speedFindings.length, 1, "the speed card is printed");
+  const html = documentHtml(outcome.document);
+  const clean = "https://example.com/path?ref=mail";
+  assert.ok(html.includes(`<p class="finding-meta">${escapeHtml(`Measured on ${clean} (mobile).`)}</p>`), "the scope line names the clean address");
+  assert.ok(html.includes(`<li>${escapeHtml(clean)}</li>`), "the address list names the clean address, query kept");
+  assert.ok(!html.includes("username"), "the username is printed nowhere");
+  assert.ok(!html.includes("password"), "the password is printed nowhere");
+});

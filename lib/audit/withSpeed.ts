@@ -29,6 +29,7 @@
  * them in one object, and say honestly how far the speed findings reach.
  */
 import { SPEED_RULES } from "../rules/all.ts";
+import { withoutCredentials } from "../collector/url.ts";
 import type { Finding, SiteAuditResult, SpeedResult } from "../types";
 
 /**
@@ -98,7 +99,8 @@ function sortFindings(findings: Finding[]): Finding[] {
 export function withSpeed(result: SiteAuditResult, speed: SpeedResult | null): SiteAuditResult {
   if (speed === null) return result;
 
-  const measuredUrl = speed.data.requestedUrl;
+  // Strip credentials before exposing the measured URL in Speed findings.
+  const measuredUrl = withoutCredentials(speed.data.requestedUrl);
   const speedFindings = speed.findings.map((finding) => withReach(finding, measuredUrl));
 
   return {

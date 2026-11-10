@@ -16,6 +16,8 @@ import { EMBEDDED_FACES, FONT_FACE_CSS, MONO, SANS, SERIF } from "./fonts.ts";
 import { STYLESHEET } from "./styles.ts";
 import { COVER_ADDRESS, COVER_COLUMN_MM, COVER_REDIRECT } from "./cover.ts";
 import { PAGE_FORMAT, PAGE_HEIGHT, PAGE_WIDTH } from "./settings.ts";
+import { documentHtml } from "./shell.ts";
+import { testDocument } from "./testDocument.fixture.mts";
 
 const FONT_DIR = path.join(import.meta.dirname, "assets", "fonts");
 
@@ -318,4 +320,113 @@ test("the addressee block at its fullest still ends above the title", () => {
 
   const blockEnd = blockTop + label + name + contact + address + note;
   assert.ok(blockEnd < titleTop, `the block ends at ${blockEnd.toFixed(1)}mm and the title starts at ${titleTop}mm`);
+});
+
+// ---------------------------------------------------------------------------
+// CP5: the redesigned sections are styled, and paginate cleanly
+// ---------------------------------------------------------------------------
+
+/** Every selector in the stylesheet, comments removed, one string per rule. */
+const SELECTOR_TEXT = [...STYLESHEET.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]*)\{/g)]
+  .map((match) => match[1])
+  .join(" ");
+
+/** Whether any selector names the class (as `.name`, not as the prefix of a longer name). */
+const hasRuleFor = (className: string) =>
+  new RegExp(`\\.${className.replace(/[-]/g, "\\-")}(?![\\w-])`).test(SELECTOR_TEXT);
+
+/** The classes the CP3 and CP4 markup prints, which CP5 styles. */
+const CP5_CLASSES = [
+  // Executive Summary
+  "exec-summary", "exec-verdict", "exec-note", "exec-figures",
+  "exec-tiles", "exec-tile", "exec-tile-text", "exec-tile-rate", "exec-tile-ungraded",
+  "exec-areas-new", "exec-area", "exec-area-label", "section-status",
+  "exec-ai", "exec-improvements", "exec-strengths", "exec-coverage",
+  // Check lists
+  "checklist", "check", "check-label", "check-status",
+  // Findings and the category sections
+  "site-level-issues", "search-measurement", "page-url", "crawl-table",
+  "page-level-issues", "finding-cards", "pitch", "limitations",
+  // Speed
+  "speed-glossary", "speed-real-visitor",
+] as const;
+
+test("CP5: every class the redesigned sections print has a style rule", () => {
+  for (const className of CP5_CLASSES) assert.ok(hasRuleFor(className), `.${className} has a rule`);
+});
+
+test("CP5: every element the shell prints for the test document with a class is styled", () => {
+  /*
+   * PER ELEMENT, NOT PER NAME. An element is styled when at least one of its
+   * classes has a rule: the cover's `class="client cover-client"`, for example,
+   * is drawn by `.cover-client`. Every class attribute must be reached.
+   */
+  const attributes = new Set([...documentHtml(testDocument()).matchAll(/class="([^"]+)"/g)].map((match) => match[1]));
+  assert.ok(attributes.size > 40, "the document prints its classes");
+  const unstyled = [...attributes].filter((attribute) => !attribute.split(/\s+/).some(hasRuleFor)).sort();
+  assert.deepEqual(unstyled, [], "no printed element is left without a rule");
+});
+
+test("CP5: a check-list line is its label, a line break, then its status (revision 9 §1.17)", () => {
+  const label = rulesFor(".check-label");
+  const status = rulesFor(".check-status");
+  assert.match(label, /font-weight:\s*600/, "the label is the stronger of the two");
+  assert.ok(!/display:/.test(label) && !/display:/.test(status), "both stay inline, so the markup's own line break separates them");
+  assert.ok(!/br\s*\{[^}]*display:\s*none/.test(STYLESHEET), "the line break is never hidden");
+  assert.match(rulesFor(".checklist"), /list-style:\s*none/, "no bullet before a line");
+});
+
+test("CP5: small wholes are never split across a page", () => {
+  for (const selector of [
+    ".check", ".exec-tile", ".exec-tiles", ".exec-figures", ".exec-area p", ".exec-ai", ".exec-coverage",
+    ".crawl-table", ".speed-glossary li", ".speed-real-visitor", ".pitch",
+    // Pre-CP5 rules, still in force
+    ".finding", ".facts tr",
+  ]) {
+    assert.match(rulesFor(selector), /break-inside:\s*avoid/, `${selector} is kept whole`);
+  }
+  // D3: an area block as a whole flows; kept whole, each left a gap behind it.
+  assert.ok(!/break-inside:\s*avoid/.test(rulesFor(".exec-area")), ".exec-area may flow across a page");
+});
+
+test("CP5: the audit sections flow on, with no forced new page (7A §18)", () => {
+  /*
+   * §18 forces two pages only: the cover and "About this report". The sections
+   * between them flow, so none of them may carry a forced break of its own;
+   * render.test.mts holds the resulting page count.
+   */
+  for (const selector of [".findings.page-level-issues", ".page-level-issues", ".seo-audit", ".security-audit", ".speed", ".technical-audit", ".limitations"]) {
+    assert.ok(!/break-before:\s*page/.test(rulesFor(selector)), `${selector} does not force a new page`);
+  }
+  assert.ok(!/break-before/.test(rulesFor(".pitch")), "the Skybook section flows on, so it never sits alone");
+  assert.ok(!/break-before/.test(rulesFor(".exec-summary")), "the summary follows the cover's own page break");
+});
+
+test("CP5: headings and lead-ins stay with what follows them", () => {
+  for (const selector of ["h2", "h3", ".lead", ".exec-verdict", ".section-status", ".page-url"]) {
+    assert.match(rulesFor(selector), /break-after:\s*avoid/, `${selector} is kept with its content`);
+  }
+  // D3: break-after does nothing on an inline-level box, so the status label must be a block.
+  assert.ok(!/display:\s*inline/.test(rulesFor(".section-status")), ".section-status is block-level");
+  assert.match(rulesFor(".section-status"), /break-before:\s*avoid/, "a status stays with the paragraph above it");
+  assert.match(rulesFor(".section-status:last-child"), /break-after:\s*auto/, "a closing status is not carried into the next area");
+});
+
+test("CP5: no new rule clips, hides or caps the height of content", () => {
+  for (const className of CP5_CLASSES) {
+    const rules = rulesFor(`.${className}`);
+    assert.ok(!/overflow:\s*hidden/.test(rules), `.${className} is not clipped`);
+    assert.ok(!/display:\s*none/.test(rules), `.${className} is not hidden`);
+    assert.ok(!/visibility:\s*hidden/.test(rules), `.${className} is not invisible`);
+    assert.ok(!/(?:^|[\s;])(?:max-)?height:/.test(rules), `.${className} has no fixed or capped height`);
+  }
+});
+
+test("CP5: the existing page breaks are preserved", () => {
+  assert.match(rulesFor(".cover"), /break-after:\s*page/);
+  assert.match(rulesFor(".overall-summary"), /break-before:\s*page/);
+  for (const selector of [".ai-section", ".measured", ".about"]) {
+    assert.match(rulesFor(selector), /break-before:\s*page/, `${selector} still starts a page`);
+  }
+  assert.match(rulesFor(".facts thead"), /display:\s*table-header-group/, "a long table still repeats its header");
 });

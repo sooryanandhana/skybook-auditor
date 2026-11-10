@@ -28,6 +28,8 @@ import { scoreAudit } from "../scoring/score.ts";
 import { withSpeed } from "./withSpeed.ts";
 import { runSeoChecks } from "../collector/seoChecks.ts";
 import { runSecurityChecks } from "../collector/securityChecks.ts";
+import { describeCertificate } from "../collector/sslChecks.ts";
+import type { PeerCertificate } from "node:tls";
 import { MAX_AFFECTED_PAGES } from "../report/aggregate.ts";
 import { AI_CONTRACT_VERSION } from "../ai/contract.ts";
 import type { ExplainResult } from "../ai/gemini/explain.ts";
@@ -2002,6 +2004,142 @@ test("F13: a certificate failure carries no coverage figure and lists every page
   assert.deepEqual([seo.assessed, seo.ranCount, seo.skippedCount], [false, 0, 10]);
   const speed = doc.score.categories.find((tile) => tile.category === "speed")!;
   assert.deepEqual([speed.ranCount, speed.skippedCount], [0, 0]);
+});
+
+// ---------------------------------------------------------------------------
+// D1 (CP3 certificate wording, option A): Certificate trust points to the
+// finding that already reports the rejection
+// ---------------------------------------------------------------------------
+
+/** A measured certificate, built by the collector's own `describeCertificate` (as realAudit.fixture.mts does). */
+function measuredSsl(over: {
+  validTo: string;
+  altNames: string;
+  trusted: boolean | null;
+  problem: "expired" | "wrong-hostname" | "self-signed" | null;
+}) {
+  const name = { C: "US", ST: "", L: "", O: "Example Company", OU: "", CN: "example.com" };
+  const peer: Partial<PeerCertificate> = {
+    valid_from: "Jan  1 00:00:00 2025 GMT",
+    valid_to: over.validTo,
+    subjectaltname: over.altNames,
+    issuer: name,
+    subject: name,
+  };
+  return {
+    status: "checked",
+    hostname: "example.com",
+    certificate: describeCertificate(peer, "example.com", "TLSv1.3", new Date("2026-09-11T00:00:00.000Z")),
+    trusted: over.trusted,
+    problem: over.problem,
+    failure: null,
+    message: "The certificate was read.",
+  };
+}
+
+/** A whole-site audit with the given certificate and site findings, every rule recorded as run. */
+function certificateDocument(ssl: Record<string, unknown>, siteFindings: Finding[]): PdfDocument {
+  const base = storedAudit();
+  return documentOf(
+    storedAudit({
+      data: { ...base.data, ssl },
+      site: { findings: siteFindings, skippedChecks: [], ranRules: AUDIT_RULES.map((rule) => rule.id), evaluatedPages: 128 },
+    }),
+  );
+}
+
+const trustLine = (doc: PdfDocument) => checklistItems(doc).find((item) => item.ruleId === "security.ssl.untrusted")!;
+const certificateCards = (doc: PdfDocument) => allCards(doc).filter((card) => card.ruleId.startsWith("security.ssl."));
+
+const EXPIRED_TITLE = "TLS certificate has expired";
+const HOSTNAME_TITLE = "TLS certificate does not cover this address";
+
+test("D1: an expired, untrusted certificate: Certificate trust points to the existing expiry finding", () => {
+  const doc = certificateDocument(
+    measuredSsl({ validTo: "Jan  1 00:00:00 2026 GMT", altNames: "DNS:example.com", trusted: false, problem: "expired" }),
+    [problem("security.ssl.expired", EXPIRED_TITLE, "site")],
+  );
+
+  assert.deepEqual(trustLine(doc), {
+    ruleId: "security.ssl.untrusted",
+    scope: "site",
+    status: "issue",
+    findingTitle: EXPIRED_TITLE,
+  });
+  // The finding itself is unchanged, and no second certificate finding appears.
+  const cards = certificateCards(doc);
+  assert.deepEqual(cards.map((card) => card.ruleId), ["security.ssl.expired"]);
+  assert.equal(cards[0].title, EXPIRED_TITLE);
+  assert.equal(cards[0].severity, "medium", "the fixture's severity, unchanged");
+  assert.equal(checklistItems(doc).find((item) => item.ruleId === "security.ssl.expired")!.status, "issue");
+});
+
+test("D1: a certificate for the wrong address: Certificate trust points to the existing hostname finding", () => {
+  const doc = certificateDocument(
+    measuredSsl({ validTo: "Jan  1 00:00:00 2027 GMT", altNames: "DNS:other.example.net", trusted: false, problem: "wrong-hostname" }),
+    [problem("security.ssl.hostname", HOSTNAME_TITLE, "site")],
+  );
+
+  assert.equal(trustLine(doc).status, "issue");
+  assert.equal(trustLine(doc).findingTitle, HOSTNAME_TITLE);
+  assert.deepEqual(certificateCards(doc).map((card) => card.ruleId), ["security.ssl.hostname"], "no duplicate finding");
+});
+
+test("D1: a trusted certificate, or one never judged, is unchanged: Certificate trust has no issue", () => {
+  for (const trusted of [true, null]) {
+    const doc = certificateDocument(
+      measuredSsl({ validTo: "Jan  1 00:00:00 2027 GMT", altNames: "DNS:example.com", trusted, problem: null }),
+      [],
+    );
+    assert.equal(trustLine(doc).status, "no-issue", `trusted: ${trusted}`);
+    assert.equal(trustLine(doc).findingTitle, null, `trusted: ${trusted}`);
+    assert.deepEqual(certificateCards(doc), [], `trusted: ${trusted}`);
+  }
+});
+
+test("D1: other rejections keep the untrusted finding's own line, and nothing is pointed at a finding that does not exist", () => {
+  // Self-signed: the untrusted rule reports it itself.
+  const selfSigned = certificateDocument(
+    measuredSsl({ validTo: "Jan  1 00:00:00 2027 GMT", altNames: "DNS:example.com", trusted: false, problem: "self-signed" }),
+    [problem("security.ssl.untrusted", "TLS certificate is not trusted", "site")],
+  );
+  assert.equal(trustLine(selfSigned).status, "issue");
+  assert.equal(trustLine(selfSigned).findingTitle, "TLS certificate is not trusted");
+
+  // Rejected as expired, but no expiry finding exists: no line is pointed at it.
+  const noExpiryFinding = certificateDocument(
+    measuredSsl({ validTo: "Jan  1 00:00:00 2027 GMT", altNames: "DNS:example.com", trusted: false, problem: "expired" }),
+    [problem("security.ssl.hostname", HOSTNAME_TITLE, "site")],
+  );
+  assert.equal(trustLine(noExpiryFinding).status, "no-issue", "the rejection reason must match an existing finding");
+  assert.equal(trustLine(noExpiryFinding).findingTitle, null);
+});
+
+test("D1: a certificate failure points Certificate trust to the expiry finding, with no duplicate finding", async () => {
+  const audit = await runRealCertificateFailure({
+    site: {
+      "https://example.com/": {
+        html: "",
+        unreadable: "The website's security certificate has expired.",
+        certificateProblem: "expired",
+      },
+    },
+    checks: { certificateExpired: true },
+  });
+  const store = createJobStore<AuditResult, SpeedResult, ExplainResult, SpeedResult["data"]>();
+  const job = store.create("https://example.com/");
+  store.finish(job.id, "partial", audit);
+  const outcome = buildPdfDocument(job.id, store);
+  if (!outcome.ok) assert.fail(outcome.reason);
+  const doc = outcome.document;
+
+  const expiredFinding = audit.site.findings.find((finding) => finding.id === "security.ssl.expired")!;
+  assert.ok(expiredFinding, "the fixture's expiry finding exists");
+  assert.ok(!audit.site.findings.some((finding) => finding.id === "security.ssl.untrusted"), "one cause, one finding");
+
+  assert.equal(trustLine(doc).status, "issue");
+  assert.equal(trustLine(doc).findingTitle, expiredFinding.title);
+  assert.deepEqual(certificateCards(doc).map((card) => card.ruleId), ["security.ssl.expired"], "no duplicate finding");
 });
 
 // ---------------------------------------------------------------------------

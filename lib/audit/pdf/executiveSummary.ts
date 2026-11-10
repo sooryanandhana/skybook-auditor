@@ -186,9 +186,8 @@ export function executiveSummaryHtml(input: ExecutiveSummaryInput): string {
 // ===========================================================================
 // The redesigned Executive Summary (CP1 F2, CP3 step 3b-ii)
 //
-// NOT YET PRINTED. `executiveSummarySectionHtml` is complete and tested, but
-// nothing in the document calls it until the shell is rewired in CP3 step 4.
-// Until then the report prints `executiveSummaryHtml` above, unchanged.
+// PRINTED. Since CP3 step 4b, `shell.ts` prints `executiveSummarySectionHtml`
+// in place of `executiveSummaryHtml` above.
 //
 // IT MEASURES NOTHING AND DECIDES NOTHING. Every grade, count, status, title,
 // destination and sentence of the audit's own comes from the document model;
@@ -580,8 +579,8 @@ function coverageHtml(doc: PdfDocument): string {
 /**
  * The redesigned Executive Summary (CP1 F2), as one numbered section.
  *
- * NOT WIRED: `shell.ts` still prints `executiveSummaryHtml`. CP3 step 4 swaps
- * them.
+ * WIRED: since CP3 step 4b, `shell.ts` prints this section in place of
+ * `executiveSummaryHtml`.
  */
 export function executiveSummarySectionHtml(doc: PdfDocument): string {
   return (

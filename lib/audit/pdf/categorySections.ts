@@ -2,9 +2,8 @@
  * The SEO, Security and Technical sections of the redesigned report (CP1 F4,
  * CP3 step 3a).
  *
- * NOT YET PRINTED. These functions are complete and tested, but nothing in the
- * document calls them until the shell is rewired in CP3 step 4. Until then the
- * report prints exactly what it printed before.
+ * PRINTED. Since CP3 step 4b, `shell.ts` prints these three sections in the
+ * report, in the approved section order.
  *
  * IT MEASURES NOTHING AND DECIDES NOTHING. Every status, title, count, address
  * and measured row comes from the document model. This file chooses only the

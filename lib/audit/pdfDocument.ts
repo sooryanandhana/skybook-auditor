@@ -144,6 +144,7 @@ import type {
   SiteAuditResult,
   SiteFileStatus,
   SkippedCheck,
+  SslData,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -995,12 +996,23 @@ const CHECKLIST_CATEGORIES = ["seo", "security", "technical"] as const;
  * NEVER A PASS WITHOUT EVIDENCE. "no-issue" needs the ledger to name the rule.
  * A stored audit that predates the ledger cannot show that a silent rule ran,
  * so such a rule reads "not-checked" rather than borrowing a pass.
+ *
+ * CERTIFICATE TRUST POINTS TO THE FINDING THAT ALREADY REPORTS IT (CP3 D1,
+ * option A). `security.ssl.untrusted` stays silent when the certificate was
+ * rejected for being expired or for the wrong address and that rule has
+ * already reported it (one cause, one finding: lib/rules/security.ts). Its
+ * line would then say "No issue found on the site" beside a measured
+ * "Trusted: No". So when the certificate was measured as untrusted, the
+ * rejection reason is "expired" or "wrong-hostname", and the matching expiry
+ * or hostname finding exists, the line points to that existing finding by its
+ * own title. No finding is added and no severity changes.
  */
 function checklistsFor(
   findings: readonly Finding[],
   skippedChecks: readonly SkippedCheck[],
   ranRules: readonly string[] | undefined,
   certificateFailure: boolean,
+  ssl: SslData,
 ): PdfChecklist[] {
   const issues = new Map<string, Finding>();
   for (const finding of findings) {
@@ -1017,10 +1029,24 @@ function checklistsFor(
     return "no-issue";
   };
 
+  /** The existing finding that already reports an untrusted certificate, if any. */
+  const trustReportedBy = (): Finding | undefined => {
+    if (ssl.trusted !== false) return undefined;
+    if (ssl.problem === "expired") return issues.get("security.ssl.expired");
+    if (ssl.problem === "wrong-hostname") return issues.get("security.ssl.hostname");
+    return undefined;
+  };
+
   return CHECKLIST_CATEGORIES.map((category) => ({
     category,
     items: AUDIT_RULES.filter((rule) => rule.category === category).map((rule) => {
       const status = statusOf(rule.id, rule.scope);
+      if (rule.id === "security.ssl.untrusted" && status === "no-issue") {
+        const reportedBy = trustReportedBy();
+        if (reportedBy !== undefined) {
+          return { ruleId: rule.id, scope: rule.scope, status: "issue" as const, findingTitle: reportedBy.title };
+        }
+      }
       return {
         ruleId: rule.id,
         scope: rule.scope,
@@ -1425,7 +1451,7 @@ function certificateFailureDocument(
     coverageFlags: { partial: true, hasExclusions: audit.crawl.robots.excluded > 0 },
     configuredLimits: { maxPages: audit.crawl.limits.maxPages, maxDurationMs: audit.crawl.limits.maxDurationMs },
     singlePageAudit: false,
-    checklists: checklistsFor(findings, skippedChecks, audit.site.ranRules, true),
+    checklists: checklistsFor(findings, skippedChecks, audit.site.ranRules, true, audit.ssl),
     // A speed check needs a page to measure, and none was read.
     speedFindings: [],
     technicalFiles: technicalFilesFrom(audit.technical),
@@ -1786,7 +1812,7 @@ export function buildPdfDocument(
       coverageFlags: { partial: !crawl.complete, hasExclusions: crawl.robots.excluded > 0 },
       configuredLimits: { maxPages: crawl.limits.maxPages, maxDurationMs: crawl.limits.maxDurationMs },
       singlePageAudit,
-      checklists: checklistsFor(findings, skippedChecks, whole.site.ranRules, false),
+      checklists: checklistsFor(findings, skippedChecks, whole.site.ranRules, false, data.ssl),
       speedFindings: findings
         .filter((finding) => finding.category === "speed")
         .map((finding) => toFinding(finding, "page", commentary, panels, context)),

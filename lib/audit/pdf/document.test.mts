@@ -864,6 +864,33 @@ test("T-4: a rule that ran clean shows the no-issue line, no card and nothing in
   }
 });
 
+test("D1: a certificate failure prints Certificate trust as pointing to the existing expiry finding, never as no issue", async () => {
+  const { certificate } = await fixtures;
+  const doc = documentOf(certificate);
+  const out = documentHtml(doc);
+  const security = sectionOf(out, "security-audit");
+
+  // Preconditions, from the audit data: one cause, one finding.
+  const expired = certificate.site.findings.find((finding) => finding.id === "security.ssl.expired");
+  assert.ok(expired !== undefined, "the fixture has an expiry finding");
+  assert.ok(!certificate.site.findings.some((finding) => finding.id === "security.ssl.untrusted"), "no separate untrusted finding");
+
+  // The line points to the existing finding, by its own title, with the approved wording.
+  assert.ok(
+    security.includes(checkLine("security.ssl.untrusted", siteIssueLine(expired.title))),
+    "Certificate trust: Issue found: see Site-Level Issues: <expiry finding title>",
+  );
+  assert.ok(
+    !security.includes(checkLine("security.ssl.untrusted", SITE_NO_ISSUE_LINE)),
+    "Certificate trust no longer says No issue found on the site",
+  );
+
+  // The finding is unchanged and printed once; no untrusted card appears.
+  assert.equal(cardsForRule(doc, "security.ssl.expired").length, 1, "one expiry card");
+  assert.equal(cardsForRule(doc, "security.ssl.untrusted").length, 0, "no duplicate finding");
+  assert.equal(count(out, `<h4 class="finding-title">${escapeHtml(expired.title)}</h4>`), 1, "the expiry card is printed once");
+});
+
 test("T-6: the check lists do not change when every skipped check's reason is reworded", async () => {
   const { partial } = await fixtures;
   const pristine = structuredClone(partial);

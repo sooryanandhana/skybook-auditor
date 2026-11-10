@@ -18,7 +18,7 @@ import puppeteer from "puppeteer";
 import { renderPdf } from "./render.ts";
 import { documentHtml } from "./shell.ts";
 import { PAGE_FORMAT, PAGE_MARGIN } from "./settings.ts";
-import { PAPER, TEXT_COLOURS } from "./styles.ts";
+import { PAPER, STYLESHEET, TEXT_COLOURS } from "./styles.ts";
 import { testDocument } from "./testDocument.fixture.mts";
 
 /** The whole file as text, compressed object streams included. */
@@ -274,4 +274,62 @@ test("the caption colour clears the ratio it used to fail", () => {
    */
   assert.ok(ratio(TEXT_COLOURS.caption, PAPER) >= 4.5);
   assert.notEqual(TEXT_COLOURS.caption, "#7c89a3", "the failing value is gone");
+});
+
+// ---------------------------------------------------------------------------
+// CP5: every text colour actually written in the stylesheet, and the type sizes
+// ---------------------------------------------------------------------------
+
+/** The declarations of every rule whose selector list names exactly the given selector. */
+function rulesFor(selector: string): string {
+  const css = STYLESHEET.replace(/\/\*[\s\S]*?\*\//g, "");
+  return [...css.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
+    .filter((rule) => rule[1].split(",").some((one) => one.trim() === selector))
+    .map((rule) => rule[2])
+    .join(" ");
+}
+
+/** The one dark card on the executive summary; its two text colours are read against it, not the paper. */
+const CHARCOAL = "#1b1e23";
+const ON_CHARCOAL = new Set(["#ffffff", "#aab4c3"]);
+
+test("CP5: every text colour written in the stylesheet clears 4.5 to 1 against what it sits on", () => {
+  /*
+   * NOT ONLY THE DECLARED PALETTE. TEXT_COLOURS lists the colours the design
+   * means to set on text; this reads every `color:` the stylesheet actually
+   * writes, so a colour added to a new rule cannot escape the measurement.
+   */
+  const css = STYLESHEET.replace(/\/\*[\s\S]*?\*\//g, "");
+  const colours = new Set([...css.matchAll(/(?<![\w-])color:\s*(#[0-9a-fA-F]{6})/g)].map((match) => match[1].toLowerCase()));
+  assert.ok(colours.size > 5, "the stylesheet's text colours are found");
+  for (const colour of colours) {
+    const ground = ON_CHARCOAL.has(colour) ? CHARCOAL : PAPER;
+    const measured = ratio(colour, ground);
+    assert.ok(measured >= 4.5, `${colour} on ${ground} is ${measured.toFixed(2)}:1, below 4.5:1`);
+  }
+});
+
+test("CP5: no text is set smaller than 6.5 point", () => {
+  const sizes = [...STYLESHEET.matchAll(/font-size:\s*([\d.]+)pt/g)].map((match) => Number(match[1]));
+  assert.ok(sizes.length > 20);
+  for (const size of sizes) assert.ok(size >= 6.5, `${size}pt is readable in print`);
+});
+
+test("CP5: check-list and section statuses are words in readable ink, never colour alone", () => {
+  // The markup prints every status as words; the styles must not reduce them to a colour.
+  const readable = [TEXT_COLOURS.body, TEXT_COLOURS.secondary];
+  for (const selector of [".check-status", ".section-status", ".check-label"]) {
+    const colour = /(?<![\w-])color:\s*(#[0-9a-fA-F]{6})/.exec(rulesFor(selector))?.[1];
+    assert.ok(colour !== undefined, `${selector} states its colour`);
+    assert.ok(readable.includes(colour), `${selector} is in body or secondary ink, not a severity colour`);
+  }
+});
+
+test("CP5: the AI paragraph in the Executive Summary is set apart as commentary, and stays labelled", () => {
+  // The same panel and deep blue rule as every other piece of AI text, so a reader
+  // can tell it from the measured figures; the D5 label is printed by the markup.
+  const rules = rulesFor(".exec-ai");
+  assert.match(rules, /background:/, "on the pale panel");
+  assert.match(rules, /border-left:[^;]*solid/, "with the rule down its left edge");
+  assert.match(rulesFor(".ai-label"), /text-transform:\s*uppercase/, "its label keeps the labelled look");
 });

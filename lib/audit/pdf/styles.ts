@@ -869,6 +869,175 @@ export const STYLESHEET: string =
   .final-list { margin: 0 0 2mm; padding-left: 5mm; max-width: 72ch; }
   .final-list li { margin: 0 0 .6mm; }
 
+  /* ===================================================================
+   * CP5: THE REDESIGNED SECTIONS (CP3 and CP4 markup), in the same system.
+   *
+   * Nothing new is invented here: the same ink, blues, hairline, pale panel
+   * and charcoal; the same serif for figures and the same small spaced labels.
+   * No colour is ever the only carrier of a status -- every status is printed
+   * as words by the markup, and these rules only give it weight and place.
+   * =================================================================== */
+
+  /* ---------- the Executive Summary ---------- */
+
+  /* The measured verdict leads the section, in the serif, as the one line a
+     reader takes away. */
+  .exec-summary .exec-verdict {
+    font-family: ${SERIF}; font-size: 14pt; font-weight: 600; line-height: 1.3;
+    color: ${INK}; margin: 0 0 3mm;
+  }
+  .exec-note { font-size: 9pt; color: ${INK_SOFT}; }
+
+  /* The two overall figures, as quiet bordered facts on one row. */
+  .exec-figures {
+    list-style: none; padding: 0; margin: 4mm 0 3mm;
+    display: flex; flex-wrap: wrap; gap: 3mm;
+  }
+  .exec-figures li {
+    max-width: none; margin: 0;
+    border: .25mm solid ${HAIRLINE}; padding: 2.2mm 3.5mm;
+    font-size: 9.5pt; color: ${INK};
+  }
+
+  /* One tile per area: the sentence, and the pass rate in the serif beside it.
+     The deep blue rule marks a graded tile; an ungraded one keeps the plain rule
+     and the quieter ink, and still says why in words. */
+  .exec-tiles {
+    list-style: none; padding: 0; margin: 0 0 2mm;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 3mm;
+  }
+  .exec-tile {
+    max-width: none; margin: 0;
+    display: flex; align-items: baseline; justify-content: space-between; gap: 3mm;
+    background: ${PAPER};
+    border: .25mm solid ${HAIRLINE};
+    border-top: 1mm solid ${SKYBOOK_DEEP};
+    padding: 3mm 4mm;
+    font-size: 9.5pt; line-height: 1.45; color: ${INK};
+  }
+  .exec-tile-text { flex: 1; }
+  .exec-tile-rate {
+    flex-shrink: 0;
+    font-family: ${SERIF}; font-size: 16pt; font-weight: 600; line-height: 1; color: ${INK};
+  }
+  .exec-tile-ungraded { border-top-color: ${RULE}; color: ${INK_SOFT}; }
+
+  /* The four areas, each a ruled block of labelled paragraphs. */
+  .exec-areas-new { margin: 7mm 0 0; }
+  .exec-area {
+    border-top: .25mm solid ${HAIRLINE};
+    padding: 3.5mm 0 1mm;
+  }
+  .exec-area h3 { font-size: 8pt; color: ${INK_SOFT}; margin: 0 0 2mm; }
+  .exec-area p { font-size: 9.5pt; line-height: 1.5; margin: 0 0 1.8mm; }
+  .exec-area-label {
+    font-size: 6.8pt; font-weight: 600; letter-spacing: .16em;
+    text-transform: uppercase; color: ${INK_FAINT};
+  }
+
+  /* An area's or a section's status, in words, set as a small bordered label.
+     Ink, not a severity colour: the word is the message. A block that shrinks
+     to its word, not an inline-block: break-after applies only to block-level
+     boxes, and the label must stay with the finding it introduces (D3). */
+  .section-status {
+    display: block;
+    width: fit-content;
+    border: .25mm solid ${INK_SOFT};
+    padding: .9mm 2.3mm .8mm;
+    font-size: 7pt; font-weight: 600; line-height: 1.2;
+    letter-spacing: .14em; text-transform: uppercase;
+    color: ${INK}; margin: 0 0 2.5mm;
+  }
+
+  /* The AI paragraph: the same panel and blue rule as every other piece of
+     AI text, so it reads as commentary on the measured figures above it. */
+  .exec-ai {
+    background: ${PANEL};
+    border-left: .8mm solid ${SKYBOOK_DEEP};
+    padding: 4mm 5mm;
+    margin: 6mm 0 0;
+  }
+  .exec-ai p:last-child { margin-bottom: 0; }
+
+  .exec-improvements { margin: 6mm 0 0; }
+  .exec-improvements ol { font-size: 9.5pt; margin-bottom: 0; }
+  .exec-strengths { margin: 5mm 0 0; }
+  .exec-strengths ul { font-size: 9.5pt; margin-bottom: 0; }
+
+  /* What the audit covered, closing the section in the caption's key. */
+  .exec-coverage {
+    border-top: .25mm solid ${HAIRLINE};
+    padding: 3mm 0 0;
+    margin: 6mm 0 0;
+  }
+  .exec-coverage p { font-size: 9pt; color: ${INK_SOFT}; margin: 0 0 1.5mm; }
+
+  /* ---------- check lists (CP3 revision 9, §1.17) ----------
+     Each line is the check's label, a line break, then its status, exactly as
+     the markup sets them. A hairline separates the lines; nothing is coloured. */
+  .checklist {
+    list-style: none; padding: 0; margin: 0 0 6mm;
+    border-top: .25mm solid ${HAIRLINE};
+  }
+  .check {
+    max-width: none; margin: 0;
+    padding: 1.5mm 0;
+    border-bottom: .25mm solid ${HAIRLINE};
+    line-height: 1.35;
+  }
+  .check-label { font-size: 9.5pt; font-weight: 600; color: ${INK}; }
+  .check-status { font-size: 9pt; color: ${INK_SOFT}; }
+
+  /* ---------- category sections: site issues, measurements, crawl ---------- */
+
+  .site-level-issues { margin: 6mm 0 0; }
+  .finding-cards { margin: 0 0 2mm; }
+
+  /* The page a search measurement was taken on, as an address. */
+  .search-measurement .page-url,
+  .page-url {
+    font-family: ${MONO}; font-size: 8.5pt; line-height: 1.45;
+    color: ${INK_SOFT}; overflow-wrap: anywhere; max-width: none; margin: 0 0 2mm;
+  }
+
+  .crawl-table { margin: 4mm 0 3mm; }
+  .crawl-table .facts { margin-bottom: 0; }
+
+  /* ---------- speed: the glossary and the real-visitor explanation ---------- */
+
+  .speed-glossary {
+    border-top: .25mm solid ${HAIRLINE};
+    padding: 4mm 0 0;
+    margin: 4mm 0 0;
+  }
+  .speed-glossary ul { list-style: none; padding: 0; margin: 0; }
+  .speed-glossary li { font-size: 9pt; line-height: 1.5; color: ${INK_SOFT}; margin: 0 0 1.4mm; }
+
+  .speed-real-visitor {
+    background: ${PANEL};
+    padding: 4mm 5mm;
+    margin: 4mm 0 0;
+  }
+  .speed-real-visitor p { font-size: 9.5pt; line-height: 1.5; }
+  .speed-real-visitor p:last-child { margin-bottom: 0; }
+
+  /* ---------- the Skybook section ----------
+     Set apart on the pale panel with the deep blue rule, as the one section
+     that speaks for Skybook rather than about the site. */
+  .pitch {
+    background: ${PANEL};
+    border-left: 1mm solid ${SKYBOOK_DEEP};
+    padding: 7mm 8mm 4mm;
+  }
+  .pitch p { font-size: 10.5pt; line-height: 1.55; color: ${INK}; }
+  .pitch p:last-child { font-weight: 600; }
+
+  /* ---------- Limitations and About This Audit ---------- */
+
+  .limitations h3 { margin-top: 5mm; }
+  .limitations ul { font-size: 9.5pt; }
+  .limitations .facts { margin-bottom: 4mm; }
+
   /* ---------- page breaks, 7A §18 ---------- */
 
   /*
@@ -901,6 +1070,44 @@ export const STYLESHEET: string =
   .ai { break-inside: avoid; }
 
   /*
+   * CP5: THE REDESIGNED SECTIONS KEEP THEIR SMALL WHOLES TOGETHER. A check-list
+   * line, an area tile, an area's labelled paragraph, the AI paragraph, the
+   * crawl table, a glossary entry, the real-visitor explanation and the Skybook
+   * section each read as one thing. A list or a section as a whole may still
+   * break between them, and Chromium splits any one of them if it is taller
+   * than a page, so nothing is ever clipped.
+   *
+   * An Executive Summary area block as a whole flows across pages: kept whole,
+   * each one pushed to a fresh page and left a gap behind it (D3). Its heading
+   * stays with what follows (the h3 rule), and each label stays with its text,
+   * because both sit in the one paragraph kept whole here.
+   */
+  .check,
+  .exec-tile,
+  .exec-tiles,
+  .exec-figures,
+  .exec-area p,
+  .exec-ai,
+  .exec-coverage,
+  .exec-improvements li,
+  .crawl-table,
+  .speed-glossary li,
+  .speed-real-visitor,
+  .pitch { break-inside: avoid; }
+
+  /*
+   * THE AUDIT SECTIONS FLOW (7A §18). Only the cover and "About this report"
+   * force a page; these sections run on after whatever precedes them and may
+   * break anywhere between their own kept-whole parts. Stated, not left to the
+   * default, so no later rule quietly forces a page for one of them.
+   */
+  .page-level-issues,
+  .seo-audit,
+  .security-audit,
+  .speed,
+  .technical-audit { break-inside: auto; }
+
+  /*
    * THE FINAL ASSESSMENT STAYS WHOLE. It is a short closing recap — the grade,
    * a line of status, and the gate's own priorities — and it reads as one thing.
    * Kept together it never strands its priority list alone on an otherwise empty
@@ -930,9 +1137,18 @@ export const STYLESHEET: string =
    * it stranded as the last line on a page.
    */
   h1, h2, h3, .finding-title, .ai-label, .caveat-label, .remediation-label, .finding-eyebrow, .client-ai-subhead,
-  .panel-label, .score-gate-heading, .final-label, .lead {
+  .panel-label, .score-gate-heading, .final-label, .lead,
+  .exec-verdict, .section-status, .page-url {
     break-after: avoid;
   }
+  /*
+   * A STATUS LABEL BELONGS TO ITS OWN AREA (D3). It stays with the paragraph
+   * above it, and with "What we found" below it when there is one. When it is
+   * the last thing in its area, nothing of its own follows, and keeping it with
+   * the next area would carry it away from the one it describes.
+   */
+  .section-status { break-before: avoid; }
+  .section-status:last-child { break-after: auto; }
 
   /*
    * A TABLE THAT SPANS PAGES REPEATS ITS HEADER. §18 requires it, and this is

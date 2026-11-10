@@ -323,8 +323,8 @@ export const NO_PAGE_READ_SENTENCE = "No page could be read, so no page-level ch
 /**
  * The redesigned Page-Level Issues section (CP1 F1, CP3 step 4a).
  *
- * NOT YET PRINTED. Nothing in the document calls it until the shell is rewired
- * in CP3 step 4b. Until then the report prints `findingsHtml` above, unchanged.
+ * PRINTED. Since CP3 step 4b, `shell.ts` prints this section in place of
+ * `findingsHtml` above.
  *
  * THE SAME GROUPS AND THE SAME CARDS, drawn by the same `group` helper as
  * every other findings section, in the order the model gave them.

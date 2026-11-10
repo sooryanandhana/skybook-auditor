@@ -2,13 +2,12 @@
  * "Let's Make Your Website Work Better for Your Business": the Skybook section
  * (CP1 F11, U1, CP3 step 3c-ii). Its internal name is "How Skybook Can Help".
  *
- * [COMPANY] CONFIRMATION REQUIRED BEFORE CLIENT USE. The section's claims, the
- * phrase "your Skybook contact" and the brand name must be confirmed by Skybook
- * before any report carrying this section is given to a client (CP1 R2).
+ * [COMPANY] CONFIRMED (CP1 R2). Skybook has approved the section's marketing
+ * claims, the report contact wording and contact-field approach, and the exact
+ * brand name: Skybook.
  *
- * NOT YET PRINTED. `pitchSectionHtml` is complete and tested, but nothing in
- * the document calls it until the shell is rewired in CP3 step 4, where it is
- * placed immediately before Limitations and About This Audit.
+ * PRINTED. Since CP3 step 4b, `shell.ts` prints `pitchSectionHtml`
+ * immediately before Limitations and About This Audit.
  *
  * FIXED WORDING ONLY. It reads nothing from the audit and claims nothing about
  * the audited site. The copy is the approved text, copied here because

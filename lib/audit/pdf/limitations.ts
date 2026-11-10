@@ -2,9 +2,8 @@
  * Limitations and About This Audit: the last section of the redesigned report
  * (CP1 F8, CP3 step 3c-ii).
  *
- * NOT YET PRINTED. `limitationsSectionHtml` is complete and tested, but nothing
- * in the document calls it until the shell is rewired in CP3 step 4. Until
- * then the report prints exactly what it printed before.
+ * PRINTED. Since CP3 step 4b, `shell.ts` prints `limitationsSectionHtml` as
+ * the report's last section.
  *
  * IT MEASURES NOTHING AND DECIDES NOTHING. Every skipped check and its reason,
  * every count, the stop reason and the configured limits come from the
@@ -161,8 +160,8 @@ function auditLimitsHtml(doc: PdfDocument): string {
  * The redesigned Limitations and About This Audit section (CP1 F8), as one
  * numbered section.
  *
- * NOT WIRED: `shell.ts` still prints the skipped and About sections it always
- * has. CP3 step 4 swaps them.
+ * WIRED: since CP3 step 4b, `shell.ts` prints this section in place of the
+ * earlier separate skipped-checks and About sections.
  */
 export function limitationsSectionHtml(doc: PdfDocument): string {
   return (

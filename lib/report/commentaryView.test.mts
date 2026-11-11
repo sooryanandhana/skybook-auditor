@@ -89,6 +89,40 @@ test("the results page uses these constants rather than its own copies", () => {
   assert.ok(page.includes("commentaryView"), "it imports them instead");
 });
 
+test("the summary panel labels its audit-derived sections and scopes the AI provenance", () => {
+  /*
+   * "What we checked" and "Next steps" are built from the measured findings by
+   * buildClientAiSummary, not written by a model, yet sit under the AI heading.
+   * The page must say so beside each one, and must name which sections the
+   * shared provenance sentence covers. Read as text: there is no component
+   * test harness here, and this asserts only that the wiring is present.
+   */
+  const page = fs.readFileSync(
+    new URL("../../app/AuditPage.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.ok(
+    page.includes(`const AUDIT_DERIVED_LABEL = "From the audit ${"—"} not written by AI";`),
+    "the audit-derived label is defined with the approved wording",
+  );
+
+  const derivedLabelUses = page.split("{AUDIT_DERIVED_LABEL}").length - 1;
+  assert.equal(derivedLabelUses, 2, "the label is shown on exactly the two derived sections");
+
+  for (const heading of ["What we checked", "Next steps"]) {
+    const at = page.indexOf(`>${heading}</p>`);
+    assert.ok(at >= 0, `the "${heading}" heading is present`);
+    assert.ok(
+      page.slice(at, at + 200).includes("{AUDIT_DERIVED_LABEL}"),
+      `"${heading}" is followed by the audit-derived label`,
+    );
+  }
+
+  assert.ok(page.includes("`AI-written: ${aiSections.join(\", \")}. `"), "the provenance names the AI-written sections");
+  assert.ok(page.includes("{explained ? AI_PROVENANCE :"), "the shared provenance sentence is still used, word for word");
+});
+
 // ---------------------------------------------------------------------------
 // The sentence that accounts for findings nobody wrote about
 // ---------------------------------------------------------------------------

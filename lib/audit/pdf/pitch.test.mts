@@ -39,11 +39,19 @@ test("one h2 and exactly the four approved paragraphs, in order, and nothing els
   );
 });
 
-test("the source carries the [COMPANY] confirmation note", () => {
+test("the source records the [COMPANY] confirmation as given", () => {
+  /*
+   * The three CP1 R2 confirmations (the marketing claims, the contact wording
+   * and contact-field approach, and the exact brand name) were given by
+   * Skybook and recorded in pitch.ts in 5060532. This keeps that record in the
+   * source, and keeps the superseded "required" note from coming back beside it.
+   */
   const source = fs.readFileSync(new URL("./pitch.ts", import.meta.url), "utf8");
-  assert.ok(source.includes("[COMPANY] CONFIRMATION REQUIRED BEFORE CLIENT USE"));
-  assert.ok(source.includes(`"your Skybook contact"`));
-  assert.ok(source.includes("brand name must be confirmed by Skybook"));
+  assert.ok(source.includes("[COMPANY] CONFIRMED (CP1 R2)"));
+  assert.ok(source.includes("Skybook has approved the section's marketing"));
+  assert.ok(source.includes("the report contact wording and contact-field approach"));
+  assert.ok(source.includes("brand name: Skybook"));
+  assert.ok(!source.includes("CONFIRMATION REQUIRED BEFORE CLIENT USE"));
 });
 
 test("wired (CP3 step 4b): the document carries this section once, immediately before Limitations", () => {

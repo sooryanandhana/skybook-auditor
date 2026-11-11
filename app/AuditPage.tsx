@@ -1846,6 +1846,16 @@ function FindingExplanation({ explanation }: { explanation: AIExplanation }) {
 }
 
 /**
+ * The label on the panel's two sections that no model writes.
+ *
+ * "What we checked" and "Next steps" are built by `buildClientAiSummary` from
+ * the measured findings alone (lib/report/clientSummary.ts), so they sit under
+ * the AI heading without being AI-written. This says so in words, beside each
+ * one, so the heading above them cannot be read as covering them.
+ */
+const AUDIT_DERIVED_LABEL = "From the audit — not written by AI";
+
+/**
  * The written summary of the whole audit, and only ever a real one.
  *
  * NOTHING IS INVENTED HERE. With no answer yet the panel says it is being
@@ -1903,6 +1913,18 @@ function AiSummaryPanel({
 
   const coverage = coverageNote(findingCount, MAX_EXPLAINED_FINDINGS);
 
+  /*
+   * WHICH SECTIONS THE PROVENANCE SENTENCE COVERS: only the AI-written ones
+   * actually on screen. The sentence itself is the shared one (7A §9), kept
+   * word for word; this names what it applies to, so it cannot be read as
+   * covering the two audit-derived sections as well.
+   */
+  const aiSections = [
+    summary.overallSummary !== null ? "Overall summary" : null,
+    summary.keyFindings.length > 0 ? "What we found" : null,
+    summary.recommendations.length > 0 ? "How to improve" : null,
+  ].filter((name): name is string => name !== null);
+
   return (
     <section className={styles.aiPanel}>
       <p className={styles.aiPanelHeading}>{AI_SUMMARY_HEADING}</p>
@@ -1921,6 +1943,7 @@ function AiSummaryPanel({
       {summary.whatWeChecked.length > 0 && (
         <>
           <p className={styles.aiSubheading}>What we checked</p>
+          <p className={styles.aiSubLabel}>{AUDIT_DERIVED_LABEL}</p>
           <ul className={styles.aiList}>
             {summary.whatWeChecked.map((line) => (
               <li key={line}>{line}</li>
@@ -1961,6 +1984,7 @@ function AiSummaryPanel({
       {summary.nextSteps.length > 0 && (
         <>
           <p className={styles.aiSubheading}>Next steps</p>
+          <p className={styles.aiSubLabel}>{AUDIT_DERIVED_LABEL}</p>
           <ol className={styles.aiSteps}>
             {summary.nextSteps.map((step) => (
               <li key={step}>{step}</li>
@@ -1970,6 +1994,7 @@ function AiSummaryPanel({
       )}
 
       <p className={styles.aiPanelNote}>
+        {explained && aiSections.length > 0 && `AI-written: ${aiSections.join(", ")}. `}
         {explained ? AI_PROVENANCE : "Every finding below was measured and graded by this tool, and is unaffected."}
         {explained && answer.partial && ` ${rejectedNote(answer.rejectedCount) ?? ""}`}
         {/*

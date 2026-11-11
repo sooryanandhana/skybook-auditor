@@ -12,9 +12,9 @@
  * in a later checkpoint. Until then the report prints exactly what it printed
  * before, and these constants are covered by their own tests only.
  *
- * COMPANY CONFIRMATION. The Skybook section's claims, the phrase "your Skybook
- * contact" and the brand name must be confirmed by Skybook before any report
- * using them is given to a client.
+ * COMPANY CONFIRMATION (CP1 R2): CONFIRMED. Skybook has approved the Skybook
+ * section's marketing claims, the report contact wording ("your Skybook
+ * contact") and contact-field approach, and the exact brand name: Skybook.
  */
 
 // ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ export const AFFECTED_LIST_TRUNCATED = "Further affected pages are not listed.";
 export const NO_SITEMAP_SENTENCE = "No sitemap was found, so none was read.";
 
 // ---------------------------------------------------------------------------
-// The Skybook section [COMPANY: confirm before client use]
+// The Skybook section [COMPANY: confirmed, CP1 R2]
 // ---------------------------------------------------------------------------
 
 /** The printed heading. "How Skybook Can Help" is the section's internal name only. */
